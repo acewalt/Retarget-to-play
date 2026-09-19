@@ -34,11 +34,11 @@
         </div>
       </div>
 
-      <nav class="topnav" aria-label="Secciones">
-        <button class="nav-item active" type="button">Workspace</button>
-        <button class="nav-item" type="button">Mappings</button>
-        <button class="nav-item" type="button">Animations</button>
-        <button class="nav-item" type="button">Export</button>
+      <nav class="topnav" aria-label="Mesas de trabajo">
+        <button class="nav-item active" type="button" data-workspace="workspace">Workspace</button>
+        <button class="nav-item" type="button" data-workspace="mappings">Mappings</button>
+        <button class="nav-item" type="button" data-workspace="animations">Animations</button>
+        <button class="nav-item" type="button" data-workspace="export">Export</button>
       </nav>
 
       <div class="top-actions">
@@ -58,27 +58,27 @@
         </div>
 
         <ol class="steps-list">
-          <li id="stepSource" class="workflow-step active">
+          <li id="stepSource" class="workflow-step active" data-go-workspace="workspace">
             <span class="step-dot">1</span>
             <div><b>Import Source</b><small>Animación o mocap</small></div>
           </li>
-          <li id="stepTarget" class="workflow-step">
+          <li id="stepTarget" class="workflow-step" data-go-workspace="workspace">
             <span class="step-dot">2</span>
             <div><b>Import Target</b><small>Rig de destino</small></div>
           </li>
-          <li id="stepMap" class="workflow-step">
+          <li id="stepMap" class="workflow-step" data-go-workspace="mappings">
             <span class="step-dot">3</span>
             <div><b>Bone Map</b><small>Emparejar esqueletos</small></div>
           </li>
-          <li id="stepRetarget" class="workflow-step">
+          <li id="stepRetarget" class="workflow-step" data-go-workspace="workspace">
             <span class="step-dot">4</span>
             <div><b>Retarget FK</b><small>Transferir movimiento</small></div>
           </li>
-          <li id="stepIk" class="workflow-step">
+          <li id="stepIk" class="workflow-step" data-go-workspace="animations">
             <span class="step-dot">5</span>
             <div><b>FK → IK</b><small>Bake de controles</small></div>
           </li>
-          <li id="stepExport" class="workflow-step">
+          <li id="stepExport" class="workflow-step" data-go-workspace="export">
             <span class="step-dot">6</span>
             <div><b>Export</b><small>Guardar nueva Action</small></div>
           </li>
@@ -91,9 +91,9 @@
         </div>
       </aside>
 
-      <section class="main-workspace">
+      <section id="mainWorkspace" class="main-workspace" data-view="workspace">
         <section class="retarget-stage">
-          <article class="viewport-card">
+          <article class="viewport-card source-card">
             <header class="card-head">
               <div><span class="eyebrow">SOURCE</span><h2>Source Animation</h2></div>
               <span class="format-badge">FBX</span>
@@ -120,12 +120,12 @@
             <div class="bridge-arrow">→</div>
             <button id="applyRetarget" class="retarget-button" type="button" disabled>
               <span class="spark">✦</span>
-              <span><b>Retarget Animation</b><small>Aplicar FK</small></span>
+              <span><b>Transfer</b></span>
             </button>
-            <small>Transfiere el movimiento del Source al Target</small>
+            <small>Source → Target</small>
           </div>
 
-          <article class="viewport-card">
+          <article class="viewport-card target-card">
             <header class="card-head">
               <div><span class="eyebrow">TARGET</span><h2>Target Character</h2></div>
               <span class="format-badge">FBX</span>
@@ -147,37 +147,49 @@
               </label>
             </div>
           </article>
+
+          <article id="exportWorkbench" class="export-workbench">
+            <div class="export-workbench-icon">⇩</div>
+            <span class="eyebrow">FINAL OUTPUT</span>
+            <h2>Export Workspace</h2>
+            <p>Revisa la Action generada y exporta el Target conservando su rig original.</p>
+            <div id="exportWorkbenchStats" class="export-workbench-stats">Aún no hay una Action lista.</div>
+            <button id="exportWorkspaceButton" type="button" class="soft-primary">Ir a exportar</button>
+          </article>
         </section>
 
-        <section class="mapping-card">
-          <header class="section-head">
+        <section id="mappingCard" class="mapping-card collapsed">
+          <header class="section-head mapping-head">
             <div><span class="eyebrow">SKELETON MATCHING</span><h2>Bone Mapping</h2></div>
             <div class="mapping-summary">
               <div class="progress-shell"><div id="mapProgressFill" class="progress-fill"></div></div>
               <strong id="mapPercent">0%</strong>
               <span id="compatibilityBadge" class="compatibility-badge pending">Pendiente</span>
+              <button id="toggleMapping" class="collapse-button" type="button"><span id="mappingToggleIcon">⌄</span><span id="mappingToggleLabel">Expandir</span></button>
             </div>
           </header>
 
-          <div class="mapping-toolbar">
-            <div class="search-field"><span>⌕</span><input id="mapSearch" placeholder="Buscar source o target…" /></div>
-            <button id="autoMatch" class="soft-primary" type="button">✦ Auto-Map All</button>
-            <button id="loadPreset" type="button">Cargar preset</button>
-            <button id="addPair" type="button">+ Par</button>
-            <button id="clearMap" class="danger-ghost" type="button">Clear</button>
-          </div>
+          <div class="mapping-expandable">
+            <div class="mapping-toolbar">
+              <div class="search-field"><span>⌕</span><input id="mapSearch" placeholder="Buscar source o target…" /></div>
+              <button id="autoMatch" class="soft-primary" type="button">✦ Auto-Map All</button>
+              <button id="loadPreset" type="button">Cargar preset</button>
+              <button id="addPair" type="button">+ Par</button>
+              <button id="clearMap" class="danger-ghost" type="button">Clear</button>
+            </div>
 
-          <div class="mapping-table-head">
-            <span>Source Bone</span><span></span><span>Target Bone</span><span>Acción</span>
-          </div>
+            <div class="mapping-table-head">
+              <span>Source Bone</span><span></span><span>Target Bone</span><span>Acción</span>
+            </div>
 
-          <div class="mapping-content">
-            <div id="boneMap" class="bone-map empty">Carga ambos FBX.</div>
-          </div>
+            <div class="mapping-content">
+              <div id="boneMap" class="bone-map empty">Carga ambos FBX.</div>
+            </div>
 
-          <div class="mapping-footer">
-            <span id="mapCount">0 / 0 válidos</span>
-            <span>Los nombres originales del FBX se preservan al exportar.</span>
+            <div class="mapping-footer">
+              <span id="mapCount">0 / 0 válidos</span>
+              <span>Los nombres originales del FBX se preservan al exportar.</span>
+            </div>
           </div>
         </section>
 
@@ -251,14 +263,21 @@
               <div><span>Bake</span><b>Animation</b></div>
               <div><span>Rig</span><b>Target original</b></div>
             </div>
-            <button id="exportFbx" class="export-button" type="button" disabled><span>⇩</span> Exportar Target FBX + Action</button>
-            <div class="stats" id="stats">Sin retarget generado.</div>
           </section>
 
           <details class="diagnostics">
             <summary>Diagnóstico técnico</summary>
             <pre id="log">Listo.</pre>
           </details>
+        </div>
+
+        <div class="export-sticky">
+          <div class="export-sticky-copy">
+            <span class="eyebrow">READY TO EXPORT</span>
+            <strong id="exportStickyStatus">Sin retarget generado</strong>
+          </div>
+          <button id="exportFbx" class="export-button" type="button" disabled><span>⇩</span> Exportar Target FBX + Action</button>
+          <div class="stats" id="stats">Sin retarget generado.</div>
         </div>
       </aside>
     </main>
