@@ -45,6 +45,6 @@ La conversión crea keyframes de transformación para los controles IK y los pol
 
 ## Ejecución
 
-No requiere build. `index.html`, `styles.css` y `app.js` funcionan como sitio estático y el workflow de GitHub Pages publica `main`.
+No requiere build. `index.html`, `styles.css` y `app.js` funcionan como sitio estático y GitHub Pages puede servirlos directamente desde `main`.
 
 Los FBX seleccionados se procesan en el navegador; la página no los sube a un servidor propio.
