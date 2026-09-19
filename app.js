@@ -13,6 +13,12 @@ const viewportWhiteMaterial = new THREE.MeshStandardMaterial({
   side: THREE.DoubleSide
 });
 
+// Los FBX de Blender/Mixamo/CloudRig suelen venir expresados en centímetros.
+// Three.js trabaja de forma práctica en metros para esta herramienta.
+// IMPORTANTE: esta escala se aplica en un wrapper de visualización/cálculo,
+// no modificando el Scale interno del armature ni de RIG-Sintel.
+const FBX_UNIT_TO_METERS = 0.01;
+
 const CLOUDRIG_PRESET = [
   ['Hips', 'FK-Hips'],
   ['Spine', 'FK-Spine'],
@@ -81,6 +87,8 @@ function makeSlot(kind) {
     kind,
     fileName: '',
     root: null,
+    displayRoot: null,
+    unitScale: FBX_UNIT_TO_METERS,
     bones: new Map(),
     rest: new Map(),
     animations: [],
@@ -175,8 +183,12 @@ function collectBones(root) {
   return bones;
 }
 
+function updateSlotWorld(slot) {
+  (slot.displayRoot || slot.root)?.updateMatrixWorld(true);
+}
+
 function captureRest(slot) {
-  slot.root.updateMatrixWorld(true);
+  updateSlotWorld(slot);
   slot.rest = new Map();
   for (const [name, bone] of slot.bones) {
     slot.rest.set(name, {
@@ -198,7 +210,16 @@ function restoreRest(slot) {
     b.quaternion.copy(r.quaternion);
     b.scale.copy(r.scale);
   }
-  slot.root.updateMatrixWorld(true);
+  updateSlotWorld(slot);
+}
+
+function createUnitNormalizedDisplayRoot(slot) {
+  const wrapper = new THREE.Group();
+  wrapper.name = `__FBX_UNIT_NORMALIZER_${slot.kind.toUpperCase()}__`;
+  wrapper.scale.setScalar(slot.unitScale);
+  wrapper.add(slot.root);
+  wrapper.updateMatrixWorld(true);
+  return wrapper;
 }
 
 function applyWhiteViewportMaterial(slot) {
@@ -237,7 +258,12 @@ function clearSlot(slot, view) {
   if (slot.helper) view.scene.remove(slot.helper);
   if (slot.root) {
     restoreOriginalMaterials(slot);
-    view.scene.remove(slot.root);
+    if (slot.displayRoot) {
+      view.scene.remove(slot.displayRoot);
+      slot.displayRoot.remove(slot.root);
+    } else {
+      view.scene.remove(slot.root);
+    }
     disposeObject(slot.root);
   }
   slot.originalMaterials?.clear?.();
@@ -257,11 +283,18 @@ async function loadFbx(file, slot, view) {
   slot.animations = slot.kind === 'source' ? loadedAnimations : [];
   root.animations = slot.kind === 'source' ? loadedAnimations : [];
 
+  // Normalización FBX cm → metros ANTES de bounds, rest pose y retarget.
+  // Se usa un wrapper externo para preservar intactos:
+  // - Scale/Rotation originales del armature
+  // - jerarquía
+  // - bind / inverse-bind matrices
+  slot.displayRoot = createUnitNormalizedDisplayRoot(slot);
+
   // El viewport siempre muestra el modelo como "clay" blanco:
   // sin texturas ni materiales del FBX. Los materiales originales se
   // conservan internamente para que la exportación del Target no los pierda.
   applyWhiteViewportMaterial(slot);
-  view.scene.add(root);
+  view.scene.add(slot.displayRoot);
 
   slot.helper = new THREE.SkeletonHelper(root);
   slot.helper.material.depthTest = false;
@@ -270,20 +303,20 @@ async function loadFbx(file, slot, view) {
   view.scene.add(slot.helper);
 
   captureRest(slot);
-  fitView(view, root);
+  fitView(view, slot.displayRoot);
 
   if (slot.kind === 'source') {
     $('sourceLabel').textContent = `${file.name} · ${slot.bones.size} huesos`;
     fillSourceClips();
     const inferred = inferPrefix(slot);
     if (inferred) $('sourcePrefix').value = inferred;
-    log(`Source cargado: ${file.name}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions.`);
+    log(`Source cargado: ${file.name}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions; FBX unit 1 cm → ×${slot.unitScale.toFixed(4)} m.`);
   } else {
     $('targetLabel').textContent = `${file.name} · ${slot.bones.size} huesos`;
     $('targetAnimNotice').textContent = loadedAnimations.length
       ? `Target cargado con ${loadedAnimations.length} Action(s): se ignoraron y no se reutilizarán.`
       : 'Target sin Actions de entrada. Correcto.';
-    log(`Target cargado: ${file.name}; ${slot.bones.size} huesos. Actions de entrada descartadas: ${loadedAnimations.length}.`);
+    log(`Target cargado: ${file.name}; ${slot.bones.size} huesos. Actions de entrada descartadas: ${loadedAnimations.length}; FBX unit 1 cm → ×${slot.unitScale.toFixed(4)} m.`);
   }
 
   state.fkClip = state.ikOnlyClip = state.deformPreviewClip = state.exportClip = state.targetPreviewClip = null;
@@ -490,15 +523,29 @@ function boneDepth(bone) {
 }
 
 function skeletonScaleFor(map) {
-  const hipPair = map.find(p => /hips$/i.test(p.source.replace(/^.*:/, '')));
-  if (!hipPair) return 1;
+  // Auto-scale anatómico: usa landmarks equivalentes del cuerpo, no bounds
+  // del armature completo. CloudRig tiene controles IK/POLE muy alejados
+  // que no deben participar en la medición.
+  const srcHips = findSemanticBone(state.source, 'Hips');
   const srcHead = findSemanticBone(state.source, 'Head');
-  const tgtHead = map.find(p => /FK-Head$/i.test(p.target))?.target || findSemanticBone(state.target, 'Head');
-  if (!srcHead || !tgtHead) return 1;
 
-  const sHip = state.source.rest.get(hipPair.source)?.worldPos;
+  // En Target preferimos huesos anatómicos/deformantes reales.
+  let tgtHips = findSemanticBone(state.target, 'Hips');
+  let tgtHead = findSemanticBone(state.target, 'Head');
+
+  // Fallback únicamente si ese FBX no contiene los deform bones esperados.
+  if (!tgtHips) {
+    tgtHips = map.find(p => /FK-Hips$/i.test(originalObjectName(state.target.bones.get(p.target)) || p.target))?.target || null;
+  }
+  if (!tgtHead) {
+    tgtHead = map.find(p => /FK-Head$/i.test(originalObjectName(state.target.bones.get(p.target)) || p.target))?.target || null;
+  }
+
+  if (!srcHips || !srcHead || !tgtHips || !tgtHead) return 1;
+
+  const sHip = state.source.rest.get(srcHips)?.worldPos;
   const sHead = state.source.rest.get(srcHead)?.worldPos;
-  const tHip = state.target.rest.get(hipPair.target)?.worldPos;
+  const tHip = state.target.rest.get(tgtHips)?.worldPos;
   const tHead = state.target.rest.get(tgtHead)?.worldPos;
   if (!sHip || !sHead || !tHip || !tHead) return 1;
 
@@ -545,7 +592,7 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   for (const time of times) {
     restoreRest(src);
     src.mixer.setTime(time);
-    src.root.updateMatrixWorld(true);
+    updateSlotWorld(src);
     restoreRest(tgt);
 
     for (const pair of ordered) {
@@ -582,7 +629,7 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
         tb.position.copy(tr.position);
       }
       tb.scale.copy(tr.scale);
-      tgt.root.updateMatrixWorld(true);
+      updateSlotWorld(tgt);
 
       const d = data.get(pair.target);
       d.q.push(tb.quaternion.x, tb.quaternion.y, tb.quaternion.z, tb.quaternion.w);
@@ -728,7 +775,7 @@ function bakeIkFromFk() {
   for (const time of times) {
     restoreRest(tgt);
     tgt.mixer.setTime(time);
-    tgt.root.updateMatrixWorld(true);
+    updateSlotWorld(tgt);
 
     for (const chain of chains) {
       const a = tgt.bones.get(chain.a);
@@ -740,13 +787,13 @@ function bakeIkFromFk() {
       ik.position.copy(desiredControlPosition(c, ik));
       ik.quaternion.copy(desiredControlQuaternion(c, ik));
       ik.scale.copy(tgt.rest.get(ik.name).scale);
-      tgt.root.updateMatrixWorld(true);
+      updateSlotWorld(tgt);
 
       const poleWorld = computePolePoint(a, b, c, pole);
       pole.position.copy(worldToLocalPoint(pole, poleWorld));
       pole.quaternion.copy(tgt.rest.get(pole.name).quaternion);
       pole.scale.copy(tgt.rest.get(pole.name).scale);
-      tgt.root.updateMatrixWorld(true);
+      updateSlotWorld(tgt);
 
       const id = data.get(chain.ik);
       id.p.push(ik.position.x, ik.position.y, ik.position.z);
@@ -845,6 +892,14 @@ async function exportTargetFbx() {
     const exportClip = createOriginalNameExportClip(state.exportClip, state.target);
     const restoreRuntimeNames = temporarilyRestoreOriginalNames(state.target.root);
 
+    // El wrapper ×0.01 es solo para viewport/cálculo. Se desacopla al exportar,
+    // de modo que el FBX conserva el Scale/Rotation y la jerarquía originales
+    // del Target en lugar de hornear otra escala sobre RIG-Sintel.
+    const displayParent = state.target.root.parent === state.target.displayRoot
+      ? state.target.displayRoot
+      : null;
+    if (displayParent) displayParent.remove(state.target.root);
+
     // El blanco es únicamente de viewport. Para exportar se restauran
     // temporalmente los materiales originales del FBX Target.
     restoreOriginalMaterials(state.target);
@@ -873,6 +928,12 @@ async function exportTargetFbx() {
     } finally {
       state.target.root.animations = oldAnimations;
       restoreRuntimeNames();
+
+      if (displayParent) {
+        displayParent.add(state.target.root);
+        displayParent.updateMatrixWorld(true);
+      }
+
       applyWhiteViewportMaterial(state.target);
     }
 
