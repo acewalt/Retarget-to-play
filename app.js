@@ -238,7 +238,7 @@ async function loadFbx(file, slot, view) {
   if (slot.kind === 'source') {
     $('sourceLabel').textContent = `${file.name} · ${slot.bones.size} huesos`;
     fillSourceClips();
-    const inferred = inferPrefix([...slot.bones.keys()]);
+    const inferred = inferPrefix(slot);
     if (inferred) $('sourcePrefix').value = inferred;
     log(`Source cargado: ${file.name}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions.`);
   } else {
@@ -258,9 +258,25 @@ async function loadFbx(file, slot, view) {
   if (state.source.root && state.target.root && $('preset').value === 'cloudrig-sintel') loadPreset();
 }
 
-function inferPrefix(names) {
-  const mixamo = names.find(n => /mixamorig/i.test(n) && n.includes(':'));
-  return mixamo ? mixamo.slice(0, mixamo.lastIndexOf(':') + 1) : '';
+function originalObjectName(object) {
+  return object?.userData?.originalName || object?.name || '';
+}
+
+function canonicalSemantic(name) {
+  let n = String(name || '').trim();
+  if (n.includes(':') || n.includes('|')) n = n.split(/[:|]/).pop();
+  n = n.replace(/^mixamorig\d*/i, '');
+  return n.replace(/[\[\].:/_\s-]/g, '').toLowerCase();
+}
+
+function inferPrefix(slot) {
+  for (const bone of slot.bones.values()) {
+    const original = originalObjectName(bone);
+    if (/mixamorig/i.test(original) && original.includes(':')) {
+      return original.slice(0, original.lastIndexOf(':') + 1);
+    }
+  }
+  return '';
 }
 
 function fillSourceClips() {
@@ -293,10 +309,27 @@ function setSourceClip(index) {
 
 function findSemanticBone(slot, semantic) {
   if (slot.bones.has(semantic)) return semantic;
+
+  const wanted = canonicalSemantic(semantic);
   const prefix = slot.kind === 'source' ? $('sourcePrefix').value.trim() : $('targetPrefix').value.trim();
-  if (prefix && slot.bones.has(prefix + semantic)) return prefix + semantic;
-  const lower = semantic.toLowerCase();
-  return [...slot.bones.keys()].find(n => n.replace(/^.*[:|]/, '').toLowerCase() === lower) || null;
+
+  for (const [loadedName, bone] of slot.bones) {
+    const original = originalObjectName(bone);
+
+    if (prefix && original === prefix + semantic) return loadedName;
+
+    const originalTail = original.split(/[:|]/).pop();
+    if (canonicalSemantic(originalTail) === wanted) return loadedName;
+    if (canonicalSemantic(original) === wanted) return loadedName;
+
+    // FBXLoader de Three.js elimina ":" y "." de los nombres.
+    // Este fallback reconoce, por ejemplo, mixamorig1:Hips -> mixamorig1Hips.
+    if (/mixamorig/i.test(loadedName) && canonicalSemantic(loadedName).endsWith(wanted)) {
+      return loadedName;
+    }
+  }
+
+  return null;
 }
 
 function loadPreset() {
@@ -314,12 +347,14 @@ function loadPreset() {
 }
 
 function normalizeName(name) {
-  return name
-    .replace(/^.*[:|]/, '')
-    .replace(/^(FK-|DEF-|STR-|P-STR-|ROOT-|SCALE-|IK-M-|IK-)/i, '')
-    .replace(/[._-]/g, '')
+  let n = String(name || '');
+  if (n.includes(':') || n.includes('|')) n = n.split(/[:|]/).pop();
+  n = n.replace(/^mixamorig\d*/i, '');
+  return n
+    .replace(/^(FK|DEF|STR|PSTR|ROOT|SCALE|IKM|IK)/i, '')
     .replace(/left/ig, 'l')
     .replace(/right/ig, 'r')
+    .replace(/[\[\].:/_\s-]/g, '')
     .toLowerCase();
 }
 
@@ -329,8 +364,11 @@ function autoMatch() {
   const used = new Set();
   const pairs = [];
   for (const src of state.source.bones.keys()) {
-    const sn = normalizeName(src);
-    const candidates = targets.filter(t => !used.has(t) && normalizeName(t) === sn);
+    const sn = normalizeName(originalObjectName(state.source.bones.get(src)) || src);
+    const candidates = targets.filter(t =>
+      !used.has(t) &&
+      normalizeName(originalObjectName(state.target.bones.get(t)) || t) === sn
+    );
     const preferred = candidates.find(t => /^FK-/i.test(t)) || candidates[0];
     if (preferred) {
       used.add(preferred);
@@ -380,7 +418,7 @@ function refreshMapUi() {
 
     const s = document.createElement('select');
     s.append(new Option('— Source —', ''));
-    sourceNames.forEach(n => s.add(new Option(n, n)));
+    sourceNames.forEach(n => s.add(new Option(originalObjectName(state.source.bones.get(n)) || n, n)));
     s.value = pair.source;
     s.onchange = () => { state.boneMap[index].source = s.value; refreshMapUi(); updateButtons(); };
 
@@ -390,7 +428,7 @@ function refreshMapUi() {
 
     const t = document.createElement('select');
     t.append(new Option('— Target —', ''));
-    targetNames.forEach(n => t.add(new Option(n, n)));
+    targetNames.forEach(n => t.add(new Option(originalObjectName(state.target.bones.get(n)) || n, n)));
     t.value = pair.target;
     t.onchange = () => { state.boneMap[index].target = t.value; refreshMapUi(); updateButtons(); };
 
@@ -717,6 +755,49 @@ function convertFkToIk() {
   }
 }
 
+function createOriginalNameExportClip(clip, slot) {
+  const nameMap = new Map();
+
+  slot.root.traverse((object) => {
+    const original = originalObjectName(object);
+    if (object.name && original && object.name !== original) {
+      nameMap.set(object.name, original);
+    }
+  });
+
+  const loadedNames = [...nameMap.keys()].sort((a, b) => b.length - a.length);
+  const tracks = clip.tracks.map((track) => {
+    const copy = track.clone();
+
+    for (const loadedName of loadedNames) {
+      if (track.name === loadedName || track.name.startsWith(loadedName + '.')) {
+        copy.name = nameMap.get(loadedName) + track.name.slice(loadedName.length);
+        break;
+      }
+    }
+
+    return copy;
+  });
+
+  return new THREE.AnimationClip(clip.name, clip.duration, tracks);
+}
+
+function temporarilyRestoreOriginalNames(root) {
+  const renamed = [];
+
+  root.traverse((object) => {
+    const original = originalObjectName(object);
+    if (original && object.name !== original) {
+      renamed.push([object, object.name]);
+      object.name = original;
+    }
+  });
+
+  return () => {
+    for (const [object, runtimeName] of renamed) object.name = runtimeName;
+  };
+}
+
 async function exportTargetFbx() {
   if (!state.target.root || !state.exportClip) return;
   try {
@@ -724,7 +805,9 @@ async function exportTargetFbx() {
     state.target.mixer?.stopAllAction();
     restoreRest(state.target);
     const oldAnimations = state.target.root.animations;
-    state.target.root.animations = [state.exportClip];
+    const exportClip = createOriginalNameExportClip(state.exportClip, state.target);
+    const restoreRuntimeNames = temporarilyRestoreOriginalNames(state.target.root);
+    state.target.root.animations = [exportClip];
 
     const exporter = new FBXExporter();
     const options = {
@@ -732,7 +815,7 @@ async function exportTargetFbx() {
       version: 7400,
       fps: Math.max(1, Math.min(120, Number($('fps').value) || 30)),
       includeAnimations: true,
-      animations: [state.exportClip],
+      animations: [exportClip],
       embedTextures: true,
       customProperties: true,
       creator: 'Retarget-to-play'
@@ -740,13 +823,16 @@ async function exportTargetFbx() {
 
     let bytes;
     try {
-      bytes = await exporter.parseAsync(state.target.root, options);
-    } catch (textureErr) {
-      log(`Export con texturas embebidas falló (${textureErr.message}). Reintentando sin embeber texturas…`);
-      bytes = await exporter.parseAsync(state.target.root, { ...options, embedTextures: false });
+      try {
+        bytes = await exporter.parseAsync(state.target.root, options);
+      } catch (textureErr) {
+        log(`Export con texturas embebidas falló (${textureErr.message}). Reintentando sin embeber texturas…`);
+        bytes = await exporter.parseAsync(state.target.root, { ...options, embedTextures: false });
+      }
+    } finally {
+      state.target.root.animations = oldAnimations;
+      restoreRuntimeNames();
     }
-
-    state.target.root.animations = oldAnimations;
 
     const blob = new Blob([bytes], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
@@ -761,7 +847,7 @@ async function exportTargetFbx() {
 
     playTargetClip(state.targetPreviewClip);
     setStatus('FBX exportado', 'good');
-    log(`FBX exportado con el esqueleto del Target y Action "${state.exportClip.name}" (${state.exportClip.tracks.length} curvas).`);
+    log(`FBX exportado conservando los nombres originales del Target y Action "${exportClip.name}" (${exportClip.tracks.length} curvas).`);
   } catch (err) {
     console.error(err);
     setStatus('Error exportando FBX', 'bad');
