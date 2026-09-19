@@ -728,6 +728,9 @@ function applyRetarget() {
       state.deformPreviewClip = null;
     }
 
+    // La Action exportable sigue siendo SOLO FK.
+    // Si el usuario activa el proxy DEF, se mezcla únicamente en el mixer
+    // del navegador para poder ver la piel moverse sin constraints de Blender.
     state.targetPreviewClip = mergeClips('Preview_FK', [state.fkClip, state.deformPreviewClip]);
     playTargetClip(state.targetPreviewClip);
     state.playTime = 0;
@@ -735,7 +738,7 @@ function applyRetarget() {
     updateButtons();
     updateStats();
     setStatus('Retarget FK listo', 'good');
-    log(`Retarget FK generado: ${map.length} huesos mapeados, ${state.fkClip.tracks.length} curvas TRS, ${Number($('fps').value) || 30} FPS.`);
+    log(`Retarget FK generado: ${map.length} controles FK mapeados, ${state.fkClip.tracks.length} curvas TRS, ${Number($('fps').value) || 30} FPS. DEF en Action exportable: 0.`);
   } catch (err) {
     console.error(err);
     setStatus('Error de retarget', 'bad');
@@ -1009,7 +1012,13 @@ function updateStats() {
   }
   const fkBones = state.fkClip ? new Set(state.fkClip.tracks.map(t => t.name.split('.').slice(0, -1).join('.'))).size : 0;
   const ikBones = state.ikOnlyClip ? new Set(state.ikOnlyClip.tracks.map(t => t.name.split('.').slice(0, -1).join('.'))).size : 0;
-  $('stats').textContent = `Action salida: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nHuesos FK animados: ${fkBones}\nControles IK/POLE animados: ${ikBones}`;
+  const defTracks = state.exportClip.tracks.filter(t => {
+    const node = t.name.split('.').slice(0, -1).join('.');
+    const bone = state.target.bones.get(node);
+    const original = originalObjectName(bone) || node;
+    return /^DEF-/i.test(original);
+  }).length;
+  $('stats').textContent = `Action salida: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nControles FK animados: ${fkBones}\nControles IK/POLE animados: ${ikBones}\nTracks DEF exportados: ${defTracks}`;
 }
 
 function updateButtons() {
