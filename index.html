@@ -19,7 +19,7 @@
   <header class="topbar">
     <div>
       <strong>Retarget-to-play</strong>
-      <span>FBX → Bone Map → FK Retarget → FK→IK → FBX</span>
+      <span>WaltFBX → Bone Map → FK Retarget → WaltRig FK→DEF → FK→IK → FBX</span>
     </div>
     <div id="globalStatus" class="status-pill">LOCAL · sin subida</div>
   </header>
@@ -69,6 +69,7 @@
         <label class="field-label" for="sourceClip">Action / clip del Source</label>
         <select id="sourceClip"><option value="">Carga un Source</option></select>
         <p class="hint" id="targetAnimNotice">El Target se cargará sin reproducir ni reutilizar sus Actions.</p>
+        <p class="hint">Motor: <b>WaltFBX v0.1</b> · lee unidades, Objects/Models y Connections del FBX; WaltRig reconstruye en runtime las relaciones de control necesarias para el preview.</p>
       </section>
 
       <section class="panel-section">
@@ -99,9 +100,10 @@
       <section class="panel-section">
         <h2>3. Retargeting FK</h2>
         <label class="check"><input id="autoScale" type="checkbox" checked /> Auto-scale de root motion al Target</label>
-        <label class="check"><input id="previewDeform" type="checkbox" /> Preview de malla con proxy DEF (solo navegador · NO se exporta)</label>
+        <label class="check"><input id="previewDeform" type="checkbox" checked /> Simular FK → DEF del CloudRig en viewport</label>
+        <label class="check"><input id="showArmatures" type="checkbox" checked /> Mostrar armaduras lógicas</label>
         <button id="applyRetarget" class="primary" disabled>Aplicar Retargeting FK</button>
-        <p class="hint">La Action generada por este paso anima los controles FK mapeados. Los DEF solo pueden usarse como proxy visual opcional en el navegador y nunca se añaden a la Action exportable.</p>
+        <p class="hint">La Action sigue animando los controles FK. WaltRig hace que los DEF sigan esos controles en tiempo real para mover la malla en el navegador, sin hornear tracks DEF en la Action exportable.</p>
       </section>
 
       <section class="panel-section">
