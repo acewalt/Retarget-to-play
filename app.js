@@ -6,6 +6,13 @@ import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new FBXLoader();
 
+const viewportWhiteMaterial = new THREE.MeshStandardMaterial({
+  color: 0xffffff,
+  roughness: 0.92,
+  metalness: 0,
+  side: THREE.DoubleSide
+});
+
 const CLOUDRIG_PRESET = [
   ['Hips', 'FK-Hips'],
   ['Spine', 'FK-Spine'],
@@ -80,7 +87,8 @@ function makeSlot(kind) {
     mixer: null,
     action: null,
     activeClip: null,
-    helper: null
+    helper: null,
+    originalMaterials: new Map()
   };
 }
 
@@ -193,11 +201,33 @@ function restoreRest(slot) {
   slot.root.updateMatrixWorld(true);
 }
 
+function applyWhiteViewportMaterial(slot) {
+  if (!slot.root) return;
+
+  slot.root.traverse((object) => {
+    if (!object.isMesh && !object.isSkinnedMesh) return;
+
+    if (!slot.originalMaterials.has(object)) {
+      slot.originalMaterials.set(object, object.material);
+    }
+
+    object.material = viewportWhiteMaterial;
+  });
+}
+
+function restoreOriginalMaterials(slot) {
+  if (!slot?.originalMaterials) return;
+
+  for (const [object, material] of slot.originalMaterials) {
+    object.material = material;
+  }
+}
+
 function disposeObject(root) {
   root?.traverse((o) => {
     o.geometry?.dispose?.();
     if (Array.isArray(o.material)) o.material.forEach(m => m.dispose?.());
-    else o.material?.dispose?.();
+    else if (o.material !== viewportWhiteMaterial) o.material?.dispose?.();
   });
 }
 
@@ -206,9 +236,11 @@ function clearSlot(slot, view) {
   if (slot.mixer) slot.mixer.stopAllAction();
   if (slot.helper) view.scene.remove(slot.helper);
   if (slot.root) {
+    restoreOriginalMaterials(slot);
     view.scene.remove(slot.root);
     disposeObject(slot.root);
   }
+  slot.originalMaterials?.clear?.();
   Object.assign(slot, makeSlot(slot.kind));
 }
 
@@ -224,6 +256,11 @@ async function loadFbx(file, slot, view) {
   slot.bones = collectBones(root);
   slot.animations = slot.kind === 'source' ? loadedAnimations : [];
   root.animations = slot.kind === 'source' ? loadedAnimations : [];
+
+  // El viewport siempre muestra el modelo como "clay" blanco:
+  // sin texturas ni materiales del FBX. Los materiales originales se
+  // conservan internamente para que la exportación del Target no los pierda.
+  applyWhiteViewportMaterial(slot);
   view.scene.add(root);
 
   slot.helper = new THREE.SkeletonHelper(root);
@@ -807,6 +844,10 @@ async function exportTargetFbx() {
     const oldAnimations = state.target.root.animations;
     const exportClip = createOriginalNameExportClip(state.exportClip, state.target);
     const restoreRuntimeNames = temporarilyRestoreOriginalNames(state.target.root);
+
+    // El blanco es únicamente de viewport. Para exportar se restauran
+    // temporalmente los materiales originales del FBX Target.
+    restoreOriginalMaterials(state.target);
     state.target.root.animations = [exportClip];
 
     const exporter = new FBXExporter();
@@ -832,6 +873,7 @@ async function exportTargetFbx() {
     } finally {
       state.target.root.animations = oldAnimations;
       restoreRuntimeNames();
+      applyWhiteViewportMaterial(state.target);
     }
 
     const blob = new Blob([bytes], { type: 'application/octet-stream' });
