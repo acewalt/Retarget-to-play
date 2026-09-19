@@ -40,11 +40,11 @@ const LOGICAL_CHAINS = {
     ['Hips', 'RightUpLeg', 'RightLeg', 'RightFoot', 'RightToeBase']
   ],
   cloudrig: [
-    ['FK-Hips', 'FK-Spine', 'FK-Chest', 'FK-Neck', 'FK-Head'],
-    ['FK-Chest', 'FK-Shoulder.L', 'FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L'],
-    ['FK-Chest', 'FK-Shoulder.R', 'FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R'],
-    ['FK-Hips', 'FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L', 'FK-Toes.L'],
-    ['FK-Hips', 'FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R', 'FK-Toes.R']
+    ['DEF-Hips', 'DEF-Spine', 'DEF-Chest', 'DEF-Neck', 'DEF-Head'],
+    ['DEF-Chest', 'DEF-Shoulder.L', 'DEF-UpperArm_1.L', 'DEF-Forearm_1.L', 'DEF-Hand.L'],
+    ['DEF-Chest', 'DEF-Shoulder.R', 'DEF-UpperArm_1.R', 'DEF-Forearm_1.R', 'DEF-Hand.R'],
+    ['DEF-Hips', 'DEF-Thigh_1.L', 'DEF-Knee_1.L', 'DEF-Foot.L', 'DEF-Toes.L'],
+    ['DEF-Hips', 'DEF-Thigh_1.R', 'DEF-Knee_1.R', 'DEF-Foot.R', 'DEF-Toes.R']
   ]
 };
 
@@ -431,10 +431,12 @@ export class WaltCloudRigRuntime {
 
       driver.getWorldQuaternion(qDriverCurrent);
 
-      // Mismo cambio angular del FK respecto a su rest, pero aplicado
-      // sobre la base de rest del DEF correspondiente.
-      qRelative.copy(dr.worldQuaternion).invert().multiply(qDriverCurrent).normalize();
-      qDesiredWorld.copy(rr.worldQuaternion).multiply(qRelative).normalize();
+      // Copiamos el cambio GLOBAL del control FK respecto a su rest.
+      // FK y DEF pueden tener ejes locales distintos; por eso NO usamos
+      // inverse(rest) * current. El delta world conserva la dirección
+      // anatómica que vemos en el viewport.
+      qRelative.copy(qDriverCurrent).multiply(dr.worldQuaternion.clone().invert()).normalize();
+      qDesiredWorld.copy(qRelative).multiply(rr.worldQuaternion).normalize();
 
       if (driven.parent) {
         driven.parent.getWorldQuaternion(qParentWorld);
@@ -446,11 +448,7 @@ export class WaltCloudRigRuntime {
 
       if (binding.translate) {
         driver.getWorldPosition(pDriverCurrent);
-        const deltaLocal = pDriverCurrent.clone()
-          .sub(dr.worldPosition)
-          .applyQuaternion(dr.worldQuaternion.clone().invert());
-
-        const deltaWorld = deltaLocal.applyQuaternion(rr.worldQuaternion);
+        const deltaWorld = pDriverCurrent.clone().sub(dr.worldPosition);
         pDesiredWorld.copy(rr.worldPosition).add(deltaWorld);
         pDesiredLocal.copy(pDesiredWorld);
 
