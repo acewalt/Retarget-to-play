@@ -54,7 +54,9 @@ const state = {
   playTime: 0,
   lastFrame: performance.now(),
   cameraSyncLock: false,
-  exported: false
+  exported: false,
+  workspaceView: 'workspace',
+  workspaceMappingCollapsed: true
 };
 
 function makeSlot(kind) {
@@ -1026,10 +1028,16 @@ async function exportTargetFbx() {
 }
 
 function updateStats() {
+  const sticky = $('exportStickyStatus');
+  const workbench = $('exportWorkbenchStats');
+
   if (!state.exportClip) {
     $('stats').textContent = 'Sin retarget generado.';
+    if (sticky) sticky.textContent = 'Sin retarget generado';
+    if (workbench) workbench.textContent = 'Aún no hay una Action lista. Aplica Transfer primero.';
     return;
   }
+
   const fkBones = state.fkClip ? new Set(state.fkClip.tracks.map(t => t.name.split('.').slice(0, -1).join('.'))).size : 0;
   const ikBones = state.ikOnlyClip ? new Set(state.ikOnlyClip.tracks.map(t => t.name.split('.').slice(0, -1).join('.'))).size : 0;
   const defTracks = state.exportClip.tracks.filter(t => {
@@ -1038,7 +1046,64 @@ function updateStats() {
     const original = originalObjectName(bone) || node;
     return /^DEF-/i.test(original);
   }).length;
-  $('stats').textContent = `Action salida: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nControles FK animados: ${fkBones}\nControles IK/POLE animados: ${ikBones}\nTracks DEF exportados: ${defTracks}`;
+
+  const summary = `Action: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nFK: ${fkBones}\nIK/POLE: ${ikBones}\nDEF exportados: ${defTracks}`;
+  $('stats').textContent = summary;
+  if (sticky) sticky.textContent = `${state.exportClip.name} · ${state.exportClip.duration.toFixed(2)} s`;
+  if (workbench) workbench.textContent = summary;
+}
+
+function setMappingCollapsed(collapsed, remember = true) {
+  const card = $('mappingCard');
+  if (!card) return;
+
+  const value = !!collapsed;
+  card.classList.toggle('collapsed', value);
+
+  if (remember && state.workspaceView === 'workspace') {
+    state.workspaceMappingCollapsed = value;
+  }
+
+  const label = $('mappingToggleLabel');
+  const icon = $('mappingToggleIcon');
+  if (label) label.textContent = value ? 'Expandir' : 'Colapsar';
+  if (icon) icon.textContent = value ? '⌄' : '⌃';
+}
+
+function setWorkspaceView(view) {
+  const allowed = new Set(['workspace', 'mappings', 'animations', 'export']);
+  const next = allowed.has(view) ? view : 'workspace';
+  state.workspaceView = next;
+
+  const workspace = $('mainWorkspace');
+  if (workspace) workspace.dataset.view = next;
+
+  document.querySelectorAll('[data-workspace]').forEach(button => {
+    button.classList.toggle('active', button.dataset.workspace === next);
+  });
+
+  if (next === 'mappings') {
+    setMappingCollapsed(false, false);
+  } else if (next === 'workspace') {
+    setMappingCollapsed(state.workspaceMappingCollapsed, false);
+  }
+
+  requestAnimationFrame(() => {
+    sourceView.renderer.setSize(
+      Math.max(1, sourceView.container.clientWidth),
+      Math.max(1, sourceView.container.clientHeight),
+      false
+    );
+    targetView.renderer.setSize(
+      Math.max(1, targetView.container.clientWidth),
+      Math.max(1, targetView.container.clientHeight),
+      false
+    );
+    sourceView.camera.aspect = Math.max(1, sourceView.container.clientWidth) / Math.max(1, sourceView.container.clientHeight);
+    targetView.camera.aspect = Math.max(1, targetView.container.clientWidth) / Math.max(1, targetView.container.clientHeight);
+    sourceView.camera.updateProjectionMatrix();
+    targetView.camera.updateProjectionMatrix();
+  });
 }
 
 function setWorkflowStep(id, mode) {
@@ -1087,6 +1152,7 @@ function updateButtons() {
   $('applyRetarget').disabled = !ready;
   $('convertIk').disabled = !state.fkClip;
   $('exportFbx').disabled = !state.exportClip;
+  if ($('exportWorkspaceButton')) $('exportWorkspaceButton').disabled = !state.exportClip;
   updateWorkflowUI();
 }
 
@@ -1147,6 +1213,20 @@ $('targetPrefix').onchange = () => $('preset').value === 'cloudrig-sintel' && lo
 $('applyRetarget').onclick = applyRetarget;
 $('convertIk').onclick = convertFkToIk;
 $('exportFbx').onclick = exportTargetFbx;
+$('exportWorkspaceButton').onclick = exportTargetFbx;
+
+$('toggleMapping').onclick = () => {
+  if (state.workspaceView === 'mappings') return;
+  setMappingCollapsed(!$('mappingCard').classList.contains('collapsed'));
+};
+
+document.querySelectorAll('[data-workspace]').forEach(button => {
+  button.onclick = () => setWorkspaceView(button.dataset.workspace);
+});
+
+document.querySelectorAll('[data-go-workspace]').forEach(step => {
+  step.onclick = () => setWorkspaceView(step.dataset.goWorkspace);
+});
 
 $('keepFk').onchange = () => {
   if (!state.ikOnlyClip) return;
@@ -1218,6 +1298,9 @@ function animate(now) {
   targetView.renderer.render(targetView.scene, targetView.camera);
 }
 
+setWorkspaceView('workspace');
+setMappingCollapsed(true, false);
+updateStats();
 updateWorkflowUI();
 requestAnimationFrame(animate);
 log(`Retarget-to-play listo · WaltFBX v${WALT_FBX_VERSION}. Los FBX se procesan localmente en el navegador.`);
