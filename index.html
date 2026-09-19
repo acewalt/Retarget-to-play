@@ -99,16 +99,16 @@
       <section class="panel-section">
         <h2>3. Retargeting FK</h2>
         <label class="check"><input id="autoScale" type="checkbox" checked /> Auto-scale de root motion al Target</label>
-        <label class="check"><input id="previewDeform" type="checkbox" checked /> Preview adicional sobre huesos deform (no se exporta)</label>
+        <label class="check"><input id="previewDeform" type="checkbox" /> Preview de malla con proxy DEF (solo navegador · NO se exporta)</label>
         <button id="applyRetarget" class="primary" disabled>Aplicar Retargeting FK</button>
-        <p class="hint">Cada hueso FK mapeado recibe curvas TRS. La Action del Target de entrada se descarta; la salida usa una Action nueva.</p>
+        <p class="hint">La Action generada por este paso anima los controles FK mapeados. Los DEF solo pueden usarse como proxy visual opcional en el navegador y nunca se añaden a la Action exportable.</p>
       </section>
 
       <section class="panel-section">
         <h2>4. Convertir FK → IK</h2>
         <label class="check"><input id="keepFk" type="checkbox" checked /> Mantener también las curvas FK en la salida</label>
         <button id="convertIk" disabled>Convertir FK → IK</button>
-        <p class="hint">Genera curvas para IK-Hand.L/R, IK-Foot.L/R y los POLE de brazos/piernas a partir del movimiento FK. El switch IK/FK específico de Blender puede requerir activarlo en el rig original.</p>
+        <p class="hint">Genera curvas para IK-Hand.L/R, IK-Foot.L/R y los POLE de brazos/piernas a partir del movimiento FK. La salida sigue siendo una Action de controles FK/IK; no anima DEF. El switch IK/FK específico de Blender puede requerir activarlo en el rig original.</p>
       </section>
 
       <section class="panel-section">
