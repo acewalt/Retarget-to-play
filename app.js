@@ -53,7 +53,8 @@ const state = {
   playing: false,
   playTime: 0,
   lastFrame: performance.now(),
-  cameraSyncLock: false
+  cameraSyncLock: false,
+  exported: false
 };
 
 function makeSlot(kind) {
@@ -89,9 +90,20 @@ function setStatus(text, type = 'normal') {
   $('globalStatus').style.borderColor = type === 'bad' ? '#7c3434' : type === 'good' ? '#315e3e' : '#3a4854';
 }
 
+function currentTheme() {
+  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+}
+
+function viewportPalette(theme = currentTheme()) {
+  return theme === 'dark'
+    ? { background: 0x111821, gridCenter: 0x3b4a5f, grid: 0x273241 }
+    : { background: 0xe9eef5, gridCenter: 0xaab8cb, grid: 0xcbd5e3 };
+}
+
 function createViewport(container) {
   const scene = new THREE.Scene();
-  scene.background = new THREE.Color(0x0d1217);
+  const palette = viewportPalette();
+  scene.background = new THREE.Color(palette.background);
   const camera = new THREE.PerspectiveCamera(38, 1, 0.01, 5000);
   camera.position.set(3, 2, 5);
   const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -101,7 +113,7 @@ function createViewport(container) {
   const controls = new OrbitControls(camera, renderer.domElement);
   controls.enableDamping = true;
   controls.dampingFactor = 0.08;
-  const grid = new THREE.GridHelper(20, 20, 0x28343e, 0x1b242c);
+  const grid = new THREE.GridHelper(20, 20, palette.gridCenter, palette.grid);
   scene.add(grid);
   scene.add(new THREE.HemisphereLight(0xffffff, 0x24303a, 2.4));
   const dir = new THREE.DirectionalLight(0xffffff, 2.2);
@@ -117,11 +129,25 @@ function createViewport(container) {
   };
   new ResizeObserver(resize).observe(container);
   resize();
-  return { scene, camera, renderer, controls, container };
+  return { scene, camera, renderer, controls, container, grid };
 }
 
 const sourceView = createViewport($('sourceViewport'));
 const targetView = createViewport($('targetViewport'));
+
+function applyViewportTheme(view, theme = currentTheme()) {
+  const palette = viewportPalette(theme);
+  view.scene.background.setHex(palette.background);
+
+  if (view.grid) {
+    view.scene.remove(view.grid);
+    view.grid.geometry?.dispose?.();
+    view.grid.material?.dispose?.();
+  }
+
+  view.grid = new THREE.GridHelper(20, 20, palette.gridCenter, palette.grid);
+  view.scene.add(view.grid);
+}
 
 function syncCamera(from, to) {
   if (!$('mirrorCameras').checked || state.cameraSyncLock) return;
@@ -298,6 +324,7 @@ async function loadFbx(file, slot, view) {
   }
 
   state.fkClip = state.ikOnlyClip = state.deformPreviewClip = state.exportClip = state.targetPreviewClip = null;
+  state.exported = false;
   refreshMapUi();
   updateButtons();
   updateTimelineBounds();
@@ -705,6 +732,7 @@ function applyRetarget() {
     state.fkClip = bakeRetarget(map, 'Retargeted_FK');
     state.ikOnlyClip = null;
     state.exportClip = state.fkClip;
+    state.exported = false;
 
     // No horneamos DEF. WaltRig Runtime reproduce en tiempo real dentro
     // del navegador la relación FK -> DEF que el FBX no contiene.
@@ -862,6 +890,7 @@ function convertFkToIk() {
     state.exportClip = $('keepFk').checked
       ? mergeClips('Retargeted_FK_IK', [state.fkClip, state.ikOnlyClip])
       : state.ikOnlyClip;
+    state.exported = false;
     state.targetPreviewClip = mergeClips('Preview_FK_IK', [state.fkClip, state.ikOnlyClip]);
     playTargetClip(state.targetPreviewClip);
     updateButtons();
@@ -985,6 +1014,8 @@ async function exportTargetFbx() {
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 
     playTargetClip(state.targetPreviewClip);
+    state.exported = true;
+    updateWorkflowUI();
     setStatus('FBX exportado', 'good');
     log(`FBX exportado conservando los nombres originales del Target y Action "${exportClip.name}" (${exportClip.tracks.length} curvas).`);
   } catch (err) {
@@ -1010,11 +1041,53 @@ function updateStats() {
   $('stats').textContent = `Action salida: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nControles FK animados: ${fkBones}\nControles IK/POLE animados: ${ikBones}\nTracks DEF exportados: ${defTracks}`;
 }
 
+function setWorkflowStep(id, mode) {
+  const el = $(id);
+  if (!el) return;
+  el.classList.remove('active', 'done');
+  if (mode) el.classList.add(mode);
+}
+
+function updateWorkflowUI() {
+  const hasSource = !!state.source.root;
+  const hasTarget = !!state.target.root;
+  const valid = validMap().length;
+  const total = state.boneMap.length;
+  const percent = hasSource && hasTarget && total > 0 ? Math.round((valid / total) * 100) : 0;
+  const mapReady = hasSource && hasTarget && valid > 0;
+
+  const fill = $('mapProgressFill');
+  const pct = $('mapPercent');
+  const badge = $('compatibilityBadge');
+  if (fill) fill.style.width = `${percent}%`;
+  if (pct) pct.textContent = `${percent}%`;
+
+  if (badge) {
+    badge.classList.toggle('good', percent >= 90);
+    badge.classList.toggle('pending', percent < 90);
+    badge.textContent = !hasSource || !hasTarget
+      ? 'Pendiente'
+      : percent >= 90
+        ? 'Compatible'
+        : valid > 0
+          ? 'Map parcial'
+          : 'Sin map';
+  }
+
+  setWorkflowStep('stepSource', hasSource ? 'done' : 'active');
+  setWorkflowStep('stepTarget', hasTarget ? 'done' : hasSource ? 'active' : null);
+  setWorkflowStep('stepMap', state.fkClip ? 'done' : mapReady ? 'active' : null);
+  setWorkflowStep('stepRetarget', state.fkClip ? 'done' : mapReady ? 'active' : null);
+  setWorkflowStep('stepIk', state.ikOnlyClip ? 'done' : state.fkClip ? 'active' : null);
+  setWorkflowStep('stepExport', state.exported ? 'done' : state.exportClip ? 'active' : null);
+}
+
 function updateButtons() {
   const ready = !!state.source.root && !!state.target.root && !!state.source.activeClip && validMap().length > 0;
   $('applyRetarget').disabled = !ready;
   $('convertIk').disabled = !state.fkClip;
   $('exportFbx').disabled = !state.exportClip;
+  updateWorkflowUI();
 }
 
 function updateTimelineBounds() {
@@ -1080,7 +1153,9 @@ $('keepFk').onchange = () => {
   state.exportClip = $('keepFk').checked
     ? mergeClips('Retargeted_FK_IK', [state.fkClip, state.ikOnlyClip])
     : state.ikOnlyClip;
+  state.exported = false;
   updateStats();
+  updateWorkflowUI();
 };
 
 $('previewDeform').onchange = () => {
@@ -1091,6 +1166,26 @@ $('previewDeform').onchange = () => {
 $('showArmatures').onchange = () => {
   updateRigOverlays();
 };
+
+function setTheme(theme, persist = true) {
+  const next = theme === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = next;
+  if (persist) localStorage.setItem('retarget-theme', next);
+
+  const icon = $('themeIcon');
+  const toggle = $('themeToggle');
+  if (icon) icon.textContent = next === 'dark' ? '☀' : '☾';
+  if (toggle) toggle.title = next === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro';
+
+  applyViewportTheme(sourceView, next);
+  applyViewportTheme(targetView, next);
+}
+
+$('themeToggle').onclick = () => {
+  setTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+};
+
+setTheme(currentTheme(), false);
 
 $('playPause').onclick = () => {
   state.playing = !state.playing;
@@ -1123,5 +1218,6 @@ function animate(now) {
   targetView.renderer.render(targetView.scene, targetView.camera);
 }
 
+updateWorkflowUI();
 requestAnimationFrame(animate);
 log(`Retarget-to-play listo · WaltFBX v${WALT_FBX_VERSION}. Los FBX se procesan localmente en el navegador.`);
