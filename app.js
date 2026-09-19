@@ -43,28 +43,36 @@ const CLOUDRIG_PRESET = [
   ['RightToeBase', 'FK-Toes.R']
 ];
 
+// Preview exclusivamente sobre los huesos que realmente deforman la malla
+// de CloudRig. Los FK son controles y, al cargar un FBX en Three.js,
+// sus constraints de Blender no existen; por eso animar solo FK mueve
+// "el esqueleto de controles" pero no necesariamente la piel.
 const PREVIEW_DEFORM_PRESET = [
-  ['Hips', 'Hips'],
-  ['Spine', 'Spine'],
-  ['Spine2', 'Chest'],
-  ['Neck', 'Neck'],
-  ['Head', 'Head'],
-  ['LeftShoulder', 'Shoulder.L'],
-  ['LeftArm', 'UpperArm.L'],
-  ['LeftForeArm', 'Forearm.L'],
-  ['LeftHand', 'Hand.L'],
-  ['RightShoulder', 'Shoulder.R'],
-  ['RightArm', 'UpperArm.R'],
-  ['RightForeArm', 'Forearm.R'],
-  ['RightHand', 'Hand.R'],
-  ['LeftUpLeg', 'Thigh.L'],
-  ['LeftLeg', 'Knee.L'],
-  ['LeftFoot', 'Foot.L'],
-  ['LeftToeBase', 'Toes.L'],
-  ['RightUpLeg', 'Thigh.R'],
-  ['RightLeg', 'Knee.R'],
-  ['RightFoot', 'Foot.R'],
-  ['RightToeBase', 'Toes.R']
+  ['Hips', 'DEF-Hips'],
+  ['Spine', 'DEF-Spine'],
+  ['Spine2', 'DEF-Chest'],
+  ['Neck', 'DEF-Neck'],
+  ['Head', 'DEF-Head'],
+
+  ['LeftShoulder', 'DEF-Shoulder.L'],
+  ['LeftArm', 'DEF-UpperArm_1.L'],
+  ['LeftForeArm', 'DEF-Forearm_1.L'],
+  ['LeftHand', 'DEF-Hand.L'],
+
+  ['RightShoulder', 'DEF-Shoulder.R'],
+  ['RightArm', 'DEF-UpperArm_1.R'],
+  ['RightForeArm', 'DEF-Forearm_1.R'],
+  ['RightHand', 'DEF-Hand.R'],
+
+  ['LeftUpLeg', 'DEF-Thigh_1.L'],
+  ['LeftLeg', 'DEF-Knee_1.L'],
+  ['LeftFoot', 'DEF-Foot.L'],
+  ['LeftToeBase', 'DEF-Toes.L'],
+
+  ['RightUpLeg', 'DEF-Thigh_1.R'],
+  ['RightLeg', 'DEF-Knee_1.R'],
+  ['RightFoot', 'DEF-Foot.R'],
+  ['RightToeBase', 'DEF-Toes.R']
 ];
 
 const state = {
@@ -296,11 +304,10 @@ async function loadFbx(file, slot, view) {
   applyWhiteViewportMaterial(slot);
   view.scene.add(slot.displayRoot);
 
-  slot.helper = new THREE.SkeletonHelper(root);
-  slot.helper.material.depthTest = false;
-  slot.helper.material.transparent = true;
-  slot.helper.material.opacity = 0.55;
-  view.scene.add(slot.helper);
+  // No mostramos SkeletonHelper. En CloudRig incluye cientos de huesos
+  // de control (IK/POLE/STR/etc.) alejados del cuerpo y daba la impresión
+  // de que el retarget "explotaba". El viewport queda solo con la malla blanca.
+  slot.helper = null;
 
   captureRest(slot);
   fitView(view, slot.displayRoot);
@@ -375,6 +382,15 @@ function setSourceClip(index) {
   state.playTime = 0;
   updateTimelineBounds();
   updateButtons();
+}
+
+function findBoneByOriginalExact(slot, candidates) {
+  const wanted = new Set(candidates.map(x => String(x).toLowerCase()));
+  for (const [loadedName, bone] of slot.bones) {
+    const original = originalObjectName(bone);
+    if (wanted.has(original.toLowerCase())) return loadedName;
+  }
+  return null;
 }
 
 function findSemanticBone(slot, semantic) {
@@ -523,23 +539,24 @@ function boneDepth(bone) {
 }
 
 function skeletonScaleFor(map) {
-  // Auto-scale anatómico: usa landmarks equivalentes del cuerpo, no bounds
-  // del armature completo. CloudRig tiene controles IK/POLE muy alejados
-  // que no deben participar en la medición.
-  const srcHips = findSemanticBone(state.source, 'Hips');
-  const srcHead = findSemanticBone(state.source, 'Head');
+  // Auto-scale anatómico. Evitamos por completo IK/POLE/STR.
+  // También evitamos findSemanticBone('Hips') aquí porque en CloudRig
+  // existen FK-Hips, IK-M-Hips, DEF-Hips, STR-Hips, etc.
+  const srcHips =
+    findBoneByOriginalExact(state.source, ['mixamorig1:Hips', 'mixamorig:Hips', 'Hips']) ||
+    findSemanticBone(state.source, 'Hips');
+  const srcHead =
+    findBoneByOriginalExact(state.source, ['mixamorig1:Head', 'mixamorig:Head', 'Head']) ||
+    findSemanticBone(state.source, 'Head');
 
-  // En Target preferimos huesos anatómicos/deformantes reales.
-  let tgtHips = findSemanticBone(state.target, 'Hips');
-  let tgtHead = findSemanticBone(state.target, 'Head');
-
-  // Fallback únicamente si ese FBX no contiene los deform bones esperados.
-  if (!tgtHips) {
-    tgtHips = map.find(p => /FK-Hips$/i.test(originalObjectName(state.target.bones.get(p.target)) || p.target))?.target || null;
-  }
-  if (!tgtHead) {
-    tgtHead = map.find(p => /FK-Head$/i.test(originalObjectName(state.target.bones.get(p.target)) || p.target))?.target || null;
-  }
+  const tgtHips =
+    findBoneByOriginalExact(state.target, ['DEF-Hips', 'Hips']) ||
+    map.find(p => /FK-Hips$/i.test(originalObjectName(state.target.bones.get(p.target)) || p.target))?.target ||
+    null;
+  const tgtHead =
+    findBoneByOriginalExact(state.target, ['DEF-Head', 'Head']) ||
+    map.find(p => /FK-Head$/i.test(originalObjectName(state.target.bones.get(p.target)) || p.target))?.target ||
+    null;
 
   if (!srcHips || !srcHead || !tgtHips || !tgtHead) return 1;
 
@@ -551,7 +568,9 @@ function skeletonScaleFor(map) {
 
   const sd = sHip.distanceTo(sHead);
   const td = tHip.distanceTo(tHead);
-  return sd > 1e-6 && td > 1e-6 ? td / sd : 1;
+  const ratio = sd > 1e-6 && td > 1e-6 ? td / sd : 1;
+
+  return Number.isFinite(ratio) && ratio > 0.05 && ratio < 20 ? ratio : 1;
 }
 
 function buildResolvedPreset(preset) {
@@ -603,8 +622,19 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       if (!sb || !tb || !sr || !tr) continue;
 
       sb.getWorldQuaternion(qSrc);
-      qDelta.copy(qSrc).multiply(sr.worldQuat.clone().invert()).normalize();
-      qDesired.copy(qDelta).multiply(tr.worldQuat).normalize();
+
+      // Delta DESDE la rest pose expresado en el espacio local de la rest.
+      // Antes estaba al revés:
+      //     current * inverse(rest)
+      // Eso produce un delta en world-space y en rigs con ejes distintos
+      // (Mixamo vs CloudRig) hace que brazos/piernas roten alrededor de
+      // ejes equivocados.
+      //
+      // Correcto:
+      //     relative = inverse(sourceRest) * sourceCurrent
+      //     target   = targetRest * relative
+      qDelta.copy(sr.worldQuat).invert().multiply(qSrc).normalize();
+      qDesired.copy(tr.worldQuat).multiply(qDelta).normalize();
 
       if (tb.parent) {
         tb.parent.getWorldQuaternion(qParent);
@@ -614,10 +644,23 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       }
       tb.quaternion.copy(qLocal);
 
-      const isRootMotion = rootMotion && /hips$/i.test(pair.source.replace(/^.*:/, ''));
+      const sourceOriginalName = originalObjectName(sb) || pair.source;
+      const isRootMotion = rootMotion && /hips$/i.test(sourceOriginalName.replace(/^.*[:|]/, ''));
       if (isRootMotion) {
         sb.getWorldPosition(srcPos);
-        desiredPos.copy(tr.worldPos).add(srcPos.clone().sub(sr.worldPos).multiplyScalar(scale));
+
+        // La traslación del Hips también se convierte entre las bases de rest,
+        // en lugar de copiar el vector world del Source directamente.
+        const sourceDeltaLocal = srcPos.clone()
+          .sub(sr.worldPos)
+          .applyQuaternion(sr.worldQuat.clone().invert());
+
+        const targetDeltaWorld = sourceDeltaLocal
+          .applyQuaternion(tr.worldQuat)
+          .multiplyScalar(scale);
+
+        desiredPos.copy(tr.worldPos).add(targetDeltaWorld);
+
         if (tb.parent) {
           localPos.copy(desiredPos);
           tb.parent.worldToLocal(localPos);
@@ -680,6 +723,7 @@ function applyRetarget() {
     if ($('previewDeform').checked) {
       const previewMap = buildResolvedPreset(PREVIEW_DEFORM_PRESET);
       state.deformPreviewClip = previewMap.length ? bakeRetarget(previewMap, 'Retargeted_Preview_Deform') : null;
+      log(`Preview deform: ${previewMap.length}/21 huesos DEF encontrados.`);
     } else {
       state.deformPreviewClip = null;
     }
