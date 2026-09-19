@@ -783,12 +783,22 @@ function bakeIkFromFk() {
   const frameCount = Math.max(2, Math.ceil(state.fkClip.duration * fps) + 1);
   const times = Array.from({ length: frameCount }, (_, i) => Math.min(state.fkClip.duration, i / fps));
 
-  const chains = [
+  const chainDefs = [
     { a: 'FK-UpperArm.L', b: 'FK-Forearm.L', c: 'FK-Hand.L', ik: 'IK-Hand.L', pole: 'POLE-Arm.L' },
     { a: 'FK-UpperArm.R', b: 'FK-Forearm.R', c: 'FK-Hand.R', ik: 'IK-Hand.R', pole: 'POLE-Arm.R' },
     { a: 'FK-Thigh.L', b: 'FK-Knee.L', c: 'FK-Foot.L', ik: 'IK-Foot.L', pole: 'POLE-Leg.L' },
     { a: 'FK-Thigh.R', b: 'FK-Knee.R', c: 'FK-Foot.R', ik: 'IK-Foot.R', pole: 'POLE-Leg.R' }
-  ].filter(c => [c.a, c.b, c.c, c.ik, c.pole].every(n => tgt.bones.has(n)));
+  ];
+
+  const chains = chainDefs.map(def => {
+    const resolved = {};
+    for (const key of ['a', 'b', 'c', 'ik', 'pole']) {
+      const runtimeName = findBoneByOriginalExact(tgt, [def[key]]);
+      if (!runtimeName) return null;
+      resolved[key] = runtimeName;
+    }
+    return resolved;
+  }).filter(Boolean);
 
   if (!chains.length) throw new Error('No encontré cadenas FK/IK CloudRig compatibles en el Target.');
 
