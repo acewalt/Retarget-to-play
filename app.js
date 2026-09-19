@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
-import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js';
 
 const $ = (id) => document.getElementById(id);
-const fbxLoader = new FBXLoader();
+const fbxLoader = new WaltFBXLoader();
 
 const viewportWhiteMaterial = new THREE.MeshStandardMaterial({
   color: 0xffffff,
@@ -13,11 +13,9 @@ const viewportWhiteMaterial = new THREE.MeshStandardMaterial({
   side: THREE.DoubleSide
 });
 
-// Los FBX de Blender/Mixamo/CloudRig suelen venir expresados en centímetros.
-// Three.js trabaja de forma práctica en metros para esta herramienta.
-// IMPORTANTE: esta escala se aplica en un wrapper de visualización/cálculo,
-// no modificando el Scale interno del armature ni de RIG-Sintel.
-const FBX_UNIT_TO_METERS = 0.01;
+// Fallback únicamente si un FBX no declara UnitScaleFactor.
+// WaltFBX lee el valor real del archivo y calcula metersPerUnit.
+const DEFAULT_FBX_UNIT_TO_METERS = 0.01;
 
 const CLOUDRIG_PRESET = [
   ['Hips', 'FK-Hips'],
@@ -43,38 +41,6 @@ const CLOUDRIG_PRESET = [
   ['RightToeBase', 'FK-Toes.R']
 ];
 
-// Preview exclusivamente sobre los huesos que realmente deforman la malla
-// de CloudRig. Los FK son controles y, al cargar un FBX en Three.js,
-// sus constraints de Blender no existen; por eso animar solo FK mueve
-// "el esqueleto de controles" pero no necesariamente la piel.
-const PREVIEW_DEFORM_PRESET = [
-  ['Hips', 'DEF-Hips'],
-  ['Spine', 'DEF-Spine'],
-  ['Spine2', 'DEF-Chest'],
-  ['Neck', 'DEF-Neck'],
-  ['Head', 'DEF-Head'],
-
-  ['LeftShoulder', 'DEF-Shoulder.L'],
-  ['LeftArm', 'DEF-UpperArm_1.L'],
-  ['LeftForeArm', 'DEF-Forearm_1.L'],
-  ['LeftHand', 'DEF-Hand.L'],
-
-  ['RightShoulder', 'DEF-Shoulder.R'],
-  ['RightArm', 'DEF-UpperArm_1.R'],
-  ['RightForeArm', 'DEF-Forearm_1.R'],
-  ['RightHand', 'DEF-Hand.R'],
-
-  ['LeftUpLeg', 'DEF-Thigh_1.L'],
-  ['LeftLeg', 'DEF-Knee_1.L'],
-  ['LeftFoot', 'DEF-Foot.L'],
-  ['LeftToeBase', 'DEF-Toes.L'],
-
-  ['RightUpLeg', 'DEF-Thigh_1.R'],
-  ['RightLeg', 'DEF-Knee_1.R'],
-  ['RightFoot', 'DEF-Foot.R'],
-  ['RightToeBase', 'DEF-Toes.R']
-];
-
 const state = {
   source: makeSlot('source'),
   target: makeSlot('target'),
@@ -96,7 +62,11 @@ function makeSlot(kind) {
     fileName: '',
     root: null,
     displayRoot: null,
-    unitScale: FBX_UNIT_TO_METERS,
+    unitScale: DEFAULT_FBX_UNIT_TO_METERS,
+    asset: null,
+    metadata: null,
+    rigRuntime: null,
+    overlay: null,
     bones: new Map(),
     rest: new Map(),
     animations: [],
@@ -221,15 +191,6 @@ function restoreRest(slot) {
   updateSlotWorld(slot);
 }
 
-function createUnitNormalizedDisplayRoot(slot) {
-  const wrapper = new THREE.Group();
-  wrapper.name = `__FBX_UNIT_NORMALIZER_${slot.kind.toUpperCase()}__`;
-  wrapper.scale.setScalar(slot.unitScale);
-  wrapper.add(slot.root);
-  wrapper.updateMatrixWorld(true);
-  return wrapper;
-}
-
 function applyWhiteViewportMaterial(slot) {
   if (!slot.root) return;
 
@@ -264,6 +225,11 @@ function clearSlot(slot, view) {
   if (slot.action) slot.action.stop();
   if (slot.mixer) slot.mixer.stopAllAction();
   if (slot.helper) view.scene.remove(slot.helper);
+  if (slot.overlay) {
+    view.scene.remove(slot.overlay.object);
+    slot.overlay.dispose?.();
+  }
+  slot.rigRuntime?.resetDriven?.();
   if (slot.root) {
     restoreOriginalMaterials(slot);
     if (slot.displayRoot) {
@@ -281,22 +247,22 @@ function clearSlot(slot, view) {
 async function loadFbx(file, slot, view) {
   setStatus(`Leyendo ${file.name}…`);
   const buffer = await file.arrayBuffer();
-  const root = fbxLoader.parse(buffer, '');
-  const loadedAnimations = [...(root.animations || [])];
+  const asset = fbxLoader.parse(buffer, '');
+  const root = asset.root;
+  const loadedAnimations = [...asset.animations];
 
   clearSlot(slot, view);
   slot.fileName = file.name;
+  slot.asset = asset;
+  slot.metadata = asset.metadata;
+  slot.rigRuntime = asset.runtime;
+  slot.overlay = asset.overlay;
   slot.root = root;
+  slot.displayRoot = asset.displayRoot;
+  slot.unitScale = asset.metersPerUnit;
   slot.bones = collectBones(root);
   slot.animations = slot.kind === 'source' ? loadedAnimations : [];
   root.animations = slot.kind === 'source' ? loadedAnimations : [];
-
-  // Normalización FBX cm → metros ANTES de bounds, rest pose y retarget.
-  // Se usa un wrapper externo para preservar intactos:
-  // - Scale/Rotation originales del armature
-  // - jerarquía
-  // - bind / inverse-bind matrices
-  slot.displayRoot = createUnitNormalizedDisplayRoot(slot);
 
   // El viewport siempre muestra el modelo como "clay" blanco:
   // sin texturas ni materiales del FBX. Los materiales originales se
@@ -304,26 +270,31 @@ async function loadFbx(file, slot, view) {
   applyWhiteViewportMaterial(slot);
   view.scene.add(slot.displayRoot);
 
-  // No mostramos SkeletonHelper. En CloudRig incluye cientos de huesos
-  // de control (IK/POLE/STR/etc.) alejados del cuerpo y daba la impresión
-  // de que el retarget "explotaba". El viewport queda solo con la malla blanca.
+  // WaltRig Overlay muestra únicamente el esqueleto lógico útil
+  // (Mixamo o controles FK de CloudRig), no los 342 huesos auxiliares.
   slot.helper = null;
+  if (slot.overlay) {
+    slot.overlay.visible = $('showArmatures')?.checked ?? true;
+    view.scene.add(slot.overlay.object);
+    slot.overlay.update();
+  }
 
   captureRest(slot);
   fitView(view, slot.displayRoot);
 
   if (slot.kind === 'source') {
-    $('sourceLabel').textContent = `${file.name} · ${slot.bones.size} huesos`;
+    $('sourceLabel').textContent = `${file.name} · ${slot.bones.size} huesos · ${asset.rig.profile}`;
     fillSourceClips();
     const inferred = inferPrefix(slot);
     if (inferred) $('sourcePrefix').value = inferred;
-    log(`Source cargado: ${file.name}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions; FBX unit 1 cm → ×${slot.unitScale.toFixed(4)} m.`);
+    log(`WaltFBX v${WALT_FBX_VERSION} Source: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}.`);
   } else {
-    $('targetLabel').textContent = `${file.name} · ${slot.bones.size} huesos`;
+    $('targetLabel').textContent = `${file.name} · ${slot.bones.size} huesos · ${asset.rig.profile}`;
     $('targetAnimNotice').textContent = loadedAnimations.length
       ? `Target cargado con ${loadedAnimations.length} Action(s): se ignoraron y no se reutilizarán.`
       : 'Target sin Actions de entrada. Correcto.';
-    log(`Target cargado: ${file.name}; ${slot.bones.size} huesos. Actions de entrada descartadas: ${loadedAnimations.length}; FBX unit 1 cm → ×${slot.unitScale.toFixed(4)} m.`);
+    const runtimeInfo = slot.rigRuntime?.status;
+    log(`WaltFBX v${WALT_FBX_VERSION} Target: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; Actions descartadas=${loadedAnimations.length}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}; WaltRig FK→DEF=${runtimeInfo ? `${runtimeInfo.bindings}/${runtimeInfo.requestedBindings}` : 'n/a'}.`);
   }
 
   state.fkClip = state.ikOnlyClip = state.deformPreviewClip = state.exportClip = state.targetPreviewClip = null;
@@ -699,6 +670,24 @@ function mergeClips(name, clips) {
   return new THREE.AnimationClip(name, duration, usable.flatMap(c => c.tracks.map(t => t.clone())));
 }
 
+function applyTargetRigRuntime() {
+  const runtime = state.target.rigRuntime;
+  if (!runtime) return;
+
+  runtime.enabled = $('previewDeform')?.checked ?? true;
+  if (runtime.enabled) runtime.update();
+  else runtime.resetDriven();
+}
+
+function updateRigOverlays() {
+  const show = $('showArmatures')?.checked ?? true;
+  for (const slot of [state.source, state.target]) {
+    if (!slot.overlay) continue;
+    slot.overlay.visible = show;
+    slot.overlay.update();
+  }
+}
+
 function playTargetClip(clip) {
   const t = state.target;
   if (!t.root || !clip) return;
@@ -708,6 +697,8 @@ function playTargetClip(clip) {
   t.activeClip = clip;
   t.action = t.mixer.clipAction(clip).play();
   t.mixer.setTime(state.playTime);
+  applyTargetRigRuntime();
+  updateRigOverlays();
 }
 
 function applyRetarget() {
@@ -720,25 +711,18 @@ function applyRetarget() {
     state.ikOnlyClip = null;
     state.exportClip = state.fkClip;
 
-    if ($('previewDeform').checked) {
-      const previewMap = buildResolvedPreset(PREVIEW_DEFORM_PRESET);
-      state.deformPreviewClip = previewMap.length ? bakeRetarget(previewMap, 'Retargeted_Preview_Deform') : null;
-      log(`Preview deform: ${previewMap.length}/21 huesos DEF encontrados.`);
-    } else {
-      state.deformPreviewClip = null;
-    }
-
-    // La Action exportable sigue siendo SOLO FK.
-    // Si el usuario activa el proxy DEF, se mezcla únicamente en el mixer
-    // del navegador para poder ver la piel moverse sin constraints de Blender.
-    state.targetPreviewClip = mergeClips('Preview_FK', [state.fkClip, state.deformPreviewClip]);
+    // No horneamos DEF. WaltRig Runtime reproduce en tiempo real dentro
+    // del navegador la relación FK -> DEF que el FBX no contiene.
+    state.deformPreviewClip = null;
+    state.targetPreviewClip = state.fkClip;
     playTargetClip(state.targetPreviewClip);
     state.playTime = 0;
     updateTimelineBounds();
     updateButtons();
     updateStats();
     setStatus('Retarget FK listo', 'good');
-    log(`Retarget FK generado: ${map.length} controles FK mapeados, ${state.fkClip.tracks.length} curvas TRS, ${Number($('fps').value) || 30} FPS. DEF en Action exportable: 0.`);
+    const rt = state.target.rigRuntime?.status;
+    log(`Retarget FK: ${map.length} controles FK, ${state.fkClip.tracks.length} curvas TRS, ${Number($('fps').value) || 30} FPS. Action DEF=0. WaltRig Runtime FK→DEF=${rt ? `${rt.bindings}/${rt.requestedBindings}` : 'n/a'}.`);
   } catch (err) {
     console.error(err);
     setStatus('Error de retarget', 'bad');
@@ -873,7 +857,7 @@ function convertFkToIk() {
     state.exportClip = $('keepFk').checked
       ? mergeClips('Retargeted_FK_IK', [state.fkClip, state.ikOnlyClip])
       : state.ikOnlyClip;
-    state.targetPreviewClip = mergeClips('Preview_FK_IK', [state.fkClip, state.ikOnlyClip, state.deformPreviewClip]);
+    state.targetPreviewClip = mergeClips('Preview_FK_IK', [state.fkClip, state.ikOnlyClip]);
     playTargetClip(state.targetPreviewClip);
     updateButtons();
     updateStats();
@@ -1040,6 +1024,8 @@ function seek(time) {
   state.playTime = THREE.MathUtils.clamp(time, 0, duration || 0);
   if (state.source.mixer && state.source.activeClip) state.source.mixer.setTime(state.playTime);
   if (state.target.mixer && state.targetPreviewClip) state.target.mixer.setTime(state.playTime);
+  applyTargetRigRuntime();
+  updateRigOverlays();
   $('timeline').value = String(state.playTime);
   $('timeReadout').textContent = `${state.playTime.toFixed(2)} / ${duration.toFixed(2)} s`;
 }
@@ -1064,8 +1050,8 @@ bindDropZone($('targetDrop'), $('targetFile'), file => loadFbx(file, state.targe
 
 $('sourceButton').onclick = () => $('sourceFile').click();
 $('targetButton').onclick = () => $('targetFile').click();
-$('fitSource').onclick = () => fitView(sourceView, state.source.root);
-$('fitTarget').onclick = () => fitView(targetView, state.target.root);
+$('fitSource').onclick = () => fitView(sourceView, state.source.displayRoot || state.source.root);
+$('fitTarget').onclick = () => fitView(targetView, state.target.displayRoot || state.target.root);
 $('sourceClip').onchange = () => setSourceClip(Number($('sourceClip').value));
 $('loadPreset').onclick = loadPreset;
 $('autoMatch').onclick = autoMatch;
@@ -1092,6 +1078,15 @@ $('keepFk').onchange = () => {
   updateStats();
 };
 
+$('previewDeform').onchange = () => {
+  applyTargetRigRuntime();
+  updateRigOverlays();
+};
+
+$('showArmatures').onchange = () => {
+  updateRigOverlays();
+};
+
 $('playPause').onclick = () => {
   state.playing = !state.playing;
   $('playPause').textContent = state.playing ? 'Ⅱ' : '▶';
@@ -1114,6 +1109,9 @@ function animate(now) {
     seek(t);
   }
 
+  applyTargetRigRuntime();
+  updateRigOverlays();
+
   sourceView.controls.update();
   targetView.controls.update();
   sourceView.renderer.render(sourceView.scene, sourceView.camera);
@@ -1121,4 +1119,4 @@ function animate(now) {
 }
 
 requestAnimationFrame(animate);
-log('Retarget-to-play listo. Los FBX se procesan localmente en el navegador.');
+log(`Retarget-to-play listo · WaltFBX v${WALT_FBX_VERSION}. Los FBX se procesan localmente en el navegador.`);
