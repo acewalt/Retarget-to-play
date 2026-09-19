@@ -594,18 +594,17 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
       sb.getWorldQuaternion(qSrc);
 
-      // Delta DESDE la rest pose expresado en el espacio local de la rest.
-      // Antes estaba al revés:
-      //     current * inverse(rest)
-      // Eso produce un delta en world-space y en rigs con ejes distintos
-      // (Mixamo vs CloudRig) hace que brazos/piernas roten alrededor de
-      // ejes equivocados.
+      // Retarget en WORLD-SPACE respecto a la rest pose.
       //
-      // Correcto:
-      //     relative = inverse(sourceRest) * sourceCurrent
-      //     target   = targetRest * relative
-      qDelta.copy(sr.worldQuat).invert().multiply(qSrc).normalize();
-      qDesired.copy(tr.worldQuat).multiply(qDelta).normalize();
+      // Esto es intencional para Mixamo -> CloudRig: los ejes locales de
+      // ambos rigs no coinciden. Si copiamos el delta en local-space,
+      // un "doblar hacia delante" del Source puede convertirse en
+      // "rotar hacia arriba/atrás" en el Target.
+      //
+      // sourceDeltaWorld = sourceCurrentWorld * inverse(sourceRestWorld)
+      // targetWorld      = sourceDeltaWorld * targetRestWorld
+      qDelta.copy(qSrc).multiply(sr.worldQuat.clone().invert()).normalize();
+      qDesired.copy(qDelta).multiply(tr.worldQuat).normalize();
 
       if (tb.parent) {
         tb.parent.getWorldQuaternion(qParent);
@@ -620,14 +619,10 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       if (isRootMotion) {
         sb.getWorldPosition(srcPos);
 
-        // La traslación del Hips también se convierte entre las bases de rest,
-        // en lugar de copiar el vector world del Source directamente.
-        const sourceDeltaLocal = srcPos.clone()
+        // Root motion también se transfiere en world-space. La orientación
+        // del hueso Hips no debe rotar el vector de desplazamiento.
+        const targetDeltaWorld = srcPos.clone()
           .sub(sr.worldPos)
-          .applyQuaternion(sr.worldQuat.clone().invert());
-
-        const targetDeltaWorld = sourceDeltaLocal
-          .applyQuaternion(tr.worldQuat)
           .multiplyScalar(scale);
 
         desiredPos.copy(tr.worldPos).add(targetDeltaWorld);
