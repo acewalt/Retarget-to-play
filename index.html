@@ -1,9 +1,17 @@
 <!doctype html>
-<html lang="es">
+<html lang="es" data-theme="light">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
   <title>Retarget-to-play</title>
+  <script>
+    (() => {
+      const saved = localStorage.getItem('retarget-theme');
+      const preferred = window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+      document.documentElement.dataset.theme = saved || preferred;
+    })();
+  </script>
   <link rel="stylesheet" href="./styles.css" />
   <script type="importmap">
   {
@@ -16,115 +24,245 @@
   </script>
 </head>
 <body>
-  <header class="topbar">
-    <div>
-      <strong>Retarget-to-play</strong>
-      <span>WaltFBX → Bone Map → FK Retarget → WaltRig FK→DEF → FK→IK → FBX</span>
-    </div>
-    <div id="globalStatus" class="status-pill">LOCAL · sin subida</div>
-  </header>
-
-  <main class="app-shell">
-    <section class="stage-area">
-      <div class="viewport-card">
-        <div class="viewport-head">
-          <div><b>Source</b> <span id="sourceLabel">Sin FBX</span></div>
-          <button class="small" id="fitSource">Encuadrar</button>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true"><span></span><span></span><span></span></div>
+        <div class="brand-copy">
+          <strong>Retarget-to-play</strong>
+          <small>WaltFBX motion workspace</small>
         </div>
-        <div id="sourceViewport" class="viewport"></div>
-        <label class="dropzone" id="sourceDrop">
-          <input id="sourceFile" type="file" accept=".fbx" hidden />
-          <span>Arrastra aquí el FBX con la animación o haz clic</span>
-        </label>
       </div>
 
-      <div class="viewport-card">
-        <div class="viewport-head">
-          <div><b>Target</b> <span id="targetLabel">Sin FBX</span></div>
-          <button class="small" id="fitTarget">Encuadrar</button>
-        </div>
-        <div id="targetViewport" class="viewport"></div>
-        <label class="dropzone" id="targetDrop">
-          <input id="targetFile" type="file" accept=".fbx" hidden />
-          <span>Arrastra aquí el FBX del personaje destino o haz clic</span>
-        </label>
+      <nav class="topnav" aria-label="Secciones">
+        <button class="nav-item active" type="button">Workspace</button>
+        <button class="nav-item" type="button">Mappings</button>
+        <button class="nav-item" type="button">Animations</button>
+        <button class="nav-item" type="button">Export</button>
+      </nav>
+
+      <div class="top-actions">
+        <div class="engine-chip">WaltFBX <span>v0.1</span></div>
+        <div id="globalStatus" class="status-pill">LOCAL · sin subida</div>
+        <button id="themeToggle" class="icon-button theme-toggle" type="button" aria-label="Cambiar tema" title="Cambiar tema">
+          <span id="themeIcon">☾</span>
+        </button>
       </div>
+    </header>
 
-      <div class="timeline">
-        <button id="playPause" class="small">▶</button>
-        <span id="timeReadout">0.00 / 0.00 s</span>
-        <input id="timeline" type="range" min="0" max="1" step="0.001" value="0" />
-        <label><input id="mirrorCameras" type="checkbox" checked /> Mirar cámaras juntas</label>
-        <label>FPS <input id="fps" type="number" min="1" max="120" value="30" /></label>
-      </div>
-    </section>
-
-    <aside class="side-panel">
-      <section class="panel-section">
-        <h2>1. Cargar rigs</h2>
-        <div class="two-col">
-          <button id="sourceButton">Source FBX</button>
-          <button id="targetButton">Target FBX</button>
+    <main class="workspace-shell">
+      <aside class="workflow-sidebar">
+        <div class="workflow-title">
+          <span>Workflow</span>
+          <small>Retargeting FBX</small>
         </div>
-        <label class="field-label" for="sourceClip">Action / clip del Source</label>
-        <select id="sourceClip"><option value="">Carga un Source</option></select>
-        <p class="hint" id="targetAnimNotice">El Target se cargará sin reproducir ni reutilizar sus Actions.</p>
-        <p class="hint">Motor: <b>WaltFBX v0.1</b> · lee unidades, Objects/Models y Connections del FBX; WaltRig reconstruye en runtime las relaciones de control necesarias para el preview.</p>
-      </section>
 
-      <section class="panel-section">
-        <h2>2. Preset y Bone Map</h2>
-        <label class="field-label" for="preset">Preset</label>
-        <select id="preset">
-          <option value="cloudrig-sintel">Mixamo → CloudRig / Sintel (FK)</option>
-          <option value="none">— Sin preset —</option>
-        </select>
-        <div class="two-col">
-          <input id="sourcePrefix" placeholder="Source Prefix: mixamorig1:" />
-          <input id="targetPrefix" placeholder="Target Prefix (opcional)" />
+        <ol class="steps-list">
+          <li id="stepSource" class="workflow-step active">
+            <span class="step-dot">1</span>
+            <div><b>Import Source</b><small>Animación o mocap</small></div>
+          </li>
+          <li id="stepTarget" class="workflow-step">
+            <span class="step-dot">2</span>
+            <div><b>Import Target</b><small>Rig de destino</small></div>
+          </li>
+          <li id="stepMap" class="workflow-step">
+            <span class="step-dot">3</span>
+            <div><b>Bone Map</b><small>Emparejar esqueletos</small></div>
+          </li>
+          <li id="stepRetarget" class="workflow-step">
+            <span class="step-dot">4</span>
+            <div><b>Retarget FK</b><small>Transferir movimiento</small></div>
+          </li>
+          <li id="stepIk" class="workflow-step">
+            <span class="step-dot">5</span>
+            <div><b>FK → IK</b><small>Bake de controles</small></div>
+          </li>
+          <li id="stepExport" class="workflow-step">
+            <span class="step-dot">6</span>
+            <div><b>Export</b><small>Guardar nueva Action</small></div>
+          </li>
+        </ol>
+
+        <div class="privacy-card">
+          <div class="privacy-icon">⌁</div>
+          <b>Procesamiento local</b>
+          <p>Los FBX permanecen en tu navegador.</p>
         </div>
-        <div class="button-row">
-          <button id="loadPreset">Cargar preset</button>
-          <button id="autoMatch">Auto-Match</button>
-          <button id="addPair">+ Par</button>
-          <button id="clearMap" class="danger-ghost">Clear</button>
+      </aside>
+
+      <section class="main-workspace">
+        <section class="retarget-stage">
+          <article class="viewport-card">
+            <header class="card-head">
+              <div><span class="eyebrow">SOURCE</span><h2>Source Animation</h2></div>
+              <span class="format-badge">FBX</span>
+            </header>
+
+            <div class="viewport-wrap">
+              <div id="sourceViewport" class="viewport"></div>
+              <div class="viewport-tools">
+                <button id="fitSource" class="viewport-tool" type="button" title="Encuadrar">⌗</button>
+              </div>
+              <div class="viewport-label"><span class="status-dot"></span><span id="sourceLabel">Sin FBX</span></div>
+            </div>
+
+            <div class="viewport-foot">
+              <button id="sourceButton" class="secondary-button" type="button">Importar Source</button>
+              <label class="dropzone compact" id="sourceDrop">
+                <input id="sourceFile" type="file" accept=".fbx" hidden />
+                <span>o arrastra el FBX aquí</span>
+              </label>
+            </div>
+          </article>
+
+          <div class="retarget-bridge">
+            <div class="bridge-arrow">→</div>
+            <button id="applyRetarget" class="retarget-button" type="button" disabled>
+              <span class="spark">✦</span>
+              <span><b>Retarget Animation</b><small>Aplicar FK</small></span>
+            </button>
+            <small>Transfiere el movimiento del Source al Target</small>
+          </div>
+
+          <article class="viewport-card">
+            <header class="card-head">
+              <div><span class="eyebrow">TARGET</span><h2>Target Character</h2></div>
+              <span class="format-badge">FBX</span>
+            </header>
+
+            <div class="viewport-wrap">
+              <div id="targetViewport" class="viewport"></div>
+              <div class="viewport-tools">
+                <button id="fitTarget" class="viewport-tool" type="button" title="Encuadrar">⌗</button>
+              </div>
+              <div class="viewport-label"><span class="status-dot"></span><span id="targetLabel">Sin FBX</span></div>
+            </div>
+
+            <div class="viewport-foot">
+              <button id="targetButton" class="secondary-button" type="button">Importar Target</button>
+              <label class="dropzone compact" id="targetDrop">
+                <input id="targetFile" type="file" accept=".fbx" hidden />
+                <span>o arrastra el FBX aquí</span>
+              </label>
+            </div>
+          </article>
+        </section>
+
+        <section class="mapping-card">
+          <header class="section-head">
+            <div><span class="eyebrow">SKELETON MATCHING</span><h2>Bone Mapping</h2></div>
+            <div class="mapping-summary">
+              <div class="progress-shell"><div id="mapProgressFill" class="progress-fill"></div></div>
+              <strong id="mapPercent">0%</strong>
+              <span id="compatibilityBadge" class="compatibility-badge pending">Pendiente</span>
+            </div>
+          </header>
+
+          <div class="mapping-toolbar">
+            <div class="search-field"><span>⌕</span><input id="mapSearch" placeholder="Buscar source o target…" /></div>
+            <button id="autoMatch" class="soft-primary" type="button">✦ Auto-Map All</button>
+            <button id="loadPreset" type="button">Cargar preset</button>
+            <button id="addPair" type="button">+ Par</button>
+            <button id="clearMap" class="danger-ghost" type="button">Clear</button>
+          </div>
+
+          <div class="mapping-table-head">
+            <span>Source Bone</span><span></span><span>Target Bone</span><span>Acción</span>
+          </div>
+
+          <div class="mapping-content">
+            <div id="boneMap" class="bone-map empty">Carga ambos FBX.</div>
+          </div>
+
+          <div class="mapping-footer">
+            <span id="mapCount">0 / 0 válidos</span>
+            <span>Los nombres originales del FBX se preservan al exportar.</span>
+          </div>
+        </section>
+
+        <section class="timeline-card">
+          <div class="timeline-title">
+            <div><span class="eyebrow">PREVIEW</span><h2>Animation Preview</h2></div>
+            <span id="timeReadout">0.00 / 0.00 s</span>
+          </div>
+
+          <div class="timeline">
+            <button id="playPause" class="play-button" type="button">▶</button>
+            <input id="timeline" type="range" min="0" max="1" step="0.001" value="0" />
+            <label class="inline-control"><input id="mirrorCameras" type="checkbox" checked /><span>Mirar cámaras juntas</span></label>
+            <label class="fps-control"><span>FPS</span><input id="fps" type="number" min="1" max="120" value="30" /></label>
+          </div>
+        </section>
+      </section>
+
+      <aside class="settings-panel">
+        <div class="settings-scroll">
+          <section class="settings-section">
+            <div class="settings-heading"><div><span class="eyebrow">INPUT</span><h2>Rig Setup</h2></div></div>
+            <label class="field-label" for="sourceClip">Action / clip del Source</label>
+            <select id="sourceClip"><option value="">Carga un Source</option></select>
+            <p class="notice" id="targetAnimNotice">El Target se cargará sin reproducir ni reutilizar sus Actions.</p>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-heading"><div><span class="eyebrow">MAPPING</span><h2>Preset</h2></div></div>
+            <label class="field-label" for="preset">Skeleton preset</label>
+            <select id="preset">
+              <option value="cloudrig-sintel">Mixamo → CloudRig / Sintel (FK)</option>
+              <option value="none">— Sin preset —</option>
+            </select>
+            <div class="stacked-fields">
+              <label><span>Source Prefix</span><input id="sourcePrefix" placeholder="mixamorig1:" /></label>
+              <label><span>Target Prefix</span><input id="targetPrefix" placeholder="Opcional" /></label>
+            </div>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-heading"><div><span class="eyebrow">RETARGET</span><h2>Retarget Settings</h2></div></div>
+            <label class="setting-row">
+              <div><b>Scale Matching</b><small>Root motion basado en proporciones</small></div>
+              <input id="autoScale" class="switch" type="checkbox" checked />
+            </label>
+            <label class="setting-row">
+              <div><b>WaltRig FK → DEF</b><small>Simulación de deformación en viewport</small></div>
+              <input id="previewDeform" class="switch" type="checkbox" checked />
+            </label>
+            <label class="setting-row">
+              <div><b>Armature Overlay</b><small>Mostrar esqueleto lógico</small></div>
+              <input id="showArmatures" class="switch" type="checkbox" checked />
+            </label>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-heading"><div><span class="eyebrow">IK / FK</span><h2>IK / FK Handling</h2></div></div>
+            <label class="setting-row">
+              <div><b>Conservar FK</b><small>Mantener las curvas FK en la salida</small></div>
+              <input id="keepFk" class="switch" type="checkbox" checked />
+            </label>
+            <button id="convertIk" class="wide-button" type="button" disabled>Convertir FK → IK</button>
+            <p class="hint">Genera IK-Hand, IK-Foot y POLE a partir del movimiento FK.</p>
+          </section>
+
+          <section class="settings-section">
+            <div class="settings-heading"><div><span class="eyebrow">EXPORT</span><h2>Export Settings</h2></div></div>
+            <div class="export-specs">
+              <div><span>Format</span><b>FBX</b></div>
+              <div><span>Bake</span><b>Animation</b></div>
+              <div><span>Rig</span><b>Target original</b></div>
+            </div>
+            <button id="exportFbx" class="export-button" type="button" disabled><span>⇩</span> Exportar Target FBX + Action</button>
+            <div class="stats" id="stats">Sin retarget generado.</div>
+          </section>
+
+          <details class="diagnostics">
+            <summary>Diagnóstico técnico</summary>
+            <pre id="log">Listo.</pre>
+          </details>
         </div>
-        <div class="map-head">
-          <b>Bone Map</b>
-          <span id="mapCount">0 / 0 válidos</span>
-        </div>
-        <input id="mapSearch" placeholder="Buscar source o target…" />
-        <div id="boneMap" class="bone-map empty">Carga ambos FBX.</div>
-      </section>
-
-      <section class="panel-section">
-        <h2>3. Retargeting FK</h2>
-        <label class="check"><input id="autoScale" type="checkbox" checked /> Auto-scale de root motion al Target</label>
-        <label class="check"><input id="previewDeform" type="checkbox" checked /> Simular FK → DEF del CloudRig en viewport</label>
-        <label class="check"><input id="showArmatures" type="checkbox" checked /> Mostrar armaduras lógicas</label>
-        <button id="applyRetarget" class="primary" disabled>Aplicar Retargeting FK</button>
-        <p class="hint">La Action sigue animando los controles FK. WaltRig hace que los DEF sigan esos controles en tiempo real para mover la malla en el navegador, sin hornear tracks DEF en la Action exportable.</p>
-      </section>
-
-      <section class="panel-section">
-        <h2>4. Convertir FK → IK</h2>
-        <label class="check"><input id="keepFk" type="checkbox" checked /> Mantener también las curvas FK en la salida</label>
-        <button id="convertIk" disabled>Convertir FK → IK</button>
-        <p class="hint">Genera curvas para IK-Hand.L/R, IK-Foot.L/R y los POLE de brazos/piernas a partir del movimiento FK. La salida sigue siendo una Action de controles FK/IK; no anima DEF. El switch IK/FK específico de Blender puede requerir activarlo en el rig original.</p>
-      </section>
-
-      <section class="panel-section">
-        <h2>5. Salida</h2>
-        <button id="exportFbx" class="primary" disabled>Exportar Target FBX + Action</button>
-        <div class="stats" id="stats">Sin retarget generado.</div>
-      </section>
-
-      <section class="panel-section log-section">
-        <h2>Diagnóstico</h2>
-        <pre id="log">Listo.</pre>
-      </section>
-    </aside>
-  </main>
+      </aside>
+    </main>
+  </div>
 
   <script type="module" src="./app.js"></script>
 </body>
