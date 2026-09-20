@@ -644,11 +644,12 @@ function trackParts(trackName) {
   };
 }
 
-function shouldExportPosition(name) {
+function shouldExportPosition(name, options = {}) {
   return name === 'root' ||
     name === 'TORSO-Spine' ||
     /^IK-(Hand|Foot)\./.test(name) ||
-    /^POLE-(Arm|Leg)\./.test(name);
+    /^POLE-(Arm|Leg)\./.test(name) ||
+    (options.includeDeformPositions && /^DEF-/.test(name));
 }
 
 function buildAnimationPlan(doc, clip, options) {
@@ -663,7 +664,7 @@ function buildAnimationPlan(doc, clip, options) {
     if (!model) continue;
 
     if (parsed.property === 'scale') continue;
-    if (parsed.property === 'position' && !shouldExportPosition(parsed.nodeName)) continue;
+    if (parsed.property === 'position' && !shouldExportPosition(parsed.nodeName, options)) continue;
     if (parsed.property !== 'position' && parsed.property !== 'quaternion') continue;
 
     if (parsed.property === 'position') {
@@ -704,12 +705,14 @@ function buildAnimationPlan(doc, clip, options) {
  * Geometry, skin, bind matrices, model hierarchy, units and transforms come
  * from the original uploaded bytes.
  */
-export function injectAnimationIntoOriginalFBX(originalBuffer, clip, {
+export function injectAnimationsIntoOriginalFBX(originalBuffer, clips, {
   rotationMode = 'xyz',
-  actionName = clip?.name || 'Retargeted_Action'
+  currentActionName = null
 } = {}) {
   if (!originalBuffer) throw new Error('WaltExactFBX: no se conservó el Target FBX original.');
-  if (!clip) throw new Error('WaltExactFBX: no hay Action para inyectar.');
+
+  const validClips = (Array.isArray(clips) ? clips : [clips]).filter(Boolean);
+  if (!validClips.length) throw new Error('WaltExactFBX: no hay Actions para inyectar.');
 
   const parser = new ExactBinaryParser(originalBuffer.slice(0));
   const doc = parser.parse();
@@ -717,69 +720,106 @@ export function injectAnimationIntoOriginalFBX(originalBuffer, clip, {
   const removed = removeExistingAnimation(doc);
   const objects = getObjects(doc);
   const connections = getConnections(doc);
-  const groups = buildAnimationPlan(doc, clip, { rotationMode });
-
-  if (!groups.length) {
-    throw new Error('WaltExactFBX: no encontré tracks compatibles con Models del Target original.');
-  }
 
   let uid = maxObjectUid(doc) + 1001n;
   const nextUid = () => uid++;
 
-  const stackUid = nextUid();
-  const layerUid = nextUid();
-
-  let duration = 0;
-  for (const g of groups) {
-    const times = g.times;
-    if (times.length) duration = Math.max(duration, Number(times[times.length - 1]));
-  }
-
-  const start = 0n;
-  const stop = secondsToKTime(duration, doc.version);
-
-  objects.children.push(animationStackNode(stackUid, actionName, start, stop));
-  objects.children.push(animationLayerNode(layerUid, actionName));
-  connections.children.push(connection('OO', layerUid, stackUid));
-
+  let stackCount = 0;
+  let layerCount = 0;
   let curveNodeCount = 0;
   let curveCount = 0;
+  const clipReports = [];
 
-  for (const group of groups) {
-    const curveNodeUid = nextUid();
-    const defaults = [
-      group.axes[0]?.[0] ?? 0,
-      group.axes[1]?.[0] ?? 0,
-      group.axes[2]?.[0] ?? 0
-    ];
+  for (const clipEntry of validClips) {
+    const clip = clipEntry.clip || clipEntry;
+    const includeDeformPositions = !!clipEntry.includeDeformPositions;
+    const actionName = clipEntry.actionName || clip.name || 'Retargeted_Action';
 
-    objects.children.push(curveNode(curveNodeUid, group.attrName, defaults));
-    curveNodeCount++;
+    const groups = buildAnimationPlan(doc, clip, {
+      rotationMode,
+      includeDeformPositions
+    });
 
-    connections.children.push(connection('OO', curveNodeUid, layerUid));
-    connections.children.push(connection('OP', curveNodeUid, group.model.uid, group.fbxProp));
+    if (!groups.length) continue;
 
-    const ktimes = Array.from(group.times, t => secondsToKTime(t, doc.version));
-    for (let axis = 0; axis < 3; axis++) {
-      const curveUid = nextUid();
-      const axisName = ['X', 'Y', 'Z'][axis];
-      objects.children.push(animationCurve(curveUid, ktimes, group.axes[axis]));
-      curveCount++;
-      connections.children.push(connection('OP', curveUid, curveNodeUid, `d|${axisName}`));
+    const stackUid = nextUid();
+    const layerUid = nextUid();
+
+    let duration = 0;
+    for (const g of groups) {
+      if (g.times.length) duration = Math.max(duration, Number(g.times[g.times.length - 1]));
     }
+
+    const startTime = 0n;
+    const stopTime = secondsToKTime(duration, doc.version);
+
+    objects.children.push(animationStackNode(stackUid, actionName, startTime, stopTime));
+    objects.children.push(animationLayerNode(layerUid, actionName));
+    connections.children.push(connection('OO', layerUid, stackUid));
+
+    stackCount++;
+    layerCount++;
+
+    let localCurveNodes = 0;
+    let localCurves = 0;
+
+    for (const group of groups) {
+      const curveNodeUid = nextUid();
+      const defaults = [
+        group.axes[0]?.[0] ?? 0,
+        group.axes[1]?.[0] ?? 0,
+        group.axes[2]?.[0] ?? 0
+      ];
+
+      objects.children.push(curveNode(curveNodeUid, group.attrName, defaults));
+      curveNodeCount++;
+      localCurveNodes++;
+
+      connections.children.push(connection('OO', curveNodeUid, layerUid));
+      connections.children.push(connection('OP', curveNodeUid, group.model.uid, group.fbxProp));
+
+      const ktimes = Array.from(group.times, t => secondsToKTime(t, doc.version));
+
+      for (let axis = 0; axis < 3; axis++) {
+        const curveUid = nextUid();
+        const axisName = ['X', 'Y', 'Z'][axis];
+
+        objects.children.push(animationCurve(curveUid, ktimes, group.axes[axis]));
+        curveCount++;
+        localCurves++;
+
+        connections.children.push(
+          connection('OP', curveUid, curveNodeUid, `d|${axisName}`)
+        );
+      }
+    }
+
+    clipReports.push({
+      name: actionName,
+      duration,
+      modelsAnimated: new Set(groups.map(g => g.model.uid.toString())).size,
+      curveNodes: localCurveNodes,
+      curves: localCurves,
+      includeDeformPositions
+    });
+  }
+
+  if (!stackCount) {
+    throw new Error('WaltExactFBX: ninguna Action produjo curvas compatibles con el Target.');
   }
 
   updateDefinitions(doc, {
-    total: 2 + curveNodeCount + curveCount,
-    stack: 1,
-    layer: 1,
+    total: stackCount + layerCount + curveNodeCount + curveCount,
+    stack: stackCount,
+    layer: layerCount,
     curveNode: curveNodeCount,
     curve: curveCount
   });
 
   const takes = findTop(doc, 'Takes');
   const current = takes?.children?.find(n => n.name === 'Current');
-  if (current) current.properties = [str(actionName)];
+  const fallbackCurrent = clipReports[clipReports.length - 1]?.name || '';
+  if (current) current.properties = [str(currentActionName || fallbackCurrent)];
 
   const bytes = encodeDocument(doc);
 
@@ -788,11 +828,32 @@ export function injectAnimationIntoOriginalFBX(originalBuffer, clip, {
     report: {
       version: doc.version,
       removedAnimations: removed,
-      modelsAnimated: new Set(groups.map(g => g.model.uid.toString())).size,
+      clips: clipReports,
+      stacks: stackCount,
       curveNodes: curveNodeCount,
       curves: curveCount,
-      duration,
       rotationMode
+    }
+  };
+}
+
+export function injectAnimationIntoOriginalFBX(originalBuffer, clip, options = {}) {
+  const actionName = options.actionName || clip?.name || 'Retargeted_Action';
+
+  const result = injectAnimationsIntoOriginalFBX(
+    originalBuffer,
+    [{ clip, actionName }],
+    {
+      rotationMode: options.rotationMode || 'xyz',
+      currentActionName: actionName
+    }
+  );
+
+  return {
+    bytes: result.bytes,
+    report: {
+      ...result.report,
+      ...(result.report.clips[0] || {})
     }
   };
 }
