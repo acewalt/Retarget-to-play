@@ -263,6 +263,20 @@
               <div><span>Bake</span><b>Animation</b></div>
               <div><span>Rig</span><b>Target original</b></div>
             </div>
+
+            <label class="field-label" for="exportMode">Modo de exportación</label>
+            <select id="exportMode">
+              <option value="exact" selected>FBX EXACTO · original + Action</option>
+              <option value="legacy">Legacy · reconstruir desde Three.js</option>
+            </select>
+
+            <label class="field-label" for="rotationMode">Rotación de la Action</label>
+            <select id="rotationMode">
+              <option value="xyz" selected>XYZ Euler · recomendado</option>
+              <option value="quaternion">Quaternion / FBX order</option>
+            </select>
+
+            <p class="hint">FBX EXACTO conserva unidades, Scale, Rotation, skin, bind matrices y jerarquía del Target original; solo reemplaza la animación.</p>
           </section>
 
           <details class="diagnostics">
