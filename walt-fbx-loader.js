@@ -1,10 +1,15 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
-export const WALT_FBX_VERSION = '0.1.0';
+export const WALT_FBX_VERSION = '0.2.0';
 
+// Los 31 DEF con pesos reales en x1.fbx se reconstruyen desde los
+// controles FK. Los segmentos _2 comparten el delta de su control principal;
+// los DEF-Hip.L/R siguen el delta rígido de FK-Hips.
 const CLOUDRIG_BINDINGS = [
-  { driver: 'FK-Hips', driven: 'DEF-Hips', translate: true },
+  { driver: 'FK-Hips', driven: 'DEF-Hips' },
+  { driver: 'FK-Hips', driven: 'DEF-Hip.L' },
+  { driver: 'FK-Hips', driven: 'DEF-Hip.R' },
   { driver: 'FK-Spine', driven: 'DEF-Spine' },
   { driver: 'FK-Chest', driven: 'DEF-Chest' },
   { driver: 'FK-Neck', driven: 'DEF-Neck' },
@@ -12,21 +17,29 @@ const CLOUDRIG_BINDINGS = [
 
   { driver: 'FK-Shoulder.L', driven: 'DEF-Shoulder.L' },
   { driver: 'FK-UpperArm.L', driven: 'DEF-UpperArm_1.L' },
+  { driver: 'FK-UpperArm.L', driven: 'DEF-UpperArm_2.L' },
   { driver: 'FK-Forearm.L', driven: 'DEF-Forearm_1.L' },
+  { driver: 'FK-Forearm.L', driven: 'DEF-Forearm_2.L' },
   { driver: 'FK-Hand.L', driven: 'DEF-Hand.L' },
 
   { driver: 'FK-Shoulder.R', driven: 'DEF-Shoulder.R' },
   { driver: 'FK-UpperArm.R', driven: 'DEF-UpperArm_1.R' },
+  { driver: 'FK-UpperArm.R', driven: 'DEF-UpperArm_2.R' },
   { driver: 'FK-Forearm.R', driven: 'DEF-Forearm_1.R' },
+  { driver: 'FK-Forearm.R', driven: 'DEF-Forearm_2.R' },
   { driver: 'FK-Hand.R', driven: 'DEF-Hand.R' },
 
   { driver: 'FK-Thigh.L', driven: 'DEF-Thigh_1.L' },
+  { driver: 'FK-Thigh.L', driven: 'DEF-Thigh_2.L' },
   { driver: 'FK-Knee.L', driven: 'DEF-Knee_1.L' },
+  { driver: 'FK-Knee.L', driven: 'DEF-Knee_2.L' },
   { driver: 'FK-Foot.L', driven: 'DEF-Foot.L' },
   { driver: 'FK-Toes.L', driven: 'DEF-Toes.L' },
 
   { driver: 'FK-Thigh.R', driven: 'DEF-Thigh_1.R' },
+  { driver: 'FK-Thigh.R', driven: 'DEF-Thigh_2.R' },
   { driver: 'FK-Knee.R', driven: 'DEF-Knee_1.R' },
+  { driver: 'FK-Knee.R', driven: 'DEF-Knee_2.R' },
   { driver: 'FK-Foot.R', driven: 'DEF-Foot.R' },
   { driver: 'FK-Toes.R', driven: 'DEF-Toes.R' }
 ];
@@ -409,16 +422,24 @@ export class WaltCloudRigRuntime {
   update() {
     if (!this.enabled || !this.bindings.length) return;
 
-    // Los DEF no tienen tracks. Se resetean y se reconstruyen como si
-    // los constraints FK->DEF de Blender siguieran existiendo.
+    // Los constraints de Blender no vienen en este FBX. Reconstruimos la
+    // transformación rígida completa FK -> DEF en runtime.
+    //
+    // El fallo anterior era importante: copiábamos rotación, pero dejábamos
+    // casi todos los DEF en su POSICIÓN de rest. En CloudRig muchos DEF
+    // (hombros, brazos, piernas, cuello...) viven en ramas separadas del rig.
+    // Al rotarlos sin trasladar su origen, la piel se estiraba hasta formar
+    // esos triángulos/bandas que se veían en el video.
     this.resetDriven();
 
     const qDriverCurrent = new THREE.Quaternion();
-    const qRelative = new THREE.Quaternion();
+    const qDelta = new THREE.Quaternion();
     const qDesiredWorld = new THREE.Quaternion();
     const qParentWorld = new THREE.Quaternion();
     const qDesiredLocal = new THREE.Quaternion();
+
     const pDriverCurrent = new THREE.Vector3();
+    const pRestOffset = new THREE.Vector3();
     const pDesiredWorld = new THREE.Vector3();
     const pDesiredLocal = new THREE.Vector3();
 
@@ -430,35 +451,45 @@ export class WaltCloudRigRuntime {
       if (!dr || !rr) continue;
 
       driver.getWorldQuaternion(qDriverCurrent);
+      driver.getWorldPosition(pDriverCurrent);
 
-      // Copiamos el cambio GLOBAL del control FK respecto a su rest.
-      // FK y DEF pueden tener ejes locales distintos; por eso NO usamos
-      // inverse(rest) * current. El delta world conserva la dirección
-      // anatómica que vemos en el viewport.
-      qRelative.copy(qDriverCurrent).multiply(dr.worldQuaternion.clone().invert()).normalize();
-      qDesiredWorld.copy(qRelative).multiply(rr.worldQuaternion).normalize();
+      // Delta rígido del FK desde su rest.
+      qDelta.copy(qDriverCurrent)
+        .multiply(dr.worldQuaternion.clone().invert())
+        .normalize();
+
+      // Aplica ese delta a la orientación rest propia del DEF.
+      qDesiredWorld.copy(qDelta)
+        .multiply(rr.worldQuaternion)
+        .normalize();
+
+      // Y también a su posición rest. Esto equivale a:
+      // M_DEF(t) = M_FK(t) * inverse(M_FK(rest)) * M_DEF(rest)
+      // pero sin propagar escala del control.
+      pRestOffset.copy(rr.worldPosition).sub(dr.worldPosition);
+      pRestOffset.applyQuaternion(qDelta);
+      pDesiredWorld.copy(pDriverCurrent).add(pRestOffset);
 
       if (driven.parent) {
         driven.parent.getWorldQuaternion(qParentWorld);
-        qDesiredLocal.copy(qParentWorld).invert().multiply(qDesiredWorld).normalize();
+        qDesiredLocal.copy(qParentWorld)
+          .invert()
+          .multiply(qDesiredWorld)
+          .normalize();
+
+        pDesiredLocal.copy(pDesiredWorld);
+        driven.parent.worldToLocal(pDesiredLocal);
       } else {
         qDesiredLocal.copy(qDesiredWorld);
-      }
-      driven.quaternion.copy(qDesiredLocal);
-
-      if (binding.translate) {
-        driver.getWorldPosition(pDriverCurrent);
-        const deltaWorld = pDriverCurrent.clone().sub(dr.worldPosition);
-        pDesiredWorld.copy(rr.worldPosition).add(deltaWorld);
         pDesiredLocal.copy(pDesiredWorld);
-
-        if (driven.parent) driven.parent.worldToLocal(pDesiredLocal);
-        driven.position.copy(pDesiredLocal);
-      } else {
-        driven.position.copy(rr.localPosition);
       }
 
+      driven.position.copy(pDesiredLocal);
+      driven.quaternion.copy(qDesiredLocal);
       driven.scale.copy(rr.localScale);
+
+      // Importante: los bindings están ordenados por profundidad, así cada
+      // padre DEF queda actualizado antes de resolver el hijo siguiente.
       this.asset.displayRoot.updateMatrixWorld(true);
     }
   }
