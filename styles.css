@@ -135,3 +135,32 @@ h2,p{margin:0}
 .workspace-shell.animations-focus>.workflow-sidebar,
 .workspace-shell.animations-focus>.settings-panel{display:none!important}
 .main-workspace[data-view="animations"] .retarget-bridge{display:none!important}
+
+/* Importación por drag & drop sobre TODO el módulo, incluido el viewport. */
+.viewport-card{position:relative}
+.viewport-card.drag-import{
+  border-color:var(--primary);
+  box-shadow:0 0 0 2px color-mix(in srgb,var(--primary) 28%,transparent),var(--shadow);
+}
+.viewport-card.drag-import::after{
+  content:"Soltar FBX aquí";
+  position:absolute;
+  inset:56px 10px 52px;
+  z-index:30;
+  display:grid;
+  place-items:center;
+  border:2px dashed var(--primary);
+  border-radius:12px;
+  background:color-mix(in srgb,var(--primary-soft) 86%,transparent);
+  color:var(--primary);
+  font-size:13px;
+  font-weight:800;
+  letter-spacing:.01em;
+  pointer-events:none;
+  backdrop-filter:blur(4px);
+}
+.viewport-card.drag-import .dropzone.compact{
+  border-color:var(--primary);
+  color:var(--primary);
+  background:var(--primary-soft);
+}
