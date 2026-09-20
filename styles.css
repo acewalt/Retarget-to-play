@@ -124,3 +124,14 @@ h2,p{margin:0}
 @media(min-width:1081px){
   .main-workspace[data-view="animations"] .retarget-stage{height:calc(100vh - 70px - 18px - 18px - 118px - 14px)}
 }
+
+[hidden]{display:none!important}
+
+/* Workspace nunca muestra Bone Mapping: esa herramienta vive en Mappings. */
+.main-workspace[data-view="workspace"] #mappingCard{display:none!important}
+
+/* Animation es una mesa de preview pura: dos viewports + timeline. */
+.workspace-shell.animations-focus{grid-template-columns:minmax(0,1fr)!important}
+.workspace-shell.animations-focus>.workflow-sidebar,
+.workspace-shell.animations-focus>.settings-panel{display:none!important}
+.main-workspace[data-view="animations"] .retarget-bridge{display:none!important}
