@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt2';
-import { injectAnimationIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-export1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-export2';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -743,6 +743,81 @@ function applyTargetRigRuntime() {
   else runtime.resetDriven();
 }
 
+function bakeDeformPreviewClip() {
+  const t = state.target;
+  const runtime = t.rigRuntime;
+  const sourceClip = state.targetPreviewClip || state.exportClip;
+
+  if (!t.root || !runtime || !sourceClip) return null;
+
+  const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
+  const frameCount = Math.max(2, Math.ceil(sourceClip.duration * fps) + 1);
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(sourceClip.duration, i / fps)
+  );
+
+  const driven = [...new Set(runtime.bindings.map(b => b.drivenBone).filter(Boolean))];
+  if (!driven.length) return null;
+
+  const data = new Map();
+  for (const bone of driven) {
+    data.set(bone, { p: [], q: [] });
+  }
+
+  restoreRest(t);
+  t.mixer?.stopAllAction();
+
+  const mixer = new THREE.AnimationMixer(t.root);
+  const action = mixer.clipAction(sourceClip).play();
+
+  const previousEnabled = runtime.enabled;
+  runtime.enabled = true;
+
+  try {
+    for (const time of times) {
+      restoreRest(t);
+      mixer.setTime(time);
+      updateSlotWorld(t);
+
+      runtime.update();
+      updateSlotWorld(t);
+
+      for (const bone of driven) {
+        const d = data.get(bone);
+        d.p.push(bone.position.x, bone.position.y, bone.position.z);
+        d.q.push(
+          bone.quaternion.x,
+          bone.quaternion.y,
+          bone.quaternion.z,
+          bone.quaternion.w
+        );
+      }
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    runtime.enabled = previousEnabled;
+    restoreRest(t);
+  }
+
+  const tracks = [];
+  for (const [bone, d] of data) {
+    tracks.push(
+      new THREE.VectorKeyframeTrack(`${bone.name}.position`, times, d.p)
+    );
+    tracks.push(
+      new THREE.QuaternionKeyframeTrack(`${bone.name}.quaternion`, times, d.q)
+    );
+  }
+
+  return new THREE.AnimationClip(
+    'Retargeted_DEF_Preview',
+    sourceClip.duration,
+    tracks
+  );
+}
+
 function updateRigOverlays() {
   const show = $('showArmatures')?.checked ?? true;
   for (const slot of [state.source, state.target]) {
@@ -1003,22 +1078,49 @@ async function exportTargetFbx() {
     let report = null;
 
     if (exportMode === 'exact') {
-      const result = injectAnimationIntoOriginalFBX(
+      const exactActions = [
+        {
+          clip: exportClip,
+          actionName: exportClip.name || 'Retargeted_FK'
+        }
+      ];
+
+      let currentActionName = exportClip.name || 'Retargeted_FK';
+
+      if ($('includeDefPreview')?.checked) {
+        const defPreview = bakeDeformPreviewClip();
+
+        if (defPreview) {
+          const originalDefPreview = createOriginalNameExportClip(defPreview, state.target);
+          exactActions.push({
+            clip: originalDefPreview,
+            actionName: 'Retargeted_DEF_Preview',
+            includeDeformPositions: true
+          });
+
+          // Al abrir el FBX standalone, esta Action es la que mueve la malla
+          // sin necesitar constraints de Blender.
+          currentActionName = 'Retargeted_DEF_Preview';
+        }
+      }
+
+      const result = injectAnimationsIntoOriginalFBX(
         state.target.originalBuffer,
-        exportClip,
+        exactActions,
         {
           rotationMode,
-          actionName: exportClip.name || 'Retargeted_Action'
+          currentActionName
         }
       );
 
       bytes = result.bytes;
       report = result.report;
 
+      const clipNames = report.clips.map(c => c.name).join(', ');
       log(
-        `FBX EXACTO: Target original + Action. Models=${report.modelsAnimated}, ` +
-        `CurveNodes=${report.curveNodes}, Curves=${report.curves}, ` +
-        `rotación=${rotationMode === 'xyz' ? 'XYZ Euler' : 'Quaternion/FBX order'}.`
+        `FBX EXACTO: Target original + Actions [${clipNames}]. ` +
+        `Stacks=${report.stacks}, CurveNodes=${report.curveNodes}, ` +
+        `Curves=${report.curves}, rotación=${rotationMode === 'xyz' ? 'XYZ Euler' : 'Quaternion/FBX order'}.`
       );
     } else {
       state.target.mixer?.stopAllAction();
@@ -1133,7 +1235,8 @@ function updateStats() {
 
   const modeLabel = $('exportMode')?.value === 'legacy' ? 'Legacy reconstruido' : 'Exacto · FBX original';
   const rotationLabel = $('rotationMode')?.value === 'quaternion' ? 'Quaternion / FBX order' : 'XYZ Euler';
-  const summary = `Action: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nFK: ${fkBones}\nIK/POLE: ${ikBones}\nDEF exportados: ${defTracks}\nExport: ${modeLabel}\nRotación: ${rotationLabel}`;
+  const defPreviewLabel = $('includeDefPreview')?.checked ? 'Sí · Action separada' : 'No';
+  const summary = `Action: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nFK: ${fkBones}\nIK/POLE: ${ikBones}\nDEF en Action principal: ${defTracks}\nExport: ${modeLabel}\nRotación: ${rotationLabel}\nDEF Preview: ${defPreviewLabel}`;
   $('stats').textContent = summary;
   if (sticky) sticky.textContent = `${state.exportClip.name} · ${state.exportClip.duration.toFixed(2)} s`;
   if (workbench) workbench.textContent = summary;
@@ -1363,6 +1466,7 @@ $('exportWorkspaceButton').onclick = exportTargetFbx;
 
 $('exportMode')?.addEventListener('change', updateStats);
 $('rotationMode')?.addEventListener('change', updateStats);
+$('includeDefPreview')?.addEventListener('change', updateStats);
 
 $('toggleMapping').onclick = () => {
   if (state.workspaceView === 'mappings') return;
