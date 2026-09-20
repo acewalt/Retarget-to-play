@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-rootsplit1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-cleanrig1" />
   <script type="importmap">
   {
     "imports": {
@@ -270,7 +270,8 @@
 
             <label class="field-label" for="exportMode">Modo de exportación</label>
             <select id="exportMode">
-              <option value="exact" selected>FBX EXACTO · original + Action</option>
+              <option value="clean" selected>FBX CLEAN · jerarquía FK + malla baked</option>
+              <option value="exact">FBX EXACTO · original + Action</option>
               <option value="legacy">Legacy · reconstruir desde Three.js</option>
             </select>
 
@@ -287,14 +288,14 @@
               <input id="downloadOriginalRigAction" class="switch" type="checkbox" checked />
             </label>
 
-            <p class="hint">CloudRig root motion: root recibe desplazamiento X/Z + yaw; TORSO-Spine recibe sólo la altura Y. FK-Spine y HTP/HIP-Spine quedan libres para sus secciones superior e inferior.</p>
+            <p class="hint">FBX CLEAN reescribe sólo la jerarquía de controles FK con compensación de rest pose. root → TORSO-Spine se conserva; FK-Spine forma la sección superior y HTP/HIP-Spine la inferior. No se reparentan los DEF ni se modifican pesos o bind matrices.</p>
 
             <label class="setting-row">
-              <div><b>Action DEF Preview</b><small>Hace que el FBX standalone mueva la malla sin constraints</small></div>
+              <div><b>Action DEF Preview · modo Exacto</b><small>En FBX CLEAN la malla se hornea siempre; este switch sólo añade DEF Preview al modo Exacto</small></div>
               <input id="includeDefPreview" class="switch" type="checkbox" checked />
             </label>
 
-            <p class="hint">FBX EXACTO conserva unidades, Scale, Rotation, skin, bind matrices y jerarquía del Target original. Exporta la Action de controles y, opcionalmente, una segunda Action DEF solo para preview standalone.</p>
+            <p class="hint">FBX CLEAN genera Retargeted_Standalone: controles FK rejerarquizados + DEF baked en la misma Action, para que al importar el FBX en Blender la malla se mueva aunque los constraints originales de CloudRig no existan.</p>
           </section>
 
           <details class="diagnostics">
@@ -315,6 +316,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-rootsplit1"></script>
+  <script type="module" src="./app.js?v=20260920-cleanrig1"></script>
 </body>
 </html>
