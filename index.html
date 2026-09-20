@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-blendcap1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-blendcap2" />
   <script type="importmap">
   {
     "imports": {
@@ -257,7 +257,7 @@
               <input id="keepFk" class="switch" type="checkbox" checked />
             </label>
             <button id="convertIk" class="wide-button" type="button" disabled>Convertir FK → IK</button>
-            <p class="hint">Genera IK-Hand, IK-Foot y POLE a partir del movimiento FK.</p>
+            <p class="hint">Genera IK-Hand, IK-Foot y POLE muestreando la cadena FK ya retargeteada; usa delta-from-rest y un ancla geométrica para evitar flips de poles.</p>
           </section>
 
           <section class="settings-section">
@@ -317,6 +317,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-blendcap1"></script>
+  <script type="module" src="./app.js?v=20260920-blendcap2"></script>
 </body>
 </html>
