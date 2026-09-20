@@ -87,7 +87,8 @@ export function buildOriginalRigDeltaData(
   slot,
   fps,
   originalName,
-  rotationMode = 'xyz'
+  rotationMode = 'xyz',
+  options = {}
 ) {
   if (!clip || !slot?.root) {
     throw new Error('Blender Action: faltan clip o Target.');
@@ -159,11 +160,18 @@ export function buildOriginalRigDeltaData(
     /^POLE-(Arm|Leg)\./.test(record.bone)
   );
 
+  const convertToIk = !!options.convertToIk;
+  const keepLimbFk = options.keepLimbFk !== false;
+  const modeTag = convertToIk ? 'IK' : 'FK';
+
   return {
     name: (clip.name || 'Retargeted_FK') +
-      (rotationMode === 'quaternion' ? '_OriginalRig_Quaternion' : '_OriginalRig_XYZ'),
+      `_OriginalRig_${modeTag}_` +
+      (rotationMode === 'quaternion' ? 'Quaternion' : 'XYZ'),
     rotationMode,
     hasIk,
+    convertToIk,
+    keepLimbFk,
     fps,
     frameEnd: frames.length ? Math.round(frames[frames.length - 1]) : 0,
     frames,
@@ -176,14 +184,16 @@ export function buildBlenderActionScript(
   slot,
   fps,
   originalName,
-  rotationMode = 'xyz'
+  rotationMode = 'xyz',
+  options = {}
 ) {
   const payload = buildOriginalRigDeltaData(
     clip,
     slot,
     fps,
     originalName,
-    rotationMode
+    rotationMode,
+    options
   );
 
   const jsonLiteral = JSON.stringify(JSON.stringify(payload));
@@ -199,12 +209,25 @@ if rig is None or rig.type != 'ARMATURE':
 scene = bpy.context.scene
 view_layer = bpy.context.view_layer
 
-# CloudRig usa 0=FK y 1=IK. Si la Action contiene IK-Hand/IK-Foot/POLE,
-# deja el rig directamente en IK; en una Action FK pura lo deja en FK.
-USE_IK = bool(DATA.get('hasIk', False))
-IK_SWITCH_VALUE = 1 if USE_IK else 0
+# CloudRig usa 0=FK y 1=IK.
+# El bake exacto FK->IK se hace EN BLENDER sobre el rig original, porque el
+# FBX no conserva los ARMATURE/IK constraints ni los parent-switches que
+# determinan el espacio real de IK-Hand / IK-Foot / POLE.
+CONVERT_TO_IK = bool(DATA.get('convertToIk', False))
+KEEP_LIMB_FK = bool(DATA.get('keepLimbFk', True))
+
 NON_SWITCH_IK = ('ik_stretch', 'ik_parents', 'ik_pole_follow', 'ik_hinge')
+
+def _is_limb_ik_switch(key):
+    k = str(key).lower()
+    if not k.startswith('ik_') or k.startswith(NON_SWITCH_IK):
+        return False
+    return any(token in k for token in ('arm', 'leg', 'thigh', 'upperarm'))
+
+limb_switches = []
+ik_context_props = []
 changed_props = []
+
 for pb in rig.pose.bones:
     for key in list(pb.keys()):
         try:
@@ -213,10 +236,15 @@ for pb in rig.pose.bones:
             continue
         if not isinstance(value, (int, float)):
             continue
-        if key.startswith('ik_') and not key.startswith(NON_SWITCH_IK):
-            if value != IK_SWITCH_VALUE:
-                pb[key] = type(value)(IK_SWITCH_VALUE)
-                changed_props.append(pb.name + ':' + key + '=' + str(IK_SWITCH_VALUE))
+
+        if _is_limb_ik_switch(key):
+            limb_switches.append((pb, key, type(value)))
+            # Sample/bake from the already-perfect FK pose first.
+            if value != 0:
+                pb[key] = type(value)(0)
+                changed_props.append(pb.name + ':' + key + '=0')
+        elif key.startswith(('ik_parents', 'ik_pole_follow', 'ik_stretch', 'ik_hinge')):
+            ik_context_props.append((pb, key, value))
         elif key.startswith('fk_hinge_'):
             if value != 0:
                 pb[key] = type(value)(0)
@@ -346,10 +374,230 @@ for sample_index, frame in enumerate(frames):
                 group=item['bone']
             )
 
+
+# ---------------------------------------------------------------------------
+# EXACT FK -> IK BAKE ON THE ORIGINAL CLOUDRIG
+# ---------------------------------------------------------------------------
+if CONVERT_TO_IK:
+    IK_CHAINS = [
+        {
+            'label': 'Arm.L',
+            'fk': ('FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L'),
+            'ik': 'IK-Hand.L',
+            'pole': 'POLE-Arm.L',
+        },
+        {
+            'label': 'Arm.R',
+            'fk': ('FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R'),
+            'ik': 'IK-Hand.R',
+            'pole': 'POLE-Arm.R',
+        },
+        {
+            'label': 'Leg.L',
+            'fk': ('FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L'),
+            'ik': 'IK-Foot.L',
+            'pole': 'POLE-Leg.L',
+        },
+        {
+            'label': 'Leg.R',
+            'fk': ('FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R'),
+            'ik': 'IK-Foot.R',
+            'pole': 'POLE-Leg.R',
+        },
+    ]
+
+    def _closest_point_on_line(line_start, line_end, point):
+        line_dir = line_end - line_start
+        denom = line_dir.dot(line_dir)
+        if denom <= 1e-12:
+            return line_start.copy()
+        factor = (point - line_start).dot(line_dir) / denom
+        return line_start + line_dir * factor
+
+    def _cloudrig_pole_location(first, second):
+        # CloudRig-style pole: current FK chain plane, armature/object space.
+        first_head = first.head.copy()
+        first_tail = first.tail.copy()
+        second_tail = second.tail.copy()
+
+        chain_vec = second_tail - first_head
+        closest = _closest_point_on_line(first_head, second_tail, first_tail)
+        elbow_vec = first_tail - closest
+
+        if elbow_vec.length <= 1e-8:
+            chain_n = chain_vec.normalized() if chain_vec.length > 1e-8 else Vector((0, 1, 0))
+            candidates = [first.x_axis.copy(), -first.x_axis.copy(),
+                          first.z_axis.copy(), -first.z_axis.copy()]
+            candidates = [v - chain_n * v.dot(chain_n) for v in candidates]
+            candidates = [v for v in candidates if v.length > 1e-8]
+            elbow_vec = max(candidates, key=lambda v: v.length) if candidates else Vector((0, 0, 1))
+
+        elbow_dir = elbow_vec.normalized()
+        return first_tail + elbow_dir * max(chain_vec.length, first.length + second.length)
+
+    valid_chains = []
+    for spec in IK_CHAINS:
+        names = list(spec['fk']) + [spec['ik'], spec['pole']]
+        missing = [name for name in names if rig.pose.bones.get(name) is None]
+        if missing:
+            print('[Retarget-to-play] FK->IK skip', spec['label'], 'missing:', missing)
+            continue
+        valid_chains.append(spec)
+
+    print('[Retarget-to-play] FK->IK exact chains:', len(valid_chains), '/ 4')
+
+    # Keep FK active while sampling. IK is derived from the TARGET FK result.
+    for pb, key, value_type in limb_switches:
+        try:
+            pb[key] = value_type(0)
+        except Exception:
+            pass
+
+    try:
+        rig.update_tag()
+    except Exception:
+        pass
+    scene.frame_set(scene.frame_current)
+    view_layer.update()
+
+    for sample_index, frame in enumerate(frames):
+        f = round(frame)
+        scene.frame_set(f)
+        view_layer.update()
+
+        frame_samples = []
+
+        for spec in valid_chains:
+            fk_first = rig.pose.bones[spec['fk'][0]]
+            fk_second = rig.pose.bones[spec['fk'][1]]
+            fk_end = rig.pose.bones[spec['fk'][2]]
+            ik_ctrl = rig.pose.bones[spec['ik']]
+            pole_ctrl = rig.pose.bones[spec['pole']]
+
+            # BlendCap formula in armature-local space.
+            desired_ik = (
+                fk_end.matrix.copy()
+                @ fk_end.bone.matrix_local.inverted()
+                @ ik_ctrl.bone.matrix_local
+            )
+            pole_loc = _cloudrig_pole_location(fk_first, fk_second)
+
+            frame_samples.append((spec, ik_ctrl, pole_ctrl, desired_ik, pole_loc))
+
+        # End effectors first. Let Blender do the authoritative matrix->basis
+        # solve through the real P-IK parent-switch hierarchy.
+        for spec, ik_ctrl, pole_ctrl, desired_ik, pole_loc in frame_samples:
+            if rotation_mode == 'quaternion':
+                ik_ctrl.rotation_mode = 'QUATERNION'
+            else:
+                ik_ctrl.rotation_mode = 'XYZ'
+
+            ik_ctrl.matrix = desired_ik
+            view_layer.update()
+
+            ik_ctrl.keyframe_insert(
+                data_path='location',
+                frame=f,
+                group=spec['ik']
+            )
+            if rotation_mode == 'quaternion':
+                ik_ctrl.keyframe_insert(
+                    data_path='rotation_quaternion',
+                    frame=f,
+                    group=spec['ik']
+                )
+            else:
+                ik_ctrl.keyframe_insert(
+                    data_path='rotation_euler',
+                    frame=f,
+                    group=spec['ik']
+                )
+
+        # Poles second. This matters for legs whose pole parent follows IK-Foot.
+        view_layer.update()
+
+        for spec, ik_ctrl, pole_ctrl, desired_ik, pole_loc in frame_samples:
+            pole_mat = pole_ctrl.matrix.copy()
+            pole_mat.translation = pole_loc
+            pole_ctrl.matrix = pole_mat
+            view_layer.update()
+
+            pole_ctrl.keyframe_insert(
+                data_path='location',
+                frame=f,
+                group=spec['pole']
+            )
+
+    switch_frames = [int(scene.frame_start), int(scene.frame_end)]
+
+    # Turn on only the limb IK systems that were baked and key that state.
+    for pb, key, value_type in limb_switches:
+        try:
+            pb[key] = value_type(1)
+            for f in switch_frames:
+                pb.keyframe_insert(
+                    data_path='["' + key + '"]',
+                    frame=f,
+                    group='IK Switches'
+                )
+        except Exception as exc:
+            print('[Retarget-to-play] switch key failed:', pb.name, key, exc)
+
+    # Preserve parent-switch / pole-follow / stretch state in the Action.
+    for pb, key, value in ik_context_props:
+        try:
+            pb[key] = value
+            for f in switch_frames:
+                pb.keyframe_insert(
+                    data_path='["' + key + '"]',
+                    frame=f,
+                    group='IK Context'
+                )
+        except Exception:
+            pass
+
+    if not KEEP_LIMB_FK:
+        limb_fk = {
+            'FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L',
+            'FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R',
+            'FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L',
+            'FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R',
+        }
+
+        try:
+            for fc in list(action.fcurves):
+                if any(('pose.bones["' + bone_name + '"]') in fc.data_path for bone_name in limb_fk):
+                    action.fcurves.remove(fc)
+        except Exception as exc:
+            print('[Retarget-to-play] No pude limpiar FK limb curves:', exc)
+
+    try:
+        rig.update_tag()
+    except Exception:
+        pass
+    scene.frame_set(scene.frame_start)
+    view_layer.update()
+else:
+    # Pure FK Action: key the limb switches OFF so the Action remains portable.
+    switch_frames = [int(scene.frame_start), int(scene.frame_end)]
+    for pb, key, value_type in limb_switches:
+        try:
+            pb[key] = value_type(0)
+            for f in switch_frames:
+                pb.keyframe_insert(
+                    data_path='["' + key + '"]',
+                    frame=f,
+                    group='IK Switches'
+                )
+        except Exception:
+            pass
+
+# Transform curves are linear. IK properties are discrete.
 try:
     for fc in action.fcurves:
+        is_ik_prop = ('["ik_' in fc.data_path)
         for kp in fc.keyframe_points:
-            kp.interpolation = 'LINEAR'
+            kp.interpolation = 'CONSTANT' if is_ik_prop else 'LINEAR'
 except Exception:
     pass
 
@@ -357,7 +605,8 @@ scene.frame_set(0)
 view_layer.update()
 
 print('[Retarget-to-play] Action creada:', action.name)
-print('[Retarget-to-play] CloudRig modo:', 'IK' if USE_IK else 'FK', '· props cambiadas:', len(changed_props))
+print('[Retarget-to-play] CloudRig modo:', 'IK exacto' if CONVERT_TO_IK else 'FK', '· props cambiadas:', len(changed_props))
+print('[Retarget-to-play] FK limb conservado:', KEEP_LIMB_FK if CONVERT_TO_IK else True)
 for item in changed_props:
     print('  ', item)
 `;
@@ -376,6 +625,6 @@ for item in changed_props:
   ].join('\n');
 }
 
-export function buildBlenderXYZActionScript(clip, slot, fps, originalName) {
-  return buildBlenderActionScript(clip, slot, fps, originalName, 'xyz');
+export function buildBlenderXYZActionScript(clip, slot, fps, originalName, options = {}) {
+  return buildBlenderActionScript(clip, slot, fps, originalName, 'xyz', options);
 }
