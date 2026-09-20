@@ -1189,23 +1189,68 @@ function seek(time) {
   $('timeReadout').textContent = `${state.playTime.toFixed(2)} / ${duration.toFixed(2)} s`;
 }
 
-function bindDropZone(zone, input, handler) {
-  zone.addEventListener('dragover', e => {
+function bindDropModule(module, input, handler, label) {
+  let dragDepth = 0;
+
+  const hasFiles = event =>
+    event.dataTransfer &&
+    Array.from(event.dataTransfer.types || []).includes('Files');
+
+  module.addEventListener('dragenter', e => {
+    if (!hasFiles(e)) return;
     e.preventDefault();
-    zone.classList.add('drag');
+    dragDepth++;
+    module.classList.add('drag-import');
   });
-  zone.addEventListener('dragleave', () => zone.classList.remove('drag'));
-  zone.addEventListener('drop', e => {
+
+  module.addEventListener('dragover', e => {
+    if (!hasFiles(e)) return;
     e.preventDefault();
-    zone.classList.remove('drag');
-    const file = [...e.dataTransfer.files].find(f => /\.fbx$/i.test(f.name));
+    e.dataTransfer.dropEffect = 'copy';
+    module.classList.add('drag-import');
+  });
+
+  module.addEventListener('dragleave', e => {
+    if (!hasFiles(e)) return;
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (dragDepth === 0) module.classList.remove('drag-import');
+  });
+
+  module.addEventListener('drop', e => {
+    if (!hasFiles(e)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    dragDepth = 0;
+    module.classList.remove('drag-import');
+
+    const files = [...e.dataTransfer.files];
+    const file = files.find(f => /\.fbx$/i.test(f.name));
+
+    if (!file) {
+      log(`${label}: el archivo soltado no es FBX.`);
+      setStatus('Solo se admiten FBX', 'bad');
+      return;
+    }
+
+    handler(file);
+  });
+
+  input.addEventListener('change', () => {
+    const file = input.files?.[0];
     if (file) handler(file);
+    input.value = '';
   });
-  input.addEventListener('change', () => input.files[0] && handler(input.files[0]));
 }
 
-bindDropZone($('sourceDrop'), $('sourceFile'), file => loadFbx(file, state.source, sourceView).catch(e => log(`ERROR Source: ${e.message}`)));
-bindDropZone($('targetDrop'), $('targetFile'), file => loadFbx(file, state.target, targetView).catch(e => log(`ERROR Target: ${e.message}`)));
+const loadSourceFile = file =>
+  loadFbx(file, state.source, sourceView).catch(e => log(`ERROR Source: ${e.message}`));
+
+const loadTargetFile = file =>
+  loadFbx(file, state.target, targetView).catch(e => log(`ERROR Target: ${e.message}`));
+
+// Todo el módulo es zona de drop: cabecera, viewport y footer.
+bindDropModule($('sourceModule'), $('sourceFile'), loadSourceFile, 'Source');
+bindDropModule($('targetModule'), $('targetFile'), loadTargetFile, 'Target');
 
 $('sourceButton').onclick = () => $('sourceFile').click();
 $('targetButton').onclick = () => $('targetFile').click();
