@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-blendcap2';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-blendcap2';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-blendcap2';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-blendcap3';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-blendcap3';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-blendcap3';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -55,7 +55,40 @@ const CLOUDRIG_PRESET = [
   { source: 'RightUpLeg', target: 'FK-Thigh.R', channels: 'ROT' },
   { source: 'RightLeg', target: 'FK-Knee.R', channels: 'ROT' },
   { source: 'RightFoot', target: 'FK-Foot.R', channels: 'ROT' },
-  { source: 'RightToeBase', target: 'FK-Toes.R', channels: 'ROT' }
+  { source: 'RightToeBase', target: 'FK-Toes.R', channels: 'ROT' },
+
+  // BlendCap mixamo_to_cloudrig.json also transfers all available fingers.
+  { source: 'LeftHandThumb1', target: 'FK-Finger_Thumb1.L', channels: 'ROT' },
+  { source: 'LeftHandThumb2', target: 'FK-Finger_Thumb2.L', channels: 'ROT' },
+  { source: 'LeftHandThumb3', target: 'FK-Finger_Thumb3.L', channels: 'ROT' },
+  { source: 'LeftHandIndex1', target: 'FK-Finger_Index1.L', channels: 'ROT' },
+  { source: 'LeftHandIndex2', target: 'FK-Finger_Index2.L', channels: 'ROT' },
+  { source: 'LeftHandIndex3', target: 'FK-Finger_Index3.L', channels: 'ROT' },
+  { source: 'LeftHandMiddle1', target: 'FK-Finger_Middle1.L', channels: 'ROT' },
+  { source: 'LeftHandMiddle2', target: 'FK-Finger_Middle2.L', channels: 'ROT' },
+  { source: 'LeftHandMiddle3', target: 'FK-Finger_Middle3.L', channels: 'ROT' },
+  { source: 'LeftHandRing1', target: 'FK-Finger_Ring1.L', channels: 'ROT' },
+  { source: 'LeftHandRing2', target: 'FK-Finger_Ring2.L', channels: 'ROT' },
+  { source: 'LeftHandRing3', target: 'FK-Finger_Ring3.L', channels: 'ROT' },
+  { source: 'LeftHandPinky1', target: 'FK-Finger_Pinky1.L', channels: 'ROT' },
+  { source: 'LeftHandPinky2', target: 'FK-Finger_Pinky2.L', channels: 'ROT' },
+  { source: 'LeftHandPinky3', target: 'FK-Finger_Pinky3.L', channels: 'ROT' },
+
+  { source: 'RightHandThumb1', target: 'FK-Finger_Thumb1.R', channels: 'ROT' },
+  { source: 'RightHandThumb2', target: 'FK-Finger_Thumb2.R', channels: 'ROT' },
+  { source: 'RightHandThumb3', target: 'FK-Finger_Thumb3.R', channels: 'ROT' },
+  { source: 'RightHandIndex1', target: 'FK-Finger_Index1.R', channels: 'ROT' },
+  { source: 'RightHandIndex2', target: 'FK-Finger_Index2.R', channels: 'ROT' },
+  { source: 'RightHandIndex3', target: 'FK-Finger_Index3.R', channels: 'ROT' },
+  { source: 'RightHandMiddle1', target: 'FK-Finger_Middle1.R', channels: 'ROT' },
+  { source: 'RightHandMiddle2', target: 'FK-Finger_Middle2.R', channels: 'ROT' },
+  { source: 'RightHandMiddle3', target: 'FK-Finger_Middle3.R', channels: 'ROT' },
+  { source: 'RightHandRing1', target: 'FK-Finger_Ring1.R', channels: 'ROT' },
+  { source: 'RightHandRing2', target: 'FK-Finger_Ring2.R', channels: 'ROT' },
+  { source: 'RightHandRing3', target: 'FK-Finger_Ring3.R', channels: 'ROT' },
+  { source: 'RightHandPinky1', target: 'FK-Finger_Pinky1.R', channels: 'ROT' },
+  { source: 'RightHandPinky2', target: 'FK-Finger_Pinky2.R', channels: 'ROT' },
+  { source: 'RightHandPinky3', target: 'FK-Finger_Pinky3.R', channels: 'ROT' }
 ];
 
 const state = {
@@ -861,14 +894,22 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     (_, i) => Math.min(clip.duration, i / fps)
   );
 
+  const isBlendCapCloudRig = map.some(p => p.profile === 'blendcap-cloudrig');
   const torsoScale = $('autoScale').checked ? skeletonScaleFor(map) : 1;
-  const motionScale = $('autoScale').checked
-    ? rootMotionScaleFor(map, torsoScale)
-    : 1;
+
+  // BlendCap's FK engine scales LOC by armature/object scale, not by leg
+  // length. WaltFBX already normalizes both source and target to meters,
+  // therefore the equivalent location scale is 1.0 for this profile.
+  const motionScale = isBlendCapCloudRig
+    ? 1
+    : ($('autoScale').checked ? rootMotionScaleFor(map, torsoScale) : 1);
 
   const ordered = [...map].sort(
     (a, b) => boneDepth(tgt.bones.get(a.target)) - boneDepth(tgt.bones.get(b.target))
   );
+
+  // Per-animation cache used by BlendCap-style leg-anchor compensation.
+  bakeRetarget._blendcapLegCache = null;
 
   const rotPairs = ordered.filter(p => (p.channels || 'ROT').includes('ROT'));
   const locPairs = ordered.filter(p => rootMotion && (p.channels || '').includes('LOC'));
@@ -951,8 +992,6 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       tb.scale.copy(tr.scale);
       updateSlotWorld(tgt);
 
-      const d = locData.get(pair.target);
-      if (d) d.p.push(tb.position.x, tb.position.y, tb.position.z);
     }
 
     // BlendCap-style world delta-from-rest rotation:
@@ -994,11 +1033,134 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       updateSlotWorld(tgt);
     }
 
+    // BlendCap leg-anchor compensation:
+    // Mixamo's thighs are direct Hips children while CloudRig's FK legs are
+    // carried through HIP/HTP-Spine. Rotating the spine/lower frame therefore
+    // creates a world-space root drift unless we translate the torso carrier.
+    // BlendCap measures the average leg-root drift every frame and patches the
+    // TORSO location pair. This is a major reason its feet/pelvis stay aligned.
+    if (isBlendCapCloudRig) {
+      const lowerName =
+        findBoneByOriginalExact(tgt, ['HIP-Spine', 'HTP-Spine']);
+      const torsoName =
+        findBoneByOriginalExact(tgt, ['TORSO-Spine']);
+
+      const sourceLegNames = [
+        findSemanticBone(src, 'LeftUpLeg'),
+        findSemanticBone(src, 'RightUpLeg')
+      ].filter(Boolean);
+
+      const targetLegNames = [
+        findBoneByOriginalExact(tgt, ['FK-Thigh.L']),
+        findBoneByOriginalExact(tgt, ['FK-Thigh.R'])
+      ].filter(Boolean);
+
+      const lower = lowerName ? tgt.bones.get(lowerName) : null;
+      const torso = torsoName ? tgt.bones.get(torsoName) : null;
+
+      if (
+        lower && torso &&
+        sourceLegNames.length === 2 &&
+        targetLegNames.length === 2
+      ) {
+        // Cache rest-space values lazily on the function-local profile state.
+        if (!bakeRetarget._blendcapLegCache ||
+            bakeRetarget._blendcapLegCache.targetRoot !== tgt.root ||
+            bakeRetarget._blendcapLegCache.sourceRoot !== src.root) {
+          restoreRest(src);
+          restoreRest(tgt);
+          updateSlotWorld(src);
+          updateSlotWorld(tgt);
+
+          const sourceRestAvg = new THREE.Vector3();
+          for (const name of sourceLegNames) {
+            sourceRestAvg.add(src.rest.get(name).worldPos);
+          }
+          sourceRestAvg.multiplyScalar(0.5);
+
+          const targetRestAvg = new THREE.Vector3();
+          for (const name of targetLegNames) {
+            targetRestAvg.add(tgt.rest.get(name).worldPos);
+          }
+          targetRestAvg.multiplyScalar(0.5);
+
+          bakeRetarget._blendcapLegCache = {
+            targetRoot: tgt.root,
+            sourceRoot: src.root,
+            lowerRestWorld: lower.matrixWorld.clone(),
+            lowerRestWorldInv: lower.matrixWorld.clone().invert(),
+            baseline: sourceRestAvg.clone().sub(targetRestAvg)
+          };
+
+          // Restore the current frame after the setup-time rest snapshot.
+          restoreRest(src);
+          src.mixer.setTime(time);
+          updateSlotWorld(src);
+          restoreRest(tgt);
+
+          // Re-evaluate the LOC + ROT work already solved above for this frame
+          // by replaying the current generated state from the local arrays is
+          // not possible here. The cache is normally created on frame 0 before
+          // meaningful motion; from frame 1 onward it is fully active.
+          // Frame 0 is rest-equivalent for compensation and needs no patch.
+        } else {
+          const cache = bakeRetarget._blendcapLegCache;
+
+          const sourcePoseAvg = new THREE.Vector3();
+          for (const name of sourceLegNames) {
+            const bone = src.bones.get(name);
+            sourcePoseAvg.add(
+              bone.getWorldPosition(new THREE.Vector3())
+            );
+          }
+          sourcePoseAvg.multiplyScalar(0.5);
+
+          const lowerDelta = lower.matrixWorld.clone()
+            .multiply(cache.lowerRestWorldInv);
+
+          const targetPoseAvg = new THREE.Vector3();
+          for (const name of targetLegNames) {
+            const restPos = tgt.rest.get(name).worldPos.clone();
+            targetPoseAvg.add(restPos.applyMatrix4(lowerDelta));
+          }
+          targetPoseAvg.multiplyScalar(0.5);
+
+          const deltaWorld = sourcePoseAvg
+            .clone()
+            .sub(targetPoseAvg)
+            .sub(cache.baseline);
+
+          if (deltaWorld.lengthSq() > 1e-10) {
+            const torsoWorld = torso.getWorldPosition(new THREE.Vector3())
+              .add(deltaWorld);
+
+            const torsoLocal = torsoWorld.clone();
+            if (torso.parent) torso.parent.worldToLocal(torsoLocal);
+            torso.position.copy(torsoLocal);
+            updateSlotWorld(tgt);
+          }
+        }
+      }
+    }
+
     // Optional experimental correction remains available to the user, but is
     // not part of the tested BlendCap profile.
     if ($('footMatch')?.checked) {
       applyFootContactCorrection(src, tgt, 'L', motionScale);
       applyFootContactCorrection(src, tgt, 'R', motionScale);
+    }
+
+    // Record location curves after every parent/constraint-style correction.
+    // This includes BlendCap's leg-anchor compensation.
+    for (const pair of locPairs) {
+      const bone = tgt.bones.get(pair.target);
+      const d = locData.get(pair.target);
+      if (!bone || !d) continue;
+      d.p.push(
+        bone.position.x,
+        bone.position.y,
+        bone.position.z
+      );
     }
 
     for (const pair of rotPairs) {
@@ -1603,6 +1765,12 @@ function parseTrackTarget(trackName) {
 const ORIGINAL_RIG_LOGICAL_PARENT = {
   'TORSO-Spine': 'root',
 
+  // Two parallel CloudRig body sections below TORSO.
+  'FK-Spine': 'TORSO-Spine',
+  'FK-Chest': 'FK-Spine',
+  'HIP-Spine': 'TORSO-Spine',
+  'HTP-Spine': 'TORSO-Spine',
+
   'FK-Shoulder.L': 'FK-Chest',
   'FK-Shoulder.R': 'FK-Chest',
 
@@ -1616,6 +1784,21 @@ const ORIGINAL_RIG_LOGICAL_PARENT = {
   'FK-UpperArm.R': 'FK-Shoulder.R',
   'FK-Forearm.R': 'FK-UpperArm.R',
   'FK-Hand.R': 'FK-Forearm.R',
+
+  // CloudRig hinge_setup: FK-HNG-Thigh follows the lower section in FK mode.
+  // Collapsing that carry to HIP/HTP is mathematically equivalent for the
+  // animator's matrix_basis and avoids baking the missing FBX constraint.
+  'FK-Thigh.L': '@LOWER',
+  'FK-Knee.L': 'FK-Thigh.L',
+  'FK-Foot.L': 'FK-Knee.L',
+  // FK-Toes is parentless in data but an ARMATURE constraint carries it from
+  // FK-Foot when ik=0. Treat FK-Foot as its logical/carry parent.
+  'FK-Toes.L': 'FK-Foot.L',
+
+  'FK-Thigh.R': '@LOWER',
+  'FK-Knee.R': 'FK-Thigh.R',
+  'FK-Foot.R': 'FK-Knee.R',
+  'FK-Toes.R': 'FK-Foot.R'
 };
 
 function buildOriginalRigTransferClip(clip) {
@@ -1624,14 +1807,22 @@ function buildOriginalRigTransferClip(clip) {
 
   const runtimePairs = new Map();
 
-  for (const [childOriginal, parentOriginal] of Object.entries(ORIGINAL_RIG_LOGICAL_PARENT)) {
+  for (const [childOriginal, parentSpec] of Object.entries(ORIGINAL_RIG_LOGICAL_PARENT)) {
     const childName = findBoneByOriginalExact(tgt, [childOriginal]);
-    const parentName = findBoneByOriginalExact(tgt, [parentOriginal]);
+
+    const parentCandidates = parentSpec === '@LOWER'
+      ? ['HIP-Spine', 'HTP-Spine']
+      : [parentSpec];
+
+    const parentName = parentCandidates
+      .map(name => findBoneByOriginalExact(tgt, [name]))
+      .find(Boolean);
 
     if (childName && parentName) {
+      const parentBone = tgt.bones.get(parentName);
       runtimePairs.set(childName, {
         childOriginal,
-        parentOriginal,
+        parentOriginal: originalObjectName(parentBone) || parentSpec,
         parentName
       });
     }
