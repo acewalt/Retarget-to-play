@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rootsplit1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-originalhip1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-originalhip1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-blendcap1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-blendcap1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-blendcap1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -19,28 +19,43 @@ const viewportWhiteMaterial = new THREE.MeshStandardMaterial({
 // WaltFBX lee el valor real del archivo y calcula metersPerUnit.
 const DEFAULT_FBX_UNIT_TO_METERS = 0.01;
 
+// Mixamo -> CloudRig profile, aligned with the BlendCap preset supplied by
+// the user. This is intentionally NOT a one-bone-per-bone humanoid map.
+// Mixamo Hips is split across the controls that CloudRig actually uses:
+//   Hips ROT        -> HIP/HTP-Spine
+//   Hips vertical   -> TORSO-Spine
+//   Hips horizontal -> root
+// Spine/Spine1 drive FK-Spine/FK-Chest; Spine2 is intentionally not used.
 const CLOUDRIG_PRESET = [
-  ['Hips', 'FK-Hips'],
-  ['Spine', 'FK-Spine'],
-  ['Spine2', 'FK-Chest'],
-  ['Neck', 'FK-Neck'],
-  ['Head', 'FK-Head'],
-  ['LeftShoulder', 'FK-Shoulder.L'],
-  ['LeftArm', 'FK-UpperArm.L'],
-  ['LeftForeArm', 'FK-Forearm.L'],
-  ['LeftHand', 'FK-Hand.L'],
-  ['RightShoulder', 'FK-Shoulder.R'],
-  ['RightArm', 'FK-UpperArm.R'],
-  ['RightForeArm', 'FK-Forearm.R'],
-  ['RightHand', 'FK-Hand.R'],
-  ['LeftUpLeg', 'FK-Thigh.L'],
-  ['LeftLeg', 'FK-Knee.L'],
-  ['LeftFoot', 'FK-Foot.L'],
-  ['LeftToeBase', 'FK-Toes.L'],
-  ['RightUpLeg', 'FK-Thigh.R'],
-  ['RightLeg', 'FK-Knee.R'],
-  ['RightFoot', 'FK-Foot.R'],
-  ['RightToeBase', 'FK-Toes.R']
+  { source: 'Hips', target: ['HIP-Spine', 'HTP-Spine'], channels: 'ROT' },
+  { source: 'Hips', target: 'TORSO-Spine', channels: 'LOC', axes: 'VERTICAL' },
+  { source: 'Hips', target: 'root', channels: 'LOC', axes: 'HORIZONTAL' },
+
+  { source: 'Spine', target: 'FK-Spine', channels: 'ROT' },
+  { source: 'Spine1', target: 'FK-Chest', channels: 'ROT' },
+
+  { source: 'Neck', target: 'FK-Neck', channels: 'ROT' },
+  { source: 'Head', target: 'FK-Head', channels: 'ROT' },
+
+  { source: 'LeftShoulder', target: 'FK-Shoulder.L', channels: 'ROT' },
+  { source: 'LeftArm', target: 'FK-UpperArm.L', channels: 'ROT' },
+  { source: 'LeftForeArm', target: 'FK-Forearm.L', channels: 'ROT' },
+  { source: 'LeftHand', target: 'FK-Hand.L', channels: 'ROT' },
+
+  { source: 'RightShoulder', target: 'FK-Shoulder.R', channels: 'ROT' },
+  { source: 'RightArm', target: 'FK-UpperArm.R', channels: 'ROT' },
+  { source: 'RightForeArm', target: 'FK-Forearm.R', channels: 'ROT' },
+  { source: 'RightHand', target: 'FK-Hand.R', channels: 'ROT' },
+
+  { source: 'LeftUpLeg', target: 'FK-Thigh.L', channels: 'ROT' },
+  { source: 'LeftLeg', target: 'FK-Knee.L', channels: 'ROT' },
+  { source: 'LeftFoot', target: 'FK-Foot.L', channels: 'ROT' },
+  { source: 'LeftToeBase', target: 'FK-Toes.L', channels: 'ROT' },
+
+  { source: 'RightUpLeg', target: 'FK-Thigh.R', channels: 'ROT' },
+  { source: 'RightLeg', target: 'FK-Knee.R', channels: 'ROT' },
+  { source: 'RightFoot', target: 'FK-Foot.R', channels: 'ROT' },
+  { source: 'RightToeBase', target: 'FK-Toes.R', channels: 'ROT' }
 ];
 
 const state = {
@@ -429,12 +444,31 @@ function loadPreset() {
     return;
   }
   if ($('preset').value !== 'cloudrig-sintel') return;
-  state.boneMap = CLOUDRIG_PRESET.map(([s, t]) => ({
-    source: findSemanticBone(state.source, s) || '',
-    target: findSemanticBone(state.target, t) || ''
-  })).filter(p => p.source || p.target);
+  state.boneMap = CLOUDRIG_PRESET.map(entry => {
+    const targets = Array.isArray(entry.target) ? entry.target : [entry.target];
+    const target = targets
+      .map(name => findBoneByOriginalExact(state.target, [name]) || findSemanticBone(state.target, name))
+      .find(Boolean) || '';
+
+    return {
+      source: findSemanticBone(state.source, entry.source) || '',
+      target,
+      channels: entry.channels || 'ROT',
+      axes: entry.axes || 'XYZ',
+      profile: 'blendcap-cloudrig'
+    };
+  }).filter(p => p.source || p.target);
+
+  // BlendCap's tested CloudRig retarget does not solve feet with a second IK
+  // end-effector pass. Keep that optional, but default it OFF for this preset
+  // so the pair bake remains the source of truth.
+  if ($('footMatch')) $('footMatch').checked = false;
+
   refreshMapUi();
-  log(`Preset Mixamo → CloudRig cargado: ${state.boneMap.length} pares.`);
+  log(
+    `Preset Mixamo → CloudRig (BlendCap profile): ${state.boneMap.length} pares. ` +
+    'Hips ROT→HIP/HTP-Spine, vertical→TORSO-Spine, horizontal→root; Foot Match OFF.'
+  );
 }
 
 function normalizeName(name) {
@@ -822,44 +856,32 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
   const frameCount = Math.max(2, Math.ceil(clip.duration * fps) + 1);
-  const times = Array.from({ length: frameCount }, (_, i) => Math.min(clip.duration, i / fps));
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(clip.duration, i / fps)
+  );
+
   const torsoScale = $('autoScale').checked ? skeletonScaleFor(map) : 1;
-  const motionScale = $('autoScale').checked ? rootMotionScaleFor(map, torsoScale) : 1;
+  const motionScale = $('autoScale').checked
+    ? rootMotionScaleFor(map, torsoScale)
+    : 1;
+
   const ordered = [...map].sort(
     (a, b) => boneDepth(tgt.bones.get(a.target)) - boneDepth(tgt.bones.get(b.target))
   );
 
+  const rotPairs = ordered.filter(p => (p.channels || 'ROT').includes('ROT'));
+  const locPairs = ordered.filter(p => rootMotion && (p.channels || '').includes('LOC'));
+
   const data = new Map();
-  for (const p of ordered) data.set(p.target, { q: [] });
+  for (const p of rotPairs) {
+    if (!data.has(p.target)) data.set(p.target, { q: [] });
+  }
 
-  const sourceHipsName =
-    ordered.find(p => /hips$/i.test(originalObjectName(src.bones.get(p.source)) || p.source))?.source ||
-    findSemanticBone(src, 'Hips');
-
-  // CloudRig hierarchy:
-  // root -> TORSO-Spine -> { FK-Spine (upper), HTP/HIP-Spine (lower) }.
-  //
-  // Source Mixamo has no separate root-motion bone: Hips contains both global
-  // locomotion and pelvic motion. Do not put all of that on TORSO-Spine.
-  //
-  // Split it:
-  //   root        = horizontal X/Z translation + global yaw
-  //   TORSO-Spine = vertical Y translation only
-  //
-  // This keeps the floor/root frame stable for FK-HNG legs and lets the
-  // sitting/down-up motion still move the body vertically.
-  const rootCarrierName = findBoneByOriginalExact(tgt, ['root']) || null;
-  const torsoCarrierName = findBoneByOriginalExact(tgt, ['TORSO-Spine']) || null;
-
-  const rootCarrier = rootCarrierName ? tgt.bones.get(rootCarrierName) : null;
-  const torsoCarrier = torsoCarrierName ? tgt.bones.get(torsoCarrierName) : null;
-
-  const rootRest = rootCarrierName ? tgt.rest.get(rootCarrierName) : null;
-  const torsoRest = torsoCarrierName ? tgt.rest.get(torsoCarrierName) : null;
-
-  const rootPositions = [];
-  const rootRotations = [];
-  const torsoPositions = [];
+  const locData = new Map();
+  for (const p of locPairs) {
+    if (!locData.has(p.target)) locData.set(p.target, { p: [] });
+  }
 
   const qSrc = new THREE.Quaternion();
   const qDelta = new THREE.Quaternion();
@@ -867,20 +889,10 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const qParent = new THREE.Quaternion();
   const qLocal = new THREE.Quaternion();
 
-  const qSourceHipsWorld = new THREE.Quaternion();
-  const qSourceHipsDelta = new THREE.Quaternion();
-  const qRootYaw = new THREE.Quaternion();
-  const qCarrierDesiredWorld = new THREE.Quaternion();
-  const qCarrierParentWorld = new THREE.Quaternion();
-  const qCarrierLocal = new THREE.Quaternion();
-  const worldUp = new THREE.Vector3(0, 1, 0);
-  let previousRootYaw = null;
-
-  const srcPos = new THREE.Vector3();
-  const desiredPos = new THREE.Vector3();
+  const srcWorldPos = new THREE.Vector3();
+  const desiredWorldPos = new THREE.Vector3();
+  const currentWorldPos = new THREE.Vector3();
   const localPos = new THREE.Vector3();
-  const rootDeltaHorizontal = new THREE.Vector3();
-  const torsoBaseWorld = new THREE.Vector3();
 
   if (!src.mixer) {
     src.mixer = new THREE.AnimationMixer(src.root);
@@ -893,113 +905,61 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     updateSlotWorld(src);
     restoreRest(tgt);
 
-    if (rootMotion && sourceHipsName) {
-      const sourceHips = src.bones.get(sourceHipsName);
-      const sourceHipsRest = src.rest.get(sourceHipsName);
+    // LOCATION first so every child rotation sees the current root / torso
+    // translation. The location transfer is a WORLD delta from source rest,
+    // scaled to target proportions, then filtered in WORLD axes.
+    for (const pair of locPairs) {
+      const sb = src.bones.get(pair.source);
+      const tb = tgt.bones.get(pair.target);
+      const sr = src.rest.get(pair.source);
+      const tr = tgt.rest.get(pair.target);
+      if (!sb || !tb || !sr || !tr) continue;
 
-      if (sourceHips && sourceHipsRest) {
-        sourceHips.getWorldPosition(srcPos);
+      sb.getWorldPosition(srcWorldPos);
+      const delta = srcWorldPos.clone()
+        .sub(sr.worldPos)
+        .multiplyScalar(motionScale);
 
-        const targetDeltaWorld = srcPos.clone()
-          .sub(sourceHipsRest.worldPos)
-          .multiplyScalar(motionScale);
+      tb.getWorldPosition(currentWorldPos);
+      desiredWorldPos.copy(tr.worldPos);
 
-        sourceHips.getWorldQuaternion(qSourceHipsWorld);
-        qSourceHipsDelta.copy(qSourceHipsWorld)
-          .multiply(sourceHipsRest.worldQuat.clone().invert())
-          .normalize();
-
-        extractWorldTwistQuaternion(
-          qSourceHipsDelta,
-          worldUp,
-          qRootYaw
-        );
-
-        if (previousRootYaw && previousRootYaw.dot(qRootYaw) < 0) {
-          qRootYaw.x *= -1;
-          qRootYaw.y *= -1;
-          qRootYaw.z *= -1;
-          qRootYaw.w *= -1;
-        }
-        previousRootYaw = qRootYaw.clone();
-
-        if (rootCarrier && rootRest) {
-          // Global floor/root motion: horizontal displacement + yaw only.
-          rootDeltaHorizontal.set(
-            targetDeltaWorld.x,
-            0,
-            targetDeltaWorld.z
-          );
-
-          desiredPos.copy(rootRest.worldPos).add(rootDeltaHorizontal);
-          localPos.copy(desiredPos);
-
-          if (rootCarrier.parent) rootCarrier.parent.worldToLocal(localPos);
-
-          qCarrierDesiredWorld.copy(qRootYaw)
-            .multiply(rootRest.worldQuat)
-            .normalize();
-
-          if (rootCarrier.parent) {
-            rootCarrier.parent.getWorldQuaternion(qCarrierParentWorld);
-            qCarrierLocal.copy(qCarrierParentWorld)
-              .invert()
-              .multiply(qCarrierDesiredWorld)
-              .normalize();
-          } else {
-            qCarrierLocal.copy(qCarrierDesiredWorld);
-          }
-
-          rootCarrier.position.copy(localPos);
-          rootCarrier.quaternion.copy(qCarrierLocal);
-          rootCarrier.scale.copy(rootRest.scale);
-          updateSlotWorld(tgt);
-
-          rootPositions.push(
-            rootCarrier.position.x,
-            rootCarrier.position.y,
-            rootCarrier.position.z
-          );
-
-          rootRotations.push(
-            rootCarrier.quaternion.x,
-            rootCarrier.quaternion.y,
-            rootCarrier.quaternion.z,
-            rootCarrier.quaternion.w
-          );
-        }
-
-        if (torsoCarrier && torsoRest) {
-          // Pelvic up/down must NOT move the floor root. Start from the torso
-          // rest local transform under the already-animated root, then add only
-          // the vertical component of Mixamo Hips.
-          torsoCarrier.position.copy(torsoRest.position);
-          torsoCarrier.quaternion.copy(torsoRest.quaternion);
-          torsoCarrier.scale.copy(torsoRest.scale);
-          updateSlotWorld(tgt);
-
-          torsoCarrier.getWorldPosition(torsoBaseWorld);
-          desiredPos.copy(torsoBaseWorld);
-          desiredPos.y += targetDeltaWorld.y;
-
-          localPos.copy(desiredPos);
-          if (torsoCarrier.parent) torsoCarrier.parent.worldToLocal(localPos);
-
-          torsoCarrier.position.copy(localPos);
-          torsoCarrier.quaternion.copy(torsoRest.quaternion);
-          torsoCarrier.scale.copy(torsoRest.scale);
-          updateSlotWorld(tgt);
-
-          torsoPositions.push(
-            torsoCarrier.position.x,
-            torsoCarrier.position.y,
-            torsoCarrier.position.z
-          );
-        }
+      const axes = String(pair.axes || 'XYZ').toUpperCase();
+      if (axes === 'VERTICAL') {
+        // Three.js is Y-up after FBX import.
+        desiredWorldPos.y += delta.y;
+        // Preserve inherited horizontal motion from the current parent.
+        desiredWorldPos.x = currentWorldPos.x;
+        desiredWorldPos.z = currentWorldPos.z;
+      } else if (axes === 'HORIZONTAL') {
+        desiredWorldPos.x += delta.x;
+        desiredWorldPos.z += delta.z;
+        // Preserve the target's current floor height.
+        desiredWorldPos.y = currentWorldPos.y;
+      } else {
+        if (axes.includes('X')) desiredWorldPos.x += delta.x;
+        else desiredWorldPos.x = currentWorldPos.x;
+        if (axes.includes('Y')) desiredWorldPos.y += delta.y;
+        else desiredWorldPos.y = currentWorldPos.y;
+        if (axes.includes('Z')) desiredWorldPos.z += delta.z;
+        else desiredWorldPos.z = currentWorldPos.z;
       }
+
+      localPos.copy(desiredWorldPos);
+      if (tb.parent) tb.parent.worldToLocal(localPos);
+
+      tb.position.copy(localPos);
+      tb.scale.copy(tr.scale);
+      updateSlotWorld(tgt);
+
+      const d = locData.get(pair.target);
+      if (d) d.p.push(tb.position.x, tb.position.y, tb.position.z);
     }
 
-    for (const pair of ordered) {
+    // BlendCap-style world delta-from-rest rotation:
+    // target_world = source_pose_world * inverse(source_rest_world)
+    //                * target_rest_world.
+    // Parent-first order lets children solve against the fresh target pose.
+    for (const pair of rotPairs) {
       const sb = src.bones.get(pair.source);
       const tb = tgt.bones.get(pair.target);
       const sr = src.rest.get(pair.source);
@@ -1026,28 +986,38 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
         qLocal.copy(qDesired);
       }
 
+      // ROT pairs do not invent child translation. Natural hierarchy and the
+      // mapped section controls are responsible for carrying positions.
       tb.position.copy(tr.position);
       tb.quaternion.copy(qLocal);
       tb.scale.copy(tr.scale);
       updateSlotWorld(tgt);
-
     }
 
-    // End-effector correction for feet. This pass keeps the source foot
-    // trajectory/contact while preserving FK controls as the actual output.
-    applyFootContactCorrection(src, tgt, 'L', motionScale);
-    applyFootContactCorrection(src, tgt, 'R', motionScale);
+    // Optional experimental correction remains available to the user, but is
+    // not part of the tested BlendCap profile.
+    if ($('footMatch')?.checked) {
+      applyFootContactCorrection(src, tgt, 'L', motionScale);
+      applyFootContactCorrection(src, tgt, 'R', motionScale);
+    }
 
-    for (const pair of ordered) {
+    for (const pair of rotPairs) {
       const bone = tgt.bones.get(pair.target);
       const d = data.get(pair.target);
       if (!bone || !d) continue;
-      d.q.push(
-        bone.quaternion.x,
-        bone.quaternion.y,
-        bone.quaternion.z,
-        bone.quaternion.w
-      );
+
+      const q = bone.quaternion.clone().normalize();
+      const n = d.q.length;
+      if (n >= 4) {
+        const prev = new THREE.Quaternion(
+          d.q[n - 4], d.q[n - 3], d.q[n - 2], d.q[n - 1]
+        );
+        if (prev.dot(q) < 0) {
+          q.x *= -1; q.y *= -1; q.z *= -1; q.w *= -1;
+        }
+      }
+
+      d.q.push(q.x, q.y, q.z, q.w);
     }
   }
 
@@ -1055,45 +1025,35 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   restoreRest(tgt);
 
   const tracks = [];
+
   for (const [targetName, d] of data) {
-    tracks.push(
-      new THREE.QuaternionKeyframeTrack(`${targetName}.quaternion`, times, d.q)
-    );
+    if (d.q.length === times.length * 4) {
+      tracks.push(
+        new THREE.QuaternionKeyframeTrack(
+          `${targetName}.quaternion`,
+          times,
+          d.q
+        )
+      );
+    }
   }
 
-  if (rootCarrierName && rootPositions.length === times.length * 3) {
-    tracks.push(
-      new THREE.VectorKeyframeTrack(
-        `${rootCarrierName}.position`,
-        times,
-        rootPositions
-      )
-    );
-  }
-
-  if (rootCarrierName && rootRotations.length === times.length * 4) {
-    tracks.push(
-      new THREE.QuaternionKeyframeTrack(
-        `${rootCarrierName}.quaternion`,
-        times,
-        rootRotations
-      )
-    );
-  }
-
-  if (torsoCarrierName && torsoPositions.length === times.length * 3) {
-    tracks.push(
-      new THREE.VectorKeyframeTrack(
-        `${torsoCarrierName}.position`,
-        times,
-        torsoPositions
-      )
-    );
+  for (const [targetName, d] of locData) {
+    if (d.p.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(
+          `${targetName}.position`,
+          times,
+          d.p
+        )
+      );
+    }
   }
 
   log(
-    `Root motion dividido: Source Hips → root (X/Z + yaw) + TORSO-Spine (Y). ` +
-    `FK-Spine y HTP/HIP-Spine permanecen como secciones superior/inferior del CloudRig.`
+    'BlendCap profile bake: Hips ROT→HIP/HTP-Spine; ' +
+    'Hips vertical→TORSO-Spine; Hips horizontal→root; ' +
+    'Spine/Spine1→FK-Spine/FK-Chest. Sin root yaw inventado.'
   );
 
   return new THREE.AnimationClip(clipName, clip.duration, tracks);
@@ -2159,11 +2119,7 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
     throw new Error('Falta Target, retarget o FBX original.');
   }
 
-  const lowerFrameClip = buildOriginalRigLowerFrameClip(
-    state.targetPreviewClip || state.exportClip
-  );
-
-  const controlClip = buildOriginalRigControlOnlyClip(lowerFrameClip);
+  const controlClip = buildOriginalRigControlOnlyClip(state.exportClip);
   if (!controlClip || !controlClip.tracks.length) {
     throw new Error('No pude construir la Action de controles del CloudRig original.');
   }
@@ -2220,7 +2176,7 @@ async function exportOriginalRigActionFbx() {
 
     setStatus('Action FBX para rig original exportada', 'good');
     log(
-      `OriginalRig Action FBX: 1 stack · ${pkg.action.tracks.length} tracks · helpers/DEF=0 · lower frame HIP/HTP activo. ` +
+      `OriginalRig Action FBX: 1 stack · ${pkg.action.tracks.length} tracks · helpers/DEF=0 · BlendCap CloudRig profile. ` +
       'Importa este FBX sólo para extraer Retargeted_OriginalRig_FK.'
     );
   } catch (err) {
