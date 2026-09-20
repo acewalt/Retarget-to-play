@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-rigifyik4" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-rigifyik5" />
   <script type="importmap">
   {
     "imports": {
@@ -270,7 +270,7 @@
               <input id="keepFk" class="switch" type="checkbox" checked />
             </label>
             <button id="convertIk" class="wide-button" type="button" disabled>Convertir FK → IK</button>
-            <p class="hint">Usa el mismo principio de BlendCap: muestrea el FK evaluado del Target, calcula IK = FK pose × FK rest⁻¹ × IK rest y genera POLE desde la geometría de la cadena. CloudRig y Rigify codifican las curvas contra sus parents funcionales reales.</p>
+            <p class="hint">BlendCap-style FK → IK. En Rigify el bake reconstruye primero la pose FK del rig ORIGINAL (root→torso, shoulder COPY_TRANSFORMS y parents funcionales perdidos en FBX), y desde esa pose genera hand/foot IK + POLE.</p>
           </section>
 
           <section class="settings-section">
@@ -331,6 +331,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-rigifyik4"></script>
+  <script type="module" src="./app.js?v=20260920-rigifyik5"></script>
 </body>
 </html>
