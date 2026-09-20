@@ -1403,6 +1403,8 @@ function parseTrackTarget(trackName) {
 }
 
 const ORIGINAL_RIG_LOGICAL_PARENT = {
+  'TORSO-Spine': 'root',
+
   'FK-Shoulder.L': 'FK-Chest',
   'FK-Shoulder.R': 'FK-Chest',
 
