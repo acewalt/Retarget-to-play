@@ -810,6 +810,8 @@ function trackParts(trackName) {
 function shouldExportPosition(name, options = {}) {
   return name === 'root' ||
     name === 'TORSO-Spine' ||
+    name === 'HIP-Spine' ||
+    name === 'HTP-Spine' ||
     /^IK-(Hand|Foot)\./.test(name) ||
     /^POLE-(Arm|Leg)\./.test(name) ||
     (options.includeControlPositions && /^FK-/.test(name)) ||
