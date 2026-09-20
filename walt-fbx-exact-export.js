@@ -808,13 +808,19 @@ function trackParts(trackName) {
 }
 
 function shouldExportPosition(name, options = {}) {
+  // Generic preset Actions may animate location on Rigify, ARP, Mixamo,
+  // Mixamo Control Rig and facial controls whose names do not follow the
+  // CloudRig FK-/IK-/POLE- convention. When the caller explicitly requests
+  // control positions, preserve every position track already present in the
+  // baked clip. The clip itself is the whitelist.
+  if (options.includeControlPositions) return true;
+
   return name === 'root' ||
     name === 'TORSO-Spine' ||
     name === 'HIP-Spine' ||
     name === 'HTP-Spine' ||
     /^IK-(Hand|Foot)\./.test(name) ||
     /^POLE-(Arm|Leg)\./.test(name) ||
-    (options.includeControlPositions && /^FK-/.test(name)) ||
     (options.includeDeformPositions && /^DEF-/.test(name));
 }
 
