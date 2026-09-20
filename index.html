@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-blendcap2" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-blendcap3" />
   <script type="importmap">
   {
     "imports": {
@@ -296,7 +296,7 @@
               <input id="includeDefPreview" class="switch" type="checkbox" checked />
             </label>
 
-            <p class="hint">Perfil Mixamo → CloudRig alineado con BlendCap: Hips ROT va a HIP/HTP-Spine, la altura a TORSO-Spine y el desplazamiento horizontal a root; Spine/Spine1 van a FK-Spine/FK-Chest. OriginalRig_Action sigue sin DEF ni helpers.</p>
+            <p class="hint">Perfil Mixamo → CloudRig basado en el preset oficial de BlendCap: Hips ROT→HIP/HTP-Spine, altura→TORSO-Spine, desplazamiento horizontal→root; además se aplica la compensación de anclaje de piernas de BlendCap y la Action original usa la jerarquía funcional de hinges/toes, sin DEF ni helpers.</p>
           </section>
 
           <details class="diagnostics">
@@ -317,6 +317,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-blendcap2"></script>
+  <script type="module" src="./app.js?v=20260920-blendcap3"></script>
 </body>
 </html>
