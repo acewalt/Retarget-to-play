@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-original1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-original2" />
   <script type="importmap">
   {
     "imports": {
@@ -287,7 +287,7 @@
               <input id="downloadOriginalRigAction" class="switch" type="checkbox" checked />
             </label>
 
-            <p class="hint">El selector anterior controla la Action del CloudRig original. XYZ crea rotation_euler real y Quaternion crea rotation_quaternion. La Action FK incluida en el FBX se convierte al basis lógico del CloudRig original: Neck/Head siguen Chest/Neck y UpperArm sigue Shoulder, evitando hornear la compensación de los HNG estáticos del FBX.</p>
+            <p class="hint">El selector controla la Action creada directamente sobre el CloudRig ORIGINAL. El FBX exacto queda para preview/standalone; no reutilices su Action importada sobre el .blend original. El .py fuerza FK/HNG y reconstruye matrix_basis con los rest, parents y constraints reales del rig.</p>
 
             <label class="setting-row">
               <div><b>Action DEF Preview</b><small>Hace que el FBX standalone mueva la malla sin constraints</small></div>
@@ -315,6 +315,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-original1"></script>
+  <script type="module" src="./app.js?v=20260920-original2"></script>
 </body>
 </html>
