@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikblendcap1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikblendcap1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikblendcap1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikblendcap2';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikblendcap2';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikblendcap2';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -254,7 +254,8 @@ function captureRest(slot) {
       quaternion: bone.quaternion.clone(),
       scale: bone.scale.clone(),
       worldPos: bone.getWorldPosition(new THREE.Vector3()),
-      worldQuat: bone.getWorldQuaternion(new THREE.Quaternion())
+      worldQuat: bone.getWorldQuaternion(new THREE.Quaternion()),
+      worldScale: bone.getWorldScale(new THREE.Vector3())
     });
   }
 }
