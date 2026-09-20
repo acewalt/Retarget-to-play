@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt2';
+import { injectAnimationIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-export1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -66,6 +67,7 @@ function makeSlot(kind) {
     root: null,
     displayRoot: null,
     unitScale: DEFAULT_FBX_UNIT_TO_METERS,
+    originalBuffer: null,
     asset: null,
     metadata: null,
     rigRuntime: null,
@@ -281,6 +283,7 @@ async function loadFbx(file, slot, view) {
 
   clearSlot(slot, view);
   slot.fileName = file.name;
+  slot.originalBuffer = buffer.slice(0);
   slot.asset = asset;
   slot.metadata = asset.metadata;
   slot.rigRuntime = asset.runtime;
@@ -590,15 +593,32 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const frameCount = Math.max(2, Math.ceil(clip.duration * fps) + 1);
   const times = Array.from({ length: frameCount }, (_, i) => Math.min(clip.duration, i / fps));
   const scale = $('autoScale').checked ? skeletonScaleFor(map) : 1;
-  const ordered = [...map].sort((a, b) => boneDepth(tgt.bones.get(a.target)) - boneDepth(tgt.bones.get(b.target)));
+  const ordered = [...map].sort(
+    (a, b) => boneDepth(tgt.bones.get(a.target)) - boneDepth(tgt.bones.get(b.target))
+  );
+
   const data = new Map();
-  for (const p of ordered) data.set(p.target, { q: [], p: [], s: [] });
+  for (const p of ordered) data.set(p.target, { q: [] });
+
+  const sourceHipsName =
+    ordered.find(p => /hips$/i.test(originalObjectName(src.bones.get(p.source)) || p.source))?.source ||
+    findSemanticBone(src, 'Hips');
+
+  const motionCarrierName =
+    findBoneByOriginalExact(tgt, ['TORSO-Spine']) ||
+    findBoneByOriginalExact(tgt, ['root']) ||
+    null;
+
+  const motionCarrier = motionCarrierName ? tgt.bones.get(motionCarrierName) : null;
+  const motionRest = motionCarrierName ? tgt.rest.get(motionCarrierName) : null;
+  const motionPositions = [];
 
   const qSrc = new THREE.Quaternion();
   const qDelta = new THREE.Quaternion();
   const qDesired = new THREE.Quaternion();
   const qParent = new THREE.Quaternion();
   const qLocal = new THREE.Quaternion();
+
   const srcPos = new THREE.Vector3();
   const desiredPos = new THREE.Vector3();
   const localPos = new THREE.Vector3();
@@ -614,6 +634,35 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     updateSlotWorld(src);
     restoreRest(tgt);
 
+    if (rootMotion && sourceHipsName && motionCarrier && motionRest) {
+      const sourceHips = src.bones.get(sourceHipsName);
+      const sourceHipsRest = src.rest.get(sourceHipsName);
+
+      if (sourceHips && sourceHipsRest) {
+        sourceHips.getWorldPosition(srcPos);
+
+        const targetDeltaWorld = srcPos.clone()
+          .sub(sourceHipsRest.worldPos)
+          .multiplyScalar(scale);
+
+        desiredPos.copy(motionRest.worldPos).add(targetDeltaWorld);
+        localPos.copy(desiredPos);
+
+        if (motionCarrier.parent) motionCarrier.parent.worldToLocal(localPos);
+
+        motionCarrier.position.copy(localPos);
+        motionCarrier.quaternion.copy(motionRest.quaternion);
+        motionCarrier.scale.copy(motionRest.scale);
+        updateSlotWorld(tgt);
+
+        motionPositions.push(
+          motionCarrier.position.x,
+          motionCarrier.position.y,
+          motionCarrier.position.z
+        );
+      }
+    }
+
     for (const pair of ordered) {
       const sb = src.bones.get(pair.source);
       const tb = tgt.bones.get(pair.target);
@@ -623,56 +672,31 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
       sb.getWorldQuaternion(qSrc);
 
-      // Retarget en WORLD-SPACE respecto a la rest pose.
-      //
-      // Esto es intencional para Mixamo -> CloudRig: los ejes locales de
-      // ambos rigs no coinciden. Si copiamos el delta en local-space,
-      // un "doblar hacia delante" del Source puede convertirse en
-      // "rotar hacia arriba/atrás" en el Target.
-      //
-      // sourceDeltaWorld = sourceCurrentWorld * inverse(sourceRestWorld)
-      // targetWorld      = sourceDeltaWorld * targetRestWorld
-      qDelta.copy(qSrc).multiply(sr.worldQuat.clone().invert()).normalize();
-      qDesired.copy(qDelta).multiply(tr.worldQuat).normalize();
+      qDelta.copy(qSrc)
+        .multiply(sr.worldQuat.clone().invert())
+        .normalize();
+
+      qDesired.copy(qDelta)
+        .multiply(tr.worldQuat)
+        .normalize();
 
       if (tb.parent) {
         tb.parent.getWorldQuaternion(qParent);
-        qLocal.copy(qParent).invert().multiply(qDesired).normalize();
+        qLocal.copy(qParent)
+          .invert()
+          .multiply(qDesired)
+          .normalize();
       } else {
         qLocal.copy(qDesired);
       }
+
+      tb.position.copy(tr.position);
       tb.quaternion.copy(qLocal);
-
-      const sourceOriginalName = originalObjectName(sb) || pair.source;
-      const isRootMotion = rootMotion && /hips$/i.test(sourceOriginalName.replace(/^.*[:|]/, ''));
-      if (isRootMotion) {
-        sb.getWorldPosition(srcPos);
-
-        // Root motion también se transfiere en world-space. La orientación
-        // del hueso Hips no debe rotar el vector de desplazamiento.
-        const targetDeltaWorld = srcPos.clone()
-          .sub(sr.worldPos)
-          .multiplyScalar(scale);
-
-        desiredPos.copy(tr.worldPos).add(targetDeltaWorld);
-
-        if (tb.parent) {
-          localPos.copy(desiredPos);
-          tb.parent.worldToLocal(localPos);
-          tb.position.copy(localPos);
-        } else {
-          tb.position.copy(desiredPos);
-        }
-      } else {
-        tb.position.copy(tr.position);
-      }
       tb.scale.copy(tr.scale);
       updateSlotWorld(tgt);
 
       const d = data.get(pair.target);
       d.q.push(tb.quaternion.x, tb.quaternion.y, tb.quaternion.z, tb.quaternion.w);
-      d.p.push(tb.position.x, tb.position.y, tb.position.z);
-      d.s.push(tb.scale.x, tb.scale.y, tb.scale.z);
     }
   }
 
@@ -681,10 +705,26 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
   const tracks = [];
   for (const [targetName, d] of data) {
-    tracks.push(new THREE.VectorKeyframeTrack(`${targetName}.position`, times, d.p));
-    tracks.push(new THREE.QuaternionKeyframeTrack(`${targetName}.quaternion`, times, d.q));
-    tracks.push(new THREE.VectorKeyframeTrack(`${targetName}.scale`, times, d.s));
+    tracks.push(
+      new THREE.QuaternionKeyframeTrack(`${targetName}.quaternion`, times, d.q)
+    );
   }
+
+  if (motionCarrierName && motionPositions.length === times.length * 3) {
+    tracks.push(
+      new THREE.VectorKeyframeTrack(
+        `${motionCarrierName}.position`,
+        times,
+        motionPositions
+      )
+    );
+  }
+
+  log(
+    `Root motion: Source Hips → ${motionCarrierName ? originalObjectName(motionCarrier) || motionCarrierName : 'sin carrier'}; ` +
+    `FK-Hips queda como control pélvico.`
+  );
+
   return new THREE.AnimationClip(clipName, clip.duration, tracks);
 }
 
@@ -951,65 +991,101 @@ function temporarilyRestoreOriginalNames(root) {
 
 async function exportTargetFbx() {
   if (!state.target.root || !state.exportClip) return;
+
   try {
     setStatus('Exportando FBX…');
-    state.target.mixer?.stopAllAction();
-    restoreRest(state.target);
-    const oldAnimations = state.target.root.animations;
+
     const exportClip = createOriginalNameExportClip(state.exportClip, state.target);
-    const restoreRuntimeNames = temporarilyRestoreOriginalNames(state.target.root);
-
-    // El wrapper ×0.01 es solo para viewport/cálculo. Se desacopla al exportar,
-    // de modo que el FBX conserva el Scale/Rotation y la jerarquía originales
-    // del Target en lugar de hornear otra escala sobre RIG-Sintel.
-    const displayParent = state.target.root.parent === state.target.displayRoot
-      ? state.target.displayRoot
-      : null;
-    if (displayParent) displayParent.remove(state.target.root);
-
-    // El blanco es únicamente de viewport. Para exportar se restauran
-    // temporalmente los materiales originales del FBX Target.
-    restoreOriginalMaterials(state.target);
-    state.target.root.animations = [exportClip];
-
-    const exporter = new FBXExporter();
-    const options = {
-      preset: 'blender',
-      version: 7400,
-      fps: Math.max(1, Math.min(120, Number($('fps').value) || 30)),
-      includeAnimations: true,
-      animations: [exportClip],
-      embedTextures: true,
-      customProperties: true,
-      creator: 'Retarget-to-play'
-    };
+    const exportMode = $('exportMode')?.value || 'exact';
+    const rotationMode = $('rotationMode')?.value || 'xyz';
 
     let bytes;
-    try {
+    let report = null;
+
+    if (exportMode === 'exact') {
+      const result = injectAnimationIntoOriginalFBX(
+        state.target.originalBuffer,
+        exportClip,
+        {
+          rotationMode,
+          actionName: exportClip.name || 'Retargeted_Action'
+        }
+      );
+
+      bytes = result.bytes;
+      report = result.report;
+
+      log(
+        `FBX EXACTO: Target original + Action. Models=${report.modelsAnimated}, ` +
+        `CurveNodes=${report.curveNodes}, Curves=${report.curves}, ` +
+        `rotación=${rotationMode === 'xyz' ? 'XYZ Euler' : 'Quaternion/FBX order'}.`
+      );
+    } else {
+      state.target.mixer?.stopAllAction();
+      restoreRest(state.target);
+
+      const oldAnimations = state.target.root.animations;
+      const restoreRuntimeNames = temporarilyRestoreOriginalNames(state.target.root);
+      const displayParent = state.target.root.parent === state.target.displayRoot
+        ? state.target.displayRoot
+        : null;
+
+      if (displayParent) displayParent.remove(state.target.root);
+      restoreOriginalMaterials(state.target);
+      state.target.root.animations = [exportClip];
+
+      const exporter = new FBXExporter();
+      const options = {
+        preset: 'blender',
+        version: 7400,
+        unitScale: 100,
+        bakeSpaceTransform: false,
+        fps: Math.max(1, Math.min(120, Number($('fps').value) || 30)),
+        includeAnimations: true,
+        animations: [exportClip],
+        embedTextures: true,
+        customProperties: true,
+        creator: 'Retarget-to-play'
+      };
+
       try {
-        bytes = await exporter.parseAsync(state.target.root, options);
-      } catch (textureErr) {
-        log(`Export con texturas embebidas falló (${textureErr.message}). Reintentando sin embeber texturas…`);
-        bytes = await exporter.parseAsync(state.target.root, { ...options, embedTextures: false });
-      }
-    } finally {
-      state.target.root.animations = oldAnimations;
-      restoreRuntimeNames();
+        try {
+          bytes = await exporter.parseAsync(state.target.root, options);
+        } catch (textureErr) {
+          log(
+            `Export legacy con texturas falló (${textureErr.message}). ` +
+            'Reintentando sin embeber texturas…'
+          );
+          bytes = await exporter.parseAsync(
+            state.target.root,
+            { ...options, embedTextures: false }
+          );
+        }
+      } finally {
+        state.target.root.animations = oldAnimations;
+        restoreRuntimeNames();
 
-      if (displayParent) {
-        displayParent.add(state.target.root);
-        displayParent.updateMatrixWorld(true);
+        if (displayParent) {
+          displayParent.add(state.target.root);
+          displayParent.updateMatrixWorld(true);
+        }
+
+        applyWhiteViewportMaterial(state.target);
       }
 
-      applyWhiteViewportMaterial(state.target);
+      log('Export legacy: preset blender · unitScale 100 · bakeSpaceTransform=false.');
     }
 
     const blob = new Blob([bytes], { type: 'application/octet-stream' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     const base = (state.target.fileName || 'target.fbx').replace(/\.fbx$/i, '');
+
     a.href = url;
-    a.download = `${base}_retargeted.fbx`;
+    a.download = exportMode === 'exact'
+      ? `${base}_retarget_exact.fbx`
+      : `${base}_retarget_legacy.fbx`;
+
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -1018,8 +1094,16 @@ async function exportTargetFbx() {
     playTargetClip(state.targetPreviewClip);
     state.exported = true;
     updateWorkflowUI();
-    setStatus('FBX exportado', 'good');
-    log(`FBX exportado conservando los nombres originales del Target y Action "${exportClip.name}" (${exportClip.tracks.length} curvas).`);
+
+    setStatus(
+      exportMode === 'exact' ? 'FBX exacto exportado' : 'FBX legacy exportado',
+      'good'
+    );
+
+    log(
+      `Export terminado: "${exportClip.name}" · ${exportClip.tracks.length} tracks · ` +
+      `${exportMode === 'exact' ? 'FBX original preservado' : 'FBX reconstruido'}.`
+    );
   } catch (err) {
     console.error(err);
     setStatus('Error exportando FBX', 'bad');
@@ -1047,7 +1131,9 @@ function updateStats() {
     return /^DEF-/i.test(original);
   }).length;
 
-  const summary = `Action: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nFK: ${fkBones}\nIK/POLE: ${ikBones}\nDEF exportados: ${defTracks}`;
+  const modeLabel = $('exportMode')?.value === 'legacy' ? 'Legacy reconstruido' : 'Exacto · FBX original';
+  const rotationLabel = $('rotationMode')?.value === 'quaternion' ? 'Quaternion / FBX order' : 'XYZ Euler';
+  const summary = `Action: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nFK: ${fkBones}\nIK/POLE: ${ikBones}\nDEF exportados: ${defTracks}\nExport: ${modeLabel}\nRotación: ${rotationLabel}`;
   $('stats').textContent = summary;
   if (sticky) sticky.textContent = `${state.exportClip.name} · ${state.exportClip.duration.toFixed(2)} s`;
   if (workbench) workbench.textContent = summary;
@@ -1274,6 +1360,9 @@ $('applyRetarget').onclick = applyRetarget;
 $('convertIk').onclick = convertFkToIk;
 $('exportFbx').onclick = exportTargetFbx;
 $('exportWorkspaceButton').onclick = exportTargetFbx;
+
+$('exportMode')?.addEventListener('change', updateStats);
+$('rotationMode')?.addEventListener('change', updateStats);
 
 $('toggleMapping').onclick = () => {
   if (state.workspaceView === 'mappings') return;
