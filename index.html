@@ -274,14 +274,20 @@
               <option value="legacy">Legacy · reconstruir desde Three.js</option>
             </select>
 
-            <label class="field-label" for="rotationMode">Rotación de la Action</label>
+            <label class="field-label" for="rotationMode">Rotación · Action para rig original</label>
             <select id="rotationMode">
               <option value="xyz" selected>XYZ Euler · predeterminado</option>
               <option value="quaternion">Quaternion · WXYZ</option>
             </select>
 
-            <button id="exportBlenderAction" class="wide-button" type="button" disabled>Exportar Action para Blender</button>
-            <p class="hint">La Action para el rig original respeta este selector: XYZ crea rotation_euler y Quaternion crea rotation_quaternion. El FBX puede ser reinterpretado por el importador de Blender.</p>
+            <button id="exportBlenderAction" class="wide-button" type="button" disabled>Exportar Action para rig original</button>
+
+            <label class="setting-row">
+              <div><b>Action original junto al FBX</b><small>Descarga también el .py que crea la Action directamente en RIG-Sintel</small></div>
+              <input id="downloadOriginalRigAction" class="switch" type="checkbox" checked />
+            </label>
+
+            <p class="hint">El selector anterior controla la Action del CloudRig original. XYZ crea rotation_euler real y Quaternion crea rotation_quaternion. La Action que Blender crea al IMPORTAR un FBX puede seguir apareciendo como Quaternion por decisión del importador.</p>
 
             <label class="setting-row">
               <div><b>Action DEF Preview</b><small>Hace que el FBX standalone mueva la malla sin constraints</small></div>
