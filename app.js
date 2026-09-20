@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rootsplit1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-splitfiles1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-splitfiles1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-twodownloads1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-twodownloads1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1917,6 +1917,18 @@ function buildStandaloneCleanExport() {
   };
 }
 
+function downloadBinaryFile(bytes, fileName, mime = 'application/octet-stream') {
+  const blob = new Blob([bytes], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function downloadTextFile(text, fileName, mime = 'text/plain') {
   const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -1954,6 +1966,51 @@ function exportBlenderXYZAction() {
   log(`Blender Action: ${suffix} generado desde deltas WORLD del viewport para el rig original.`);
 }
 
+function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
+  if (!state.target.root || !state.exportClip || !state.target.originalBuffer) {
+    throw new Error('Falta Target, retarget o FBX original.');
+  }
+
+  const controlClip = buildOriginalRigControlOnlyClip(state.exportClip);
+  if (!controlClip || !controlClip.tracks.length) {
+    throw new Error('No pude construir la Action de controles del CloudRig original.');
+  }
+
+  const originalRigAction = createOriginalNameExportClip(
+    controlClip,
+    state.target
+  );
+
+  const forbidden = originalRigAction.tracks.filter(track => {
+    const parsed = parseTrackTarget(track.name);
+    return parsed && /^(DEF-|STR-|P-STR-|P-IK-|P-POLE-|IK-M-|SCALE-|ROOT-Thigh)/i.test(parsed.nodeName);
+  });
+
+  if (forbidden.length) {
+    throw new Error(
+      `La Action para rig original contiene ${forbidden.length} tracks helper/DEF; export cancelado.`
+    );
+  }
+
+  const result = injectAnimationsIntoOriginalFBX(
+    state.target.originalBuffer,
+    [{
+      clip: originalRigAction,
+      actionName: 'Retargeted_OriginalRig_FK'
+    }],
+    {
+      rotationMode,
+      currentActionName: 'Retargeted_OriginalRig_FK'
+      // No hierarchyRewrite: este carrier conserva el FBX original.
+    }
+  );
+
+  return {
+    ...result,
+    action: originalRigAction
+  };
+}
+
 async function exportOriginalRigActionFbx() {
   if (!state.target.root || !state.exportClip || !state.target.originalBuffer) return;
 
@@ -1961,59 +2018,17 @@ async function exportOriginalRigActionFbx() {
     setStatus('Exportando Action FBX para rig original…');
 
     const rotationMode = $('rotationMode')?.value || 'xyz';
-    const controlClip = buildOriginalRigControlOnlyClip(state.exportClip);
-
-    if (!controlClip || !controlClip.tracks.length) {
-      throw new Error('No pude construir la Action de controles del CloudRig original.');
-    }
-
-    const originalRigAction = createOriginalNameExportClip(
-      controlClip,
-      state.target
-    );
-
-    const defTracks = originalRigAction.tracks.filter(track => {
-      const parsed = parseTrackTarget(track.name);
-      return parsed && /^DEF-/i.test(parsed.nodeName);
-    });
-
-    if (defTracks.length) {
-      throw new Error(
-        `La Action para rig original contiene ${defTracks.length} tracks DEF; export cancelado.`
-      );
-    }
-
-    const result = injectAnimationsIntoOriginalFBX(
-      state.target.originalBuffer,
-      [{
-        clip: originalRigAction,
-        actionName: 'Retargeted_OriginalRig_FK'
-      }],
-      {
-        rotationMode,
-        currentActionName: 'Retargeted_OriginalRig_FK'
-        // IMPORTANT: no hierarchyRewrite here.
-        // This carrier preserves the original FBX hierarchy/rest so Blender
-        // imports the Action against the same control basis expected by the
-        // original RIG-Sintel.
-      }
-    );
-
-    const blob = new Blob([result.bytes], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
+    const pkg = buildOriginalRigActionFbxPackage(rotationMode);
     const base = (state.target.fileName || 'target.fbx').replace(/\.fbx$/i, '');
 
-    a.href = url;
-    a.download = `${base}_OriginalRig_Action.fbx`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    downloadBinaryFile(
+      pkg.bytes,
+      `${base}_OriginalRig_Action.fbx`
+    );
 
     setStatus('Action FBX para rig original exportada', 'good');
     log(
-      `OriginalRig Action FBX: 1 stack · ${originalRigAction.tracks.length} tracks · DEF=0. ` +
+      `OriginalRig Action FBX: 1 stack · ${pkg.action.tracks.length} tracks · helpers/DEF=0. ` +
       'Importa este FBX sólo para extraer Retargeted_OriginalRig_FK.'
     );
   } catch (err) {
@@ -2188,22 +2203,34 @@ async function exportTargetFbx() {
       log('Export legacy: preset blender · unitScale 100 · bakeSpaceTransform=false.');
     }
 
-    const blob = new Blob([bytes], { type: 'application/octet-stream' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
     const base = (state.target.fileName || 'target.fbx').replace(/\.fbx$/i, '');
 
-    a.href = url;
-    a.download = exportMode === 'clean'
-      ? `${base}_retarget_clean.fbx`
-      : exportMode === 'exact'
-        ? `${base}_retarget_exact.fbx`
-        : `${base}_retarget_legacy.fbx`;
+    downloadBinaryFile(
+      bytes,
+      exportMode === 'clean'
+        ? `${base}_retarget_clean.fbx`
+        : exportMode === 'exact'
+          ? `${base}_retarget_exact.fbx`
+          : `${base}_retarget_legacy.fbx`
+    );
 
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    // In CLEAN mode the main export must deliver BOTH artifacts in one click:
+    // 1) standalone FBX with baked DEF for visual verification
+    // 2) original-rig Action carrier with controls only, DEF/helpers = 0
+    if (exportMode === 'clean') {
+      setStatus('Exportando 2/2 · Action para rig original…');
+      const originalPkg = buildOriginalRigActionFbxPackage(rotationMode);
+
+      downloadBinaryFile(
+        originalPkg.bytes,
+        `${base}_OriginalRig_Action.fbx`
+      );
+
+      log(
+        `Segundo archivo generado automáticamente: ${base}_OriginalRig_Action.fbx · ` +
+        `${originalPkg.action.tracks.length} tracks · DEF/helpers=0.`
+      );
+    }
 
     if ((exportMode === 'clean' || exportMode === 'exact') && $('downloadOriginalRigAction')?.checked) {
       const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
@@ -2243,7 +2270,7 @@ async function exportTargetFbx() {
 
     setStatus(
       exportMode === 'clean'
-        ? 'FBX clean exportado'
+        ? 'FBX CLEAN + Action original exportados'
         : exportMode === 'exact'
           ? 'FBX exacto exportado'
           : 'FBX legacy exportado',
