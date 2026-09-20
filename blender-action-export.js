@@ -9,6 +9,23 @@ function parseTrackTarget(trackName) {
   };
 }
 
+const UPPER_SOLVE_ORDER = [
+  ['FK-Shoulder.L', 'DEF-Shoulder.L'],
+  ['FK-Shoulder.R', 'DEF-Shoulder.R'],
+  ['FK-Neck', 'DEF-Neck'],
+  ['FK-Head', 'DEF-Head'],
+  ['FK-UpperArm.L', 'DEF-UpperArm_1.L'],
+  ['FK-UpperArm.R', 'DEF-UpperArm_1.R'],
+  ['FK-Forearm.L', 'DEF-Forearm_1.L'],
+  ['FK-Forearm.R', 'DEF-Forearm_1.R'],
+  ['FK-Hand.L', 'DEF-Hand.L'],
+  ['FK-Hand.R', 'DEF-Hand.R']
+];
+
+const UPPER_SOLVE_CONTROLS = new Set(
+  UPPER_SOLVE_ORDER.map(([control]) => control)
+);
+
 function collectTrackInfo(clip) {
   const info = new Map();
 
@@ -110,6 +127,28 @@ export function buildBlenderWorldDeltaActionData(
   const frames = times.map(t => t * fps);
 
   const records = new Map();
+  const runtime = slot.rigRuntime || null;
+  const solverGoals = UPPER_SOLVE_ORDER
+    .map(([controlName, drivenName]) => {
+      const control = slot.bones.get(controlName) ||
+        runtime?.rig?.get?.(controlName) || null;
+      const driven = slot.bones.get(drivenName) ||
+        runtime?.rig?.get?.(drivenName) || null;
+      const drivenRest = driven ? runtime?.rest?.get?.(driven) : null;
+
+      if (!control || !driven || !drivenRest) return null;
+
+      return {
+        control: originalName(control) || controlName,
+        driven: originalName(driven) || drivenName,
+        runtimeControlName: control.name,
+        drivenBone: driven,
+        drivenRest,
+        rotationDeltas: []
+      };
+    })
+    .filter(Boolean);
+
   for (const entry of active) {
     const bone = slot.bones.get(entry.nodeName);
     const boneName = originalName(bone) || entry.nodeName;
@@ -119,6 +158,7 @@ export function buildBlenderWorldDeltaActionData(
       rotation: entry.rotation,
       position: entry.position,
       rotationSpace: 'world',
+      solverOverride: UPPER_SOLVE_CONTROLS.has(boneName),
       rotationDeltas: [],
       positionDeltas: []
     });
@@ -128,12 +168,52 @@ export function buildBlenderWorldDeltaActionData(
 
   const mixer = new THREE.AnimationMixer(slot.root);
   const action = mixer.clipAction(clip).play();
+  const previousRuntimeEnabled = runtime?.enabled;
 
   try {
     for (const time of times) {
       resetSlotToRest(slot);
       mixer.setTime(time);
       (slot.displayRoot || slot.root).updateMatrixWorld(true);
+
+      if (runtime) {
+        runtime.enabled = true;
+        runtime.update();
+        (slot.displayRoot || slot.root).updateMatrixWorld(true);
+      }
+
+      for (const goal of solverGoals) {
+        const currentWorld = goal.drivenBone.getWorldQuaternion(
+          new THREE.Quaternion()
+        );
+
+        const deltaThree = currentWorld
+          .multiply(goal.drivenRest.worldQuaternion.clone().invert())
+          .normalize();
+
+        const deltaBlender = threeDeltaQuaternionToBlender(deltaThree);
+
+        const previous = goal.rotationDeltas[goal.rotationDeltas.length - 1];
+        if (previous) {
+          const prevQ = new THREE.Quaternion(
+            previous[1], previous[2], previous[3], previous[0]
+          );
+
+          if (prevQ.dot(deltaBlender) < 0) {
+            deltaBlender.x *= -1;
+            deltaBlender.y *= -1;
+            deltaBlender.z *= -1;
+            deltaBlender.w *= -1;
+          }
+        }
+
+        goal.rotationDeltas.push([
+          deltaBlender.w,
+          deltaBlender.x,
+          deltaBlender.y,
+          deltaBlender.z
+        ]);
+      }
 
       for (const entry of active) {
         const bone = slot.bones.get(entry.nodeName);
@@ -188,6 +268,12 @@ export function buildBlenderWorldDeltaActionData(
   } finally {
     action.stop();
     mixer.stopAllAction();
+
+    if (runtime) {
+      runtime.enabled = previousRuntimeEnabled ?? true;
+      runtime.resetDriven();
+    }
+
     resetSlotToRest(slot);
   }
 
@@ -198,7 +284,12 @@ export function buildBlenderWorldDeltaActionData(
     fps,
     frameEnd: frames.length ? Math.round(frames[frames.length - 1]) : 0,
     frames,
-    bones: [...records.values()].map(({ runtimeName, ...item }) => item)
+    bones: [...records.values()].map(({ runtimeName, ...item }) => item),
+    solverGoals: solverGoals.map(goal => ({
+      control: goal.control,
+      driven: goal.driven,
+      rotationDeltas: goal.rotationDeltas
+    }))
   };
 }
 
@@ -316,7 +407,7 @@ export function buildBlenderActionScript(
     '    for item in items:',
     "        pb = rig.pose.bones[item['bone']]",
     '',
-    "        if item.get('rotation') and sample_index < len(item.get('rotationDeltas', [])):",
+    "        if item.get('rotation') and not item.get('solverOverride') and sample_index < len(item.get('rotationDeltas', [])):",
     "            w, x, y, z = item['rotationDeltas'][sample_index]",
     '            delta = Quaternion((w, x, y, z))',
     '            rest_q = pb.bone.matrix_local.to_quaternion()',
@@ -350,6 +441,52 @@ export function buildBlenderActionScript(
     '            view_layer.update()',
     "            pb.keyframe_insert(data_path='location', frame=frame, group=item['bone'])",
     '',
+    '    # Constraint-aware upper-body solve.',
+    '    # The browser already has the correct final DEF pose. Instead of',
+    '    # assuming the exported FK/HNG hierarchy equals the original .blend,',
+    '    # iteratively rotate each ORIGINAL FK control until its driven DEF bone',
+    '    # matches that browser pose.',
+    "    for goal in DATA.get('solverGoals', []):",
+    "        control = rig.pose.bones.get(goal['control'])",
+    "        driven = rig.pose.bones.get(goal['driven'])",
+    '        if control is None or driven is None:',
+    '            continue',
+    "        if sample_index >= len(goal.get('rotationDeltas', [])):",
+    '            continue',
+    '',
+    "        w, x, y, z = goal['rotationDeltas'][sample_index]",
+    '        delta = Quaternion((w, x, y, z))',
+    '        driven_rest_q = driven.bone.matrix_local.to_quaternion()',
+    '        desired_driven_q = delta @ driven_rest_q',
+    '',
+    '        # A few feedback iterations are deliberate. CloudRig constraints,',
+    '        # HNG bones and inherit settings are evaluated by Blender itself;',
+    '        # each iteration measures the real DEF result and corrects the',
+    '        # control in armature/world space.',
+    '        for _ in range(5):',
+    '            view_layer.update()',
+    '            current_driven_q = driven.matrix.to_quaternion()',
+    '            error_q = desired_driven_q @ current_driven_q.inverted()',
+    '',
+    '            # Stop once residual angular error is tiny.',
+    '            angle = error_q.angle',
+    '            if angle < 0.0005:',
+    '                break',
+    '',
+    '            control_q = control.matrix.to_quaternion()',
+    '            corrected_q = error_q @ control_q',
+    '            corrected = corrected_q.to_matrix().to_4x4()',
+    '            corrected.translation = control.matrix.translation.copy()',
+    '            control.matrix = corrected',
+    '            view_layer.update()',
+    '',
+    "        if rotation_mode == 'quaternion':",
+    "            control.rotation_mode = 'QUATERNION'",
+    "            control.keyframe_insert(data_path='rotation_quaternion', frame=frame, group=goal['control'])",
+    '        else:',
+    "            control.rotation_mode = 'XYZ'",
+    "            control.keyframe_insert(data_path='rotation_euler', frame=frame, group=goal['control'])",
+    '',
     '# Keep interpolation deterministic and equivalent to the baked samples.',
     'try:',
     '    for fc in action.fcurves:',
@@ -360,7 +497,7 @@ export function buildBlenderActionScript(
     '',
     'scene.frame_set(0)',
     "print('[Retarget-to-play] Original rig Action ready:', action.name)",
-    "print('[Retarget-to-play] CloudRig logical solve order enabled for Chest -> Shoulder/Neck -> UpperArm/Head.')",
+    "print('[Retarget-to-play] Constraint-aware DEF feedback solver enabled for shoulders, neck, head and arms.')",
     ''
   ].join('\\n');
 }
