@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-blendcap3" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-ikblendcap1" />
   <script type="importmap">
   {
     "imports": {
@@ -253,11 +253,11 @@
           <section class="settings-section">
             <div class="settings-heading"><div><span class="eyebrow">IK / FK</span><h2>IK / FK Handling</h2></div></div>
             <label class="setting-row">
-              <div><b>Conservar FK</b><small>Mantener las curvas FK en la salida</small></div>
+              <div><b>Conservar FK de extremidades</b><small>ON: conserva FK + IK. OFF: sustituye UpperArm/Forearm/Hand y Thigh/Knee/Foot por IK; torso, hombros, cabeza, dedos y toes siempre se conservan.</small></div>
               <input id="keepFk" class="switch" type="checkbox" checked />
             </label>
             <button id="convertIk" class="wide-button" type="button" disabled>Convertir FK → IK</button>
-            <p class="hint">Genera IK-Hand, IK-Foot y POLE muestreando la cadena FK ya retargeteada; usa delta-from-rest y un ancla geométrica para evitar flips de poles.</p>
+            <p class="hint">Usa el mismo principio de BlendCap: muestrea el FK evaluado del Target, calcula IK = FK pose × FK rest⁻¹ × IK rest y genera POLE desde la geometría de la cadena. En CloudRig las curvas se codifican contra sus parents funcionales.</p>
           </section>
 
           <section class="settings-section">
@@ -317,6 +317,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-blendcap3"></script>
+  <script type="module" src="./app.js?v=20260920-ikblendcap1"></script>
 </body>
 </html>
