@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt2';
 import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-action1';
-import { buildBlenderXYZActionScript } from './blender-action-export.js?v=20260920-action1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-action2';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -663,7 +663,7 @@ function virtualFkChildPosition(slot, parentName, childName, parentVirtualPositi
   return parentVirtualPosition.clone().add(offset);
 }
 
-function applyFootContactCorrection(src, tgt, side, scale) {
+function applyFootContactCorrection(src, tgt, side, motionScale) {
   if (!$('footMatch')?.checked) return false;
 
   const suffix = side === 'L' ? '.L' : '.R';
@@ -1083,9 +1083,10 @@ function applyRetarget() {
     // del navegador la relación FK -> DEF que el FBX no contiene.
     state.deformPreviewClip = null;
     state.targetPreviewClip = state.fkClip;
-    playTargetClip(state.targetPreviewClip);
     state.playTime = 0;
+    playTargetClip(state.targetPreviewClip);
     updateTimelineBounds();
+    seek(0);
     updateButtons();
     updateStats();
     setStatus('Retarget FK listo', 'good');
@@ -1309,18 +1310,21 @@ function exportBlenderXYZAction() {
   if (!state.target.root || !state.exportClip) return;
 
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
-  const script = buildBlenderXYZActionScript(
+  const rotationMode = $('rotationMode')?.value === 'quaternion' ? 'quaternion' : 'xyz';
+  const script = buildBlenderActionScript(
     state.exportClip,
     state.target,
     fps,
-    originalObjectName
+    originalObjectName,
+    rotationMode
   );
 
   const base = (state.target.fileName || 'target.fbx').replace(/\.fbx$/i, '');
-  downloadTextFile(script, base + '_Retargeted_XYZ_Blender.py', 'text/x-python');
+  const suffix = rotationMode === 'quaternion' ? 'Quaternion' : 'XYZ';
+  downloadTextFile(script, base + '_Retargeted_' + suffix + '_Blender.py', 'text/x-python');
 
-  setStatus('Action XYZ para Blender exportada', 'good');
-  log('Blender XYZ: Action generada en matrix_basis para aplicarla directamente al rig original.');
+  setStatus('Action para Blender exportada', 'good');
+  log(`Blender Action: ${suffix} generado en matrix_basis para aplicarlo directamente al rig original.`);
 }
 
 async function exportTargetFbx() {
