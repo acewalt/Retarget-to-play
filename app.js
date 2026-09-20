@@ -796,6 +796,24 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
   return true;
 }
 
+function extractWorldTwistQuaternion(q, axis, out = new THREE.Quaternion()) {
+  // Swing-twist decomposition. For root turning we only want the twist around
+  // the scene up axis; pitch/roll remain on FK-Hips as pelvis motion.
+  const n = axis.clone().normalize();
+  const projection = n.multiplyScalar(q.x * n.x + q.y * n.y + q.z * n.z);
+
+  out.set(projection.x, projection.y, projection.z, q.w);
+
+  const lenSq =
+    out.x * out.x +
+    out.y * out.y +
+    out.z * out.z +
+    out.w * out.w;
+
+  if (lenSq < 1e-12) return out.identity();
+  return out.normalize();
+}
+
 function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const src = state.source;
   const tgt = state.target;
@@ -826,12 +844,22 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const motionCarrier = motionCarrierName ? tgt.bones.get(motionCarrierName) : null;
   const motionRest = motionCarrierName ? tgt.rest.get(motionCarrierName) : null;
   const motionPositions = [];
+  const motionRotations = [];
 
   const qSrc = new THREE.Quaternion();
   const qDelta = new THREE.Quaternion();
   const qDesired = new THREE.Quaternion();
   const qParent = new THREE.Quaternion();
   const qLocal = new THREE.Quaternion();
+
+  const qSourceHipsWorld = new THREE.Quaternion();
+  const qSourceHipsDelta = new THREE.Quaternion();
+  const qRootYaw = new THREE.Quaternion();
+  const qCarrierDesiredWorld = new THREE.Quaternion();
+  const qCarrierParentWorld = new THREE.Quaternion();
+  const qCarrierLocal = new THREE.Quaternion();
+  const worldUp = new THREE.Vector3(0, 1, 0);
+  let previousRootYaw = null;
 
   const srcPos = new THREE.Vector3();
   const desiredPos = new THREE.Vector3();
@@ -864,8 +892,45 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
         if (motionCarrier.parent) motionCarrier.parent.worldToLocal(localPos);
 
+        // Mixamo commonly stores character turning on Hips. Translation alone
+        // is not enough: without this yaw the pelvis twists inside a character
+        // that keeps facing its original direction.
+        sourceHips.getWorldQuaternion(qSourceHipsWorld);
+        qSourceHipsDelta.copy(qSourceHipsWorld)
+          .multiply(sourceHipsRest.worldQuat.clone().invert())
+          .normalize();
+
+        extractWorldTwistQuaternion(
+          qSourceHipsDelta,
+          worldUp,
+          qRootYaw
+        );
+
+        // Keep a continuous quaternion hemisphere across 180/360-degree turns.
+        if (previousRootYaw && previousRootYaw.dot(qRootYaw) < 0) {
+          qRootYaw.x *= -1;
+          qRootYaw.y *= -1;
+          qRootYaw.z *= -1;
+          qRootYaw.w *= -1;
+        }
+        previousRootYaw = qRootYaw.clone();
+
+        qCarrierDesiredWorld.copy(qRootYaw)
+          .multiply(motionRest.worldQuat)
+          .normalize();
+
+        if (motionCarrier.parent) {
+          motionCarrier.parent.getWorldQuaternion(qCarrierParentWorld);
+          qCarrierLocal.copy(qCarrierParentWorld)
+            .invert()
+            .multiply(qCarrierDesiredWorld)
+            .normalize();
+        } else {
+          qCarrierLocal.copy(qCarrierDesiredWorld);
+        }
+
         motionCarrier.position.copy(localPos);
-        motionCarrier.quaternion.copy(motionRest.quaternion);
+        motionCarrier.quaternion.copy(qCarrierLocal);
         motionCarrier.scale.copy(motionRest.scale);
         updateSlotWorld(tgt);
 
@@ -873,6 +938,13 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
           motionCarrier.position.x,
           motionCarrier.position.y,
           motionCarrier.position.z
+        );
+
+        motionRotations.push(
+          motionCarrier.quaternion.x,
+          motionCarrier.quaternion.y,
+          motionCarrier.quaternion.z,
+          motionCarrier.quaternion.w
         );
       }
     }
@@ -949,9 +1021,19 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     );
   }
 
+  if (motionCarrierName && motionRotations.length === times.length * 4) {
+    tracks.push(
+      new THREE.QuaternionKeyframeTrack(
+        `${motionCarrierName}.quaternion`,
+        times,
+        motionRotations
+      )
+    );
+  }
+
   log(
-    `Root motion: Source Hips → ${motionCarrierName ? originalObjectName(motionCarrier) || motionCarrierName : 'sin carrier'}; ` +
-    `FK-Hips queda como control pélvico.`
+    `Root motion: Source Hips → ${motionCarrierName ? originalObjectName(motionCarrier) || motionCarrierName : 'sin carrier'} ` +
+    `(posición + giro Y); FK-Hips conserva pitch/roll y movimiento pélvico relativo.`
   );
 
   return new THREE.AnimationClip(clipName, clip.duration, tracks);
