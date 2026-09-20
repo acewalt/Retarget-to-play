@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-export2" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-foot1" />
   <script type="importmap">
   {
     "imports": {
@@ -244,6 +244,10 @@
               <div><b>Armature Overlay</b><small>Mostrar esqueleto lógico</small></div>
               <input id="showArmatures" class="switch" type="checkbox" checked />
             </label>
+            <label class="setting-row">
+              <div><b>Foot Contact Match</b><small>Corrige Thigh/Knee para seguir la trayectoria de los pies del Source</small></div>
+              <input id="footMatch" class="switch" type="checkbox" checked />
+            </label>
           </section>
 
           <section class="settings-section">
@@ -302,6 +306,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-export2"></script>
+  <script type="module" src="./app.js?v=20260920-foot1"></script>
 </body>
 </html>
