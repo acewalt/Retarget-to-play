@@ -583,6 +583,170 @@ function buildResolvedPreset(preset) {
   })).filter(isPairValid);
 }
 
+function setBoneWorldQuaternion(slot, bone, worldQuaternion) {
+  const local = worldQuaternion.clone();
+
+  if (bone.parent) {
+    const parentWorld = bone.parent.getWorldQuaternion(new THREE.Quaternion());
+    local.premultiply(parentWorld.invert());
+  }
+
+  bone.quaternion.copy(local.normalize());
+  updateSlotWorld(slot);
+}
+
+function virtualFkChildPosition(slot, parentName, childName, parentVirtualPosition) {
+  const parent = slot.bones.get(parentName);
+  const child = slot.bones.get(childName);
+  const parentRest = slot.rest.get(parentName);
+  const childRest = slot.rest.get(childName);
+
+  if (!parent || !child || !parentRest || !childRest) return null;
+
+  const currentParentWorld = parent.getWorldQuaternion(new THREE.Quaternion());
+  const delta = currentParentWorld
+    .multiply(parentRest.worldQuat.clone().invert())
+    .normalize();
+
+  const offset = childRest.worldPos.clone()
+    .sub(parentRest.worldPos)
+    .applyQuaternion(delta);
+
+  return parentVirtualPosition.clone().add(offset);
+}
+
+function applyFootContactCorrection(src, tgt, side, scale) {
+  if (!$('footMatch')?.checked) return false;
+
+  const suffix = side === 'L' ? '.L' : '.R';
+  const sourceFootSemantic = side === 'L' ? 'LeftFoot' : 'RightFoot';
+
+  const sourceFootName = findSemanticBone(src, sourceFootSemantic);
+  const sourceFoot = sourceFootName ? src.bones.get(sourceFootName) : null;
+  const sourceFootRest = sourceFootName ? src.rest.get(sourceFootName) : null;
+
+  const hipName = findBoneByOriginalExact(tgt, ['FK-Hips']);
+  const thighName = findBoneByOriginalExact(tgt, [`FK-Thigh${suffix}`]);
+  const kneeName = findBoneByOriginalExact(tgt, [`FK-Knee${suffix}`]);
+  const footName = findBoneByOriginalExact(tgt, [`FK-Foot${suffix}`]);
+
+  if (!sourceFoot || !sourceFootRest || !hipName || !thighName || !kneeName || !footName) {
+    return false;
+  }
+
+  const hip = tgt.bones.get(hipName);
+  const thigh = tgt.bones.get(thighName);
+  const knee = tgt.bones.get(kneeName);
+  const foot = tgt.bones.get(footName);
+
+  const thighRest = tgt.rest.get(thighName);
+  const kneeRest = tgt.rest.get(kneeName);
+  const footRest = tgt.rest.get(footName);
+
+  if (!hip || !thigh || !knee || !foot || !thighRest || !kneeRest || !footRest) {
+    return false;
+  }
+
+  // Desired end-effector trajectory: reproduce the Source foot displacement
+  // relative to its own rest pose, scaled onto the Target rest foot.
+  const sourceFootWorld = sourceFoot.getWorldPosition(new THREE.Vector3());
+  const desiredFoot = footRest.worldPos.clone().add(
+    sourceFootWorld.clone()
+      .sub(sourceFootRest.worldPos)
+      .multiplyScalar(scale)
+  );
+
+  // Preserve the retargeted foot orientation while solving thigh/knee.
+  const desiredFootWorldQ = foot.getWorldQuaternion(new THREE.Quaternion());
+
+  const hipVirtual = hip.getWorldPosition(new THREE.Vector3());
+  const A = virtualFkChildPosition(tgt, hipName, thighName, hipVirtual);
+  if (!A) return false;
+
+  let B = virtualFkChildPosition(tgt, thighName, kneeName, A);
+  if (!B) return false;
+
+  let C = virtualFkChildPosition(tgt, kneeName, footName, B);
+  if (!C) return false;
+
+  const l1 = A.distanceTo(B);
+  const l2 = B.distanceTo(C);
+  if (l1 < 1e-6 || l2 < 1e-6) return false;
+
+  const toTarget = desiredFoot.clone().sub(A);
+  let distance = toTarget.length();
+  if (distance < 1e-6) return false;
+
+  const minReach = Math.abs(l1 - l2) + 1e-5;
+  const maxReach = l1 + l2 - 1e-5;
+  distance = THREE.MathUtils.clamp(distance, minReach, maxReach);
+
+  const dir = toTarget.normalize();
+
+  // Preserve the current knee bend plane instead of allowing the knee to flip.
+  const v1 = B.clone().sub(A).normalize();
+  const v2 = C.clone().sub(B).normalize();
+  let normal = v1.clone().cross(v2);
+
+  if (normal.lengthSq() < 1e-8) {
+    normal = new THREE.Vector3(side === 'L' ? 1 : -1, 0, 0);
+    if (Math.abs(normal.dot(dir)) > 0.95) normal.set(0, 0, 1);
+  }
+
+  normal.normalize();
+
+  let bendDir = normal.clone().cross(dir).normalize();
+  const currentAlong = dir.clone().multiplyScalar(B.clone().sub(A).dot(dir));
+  const currentPerp = B.clone().sub(A).sub(currentAlong);
+
+  if (currentPerp.lengthSq() > 1e-8 && bendDir.dot(currentPerp) < 0) {
+    bendDir.negate();
+  }
+
+  const x = (l1 * l1 - l2 * l2 + distance * distance) / (2 * distance);
+  const h = Math.sqrt(Math.max(0, l1 * l1 - x * x));
+
+  const desiredKnee = A.clone()
+    .addScaledVector(dir, x)
+    .addScaledVector(bendDir, h);
+
+  // Thigh: align the current virtual thigh segment with the solved segment.
+  const currentThighDir = B.clone().sub(A).normalize();
+  const desiredThighDir = desiredKnee.clone().sub(A).normalize();
+  const thighAlign = new THREE.Quaternion().setFromUnitVectors(
+    currentThighDir,
+    desiredThighDir
+  );
+
+  const thighWorld = thigh.getWorldQuaternion(new THREE.Quaternion());
+  const desiredThighWorld = thighAlign.multiply(thighWorld).normalize();
+  setBoneWorldQuaternion(tgt, thigh, desiredThighWorld);
+
+  // Recompute virtual knee after rotating thigh.
+  B = virtualFkChildPosition(tgt, thighName, kneeName, A);
+  if (!B) return false;
+  C = virtualFkChildPosition(tgt, kneeName, footName, B);
+  if (!C) return false;
+
+  // Knee: point lower leg toward the desired foot.
+  const currentKneeDir = C.clone().sub(B).normalize();
+  const desiredKneeDir = desiredFoot.clone().sub(B).normalize();
+  const kneeAlign = new THREE.Quaternion().setFromUnitVectors(
+    currentKneeDir,
+    desiredKneeDir
+  );
+
+  const kneeWorld = knee.getWorldQuaternion(new THREE.Quaternion());
+  const desiredKneeWorld = kneeAlign.multiply(kneeWorld).normalize();
+  setBoneWorldQuaternion(tgt, knee, desiredKneeWorld);
+
+  // Keep the foot orientation from the source retarget instead of inheriting
+  // the correction rotations of thigh/knee.
+  setBoneWorldQuaternion(tgt, foot, desiredFootWorldQ);
+
+  return true;
+}
+
 function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const src = state.source;
   const tgt = state.target;
@@ -695,8 +859,23 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       tb.scale.copy(tr.scale);
       updateSlotWorld(tgt);
 
+    }
+
+    // End-effector correction for feet. This pass keeps the source foot
+    // trajectory/contact while preserving FK controls as the actual output.
+    applyFootContactCorrection(src, tgt, 'L', scale);
+    applyFootContactCorrection(src, tgt, 'R', scale);
+
+    for (const pair of ordered) {
+      const bone = tgt.bones.get(pair.target);
       const d = data.get(pair.target);
-      d.q.push(tb.quaternion.x, tb.quaternion.y, tb.quaternion.z, tb.quaternion.w);
+      if (!bone || !d) continue;
+      d.q.push(
+        bone.quaternion.x,
+        bone.quaternion.y,
+        bone.quaternion.z,
+        bone.quaternion.w
+      );
     }
   }
 
@@ -1498,6 +1677,12 @@ $('previewDeform').onchange = () => {
 
 $('showArmatures').onchange = () => {
   updateRigOverlays();
+};
+
+$('footMatch').onchange = () => {
+  if (state.fkClip) {
+    log('Foot Contact Match cambió: vuelve a pulsar Transfer para recalcular la Action.');
+  }
 };
 
 function setTheme(theme, persist = true) {
