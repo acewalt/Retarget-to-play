@@ -276,7 +276,12 @@
               <option value="quaternion">Quaternion / FBX order</option>
             </select>
 
-            <p class="hint">FBX EXACTO conserva unidades, Scale, Rotation, skin, bind matrices y jerarquía del Target original; solo reemplaza la animación.</p>
+            <label class="setting-row">
+              <div><b>Action DEF Preview</b><small>Hace que el FBX standalone mueva la malla sin constraints</small></div>
+              <input id="includeDefPreview" class="switch" type="checkbox" checked />
+            </label>
+
+            <p class="hint">FBX EXACTO conserva unidades, Scale, Rotation, skin, bind matrices y jerarquía del Target original. Exporta la Action de controles y, opcionalmente, una segunda Action DEF solo para preview standalone.</p>
           </section>
 
           <details class="diagnostics">
