@@ -171,13 +171,31 @@ export function buildBlenderWorldDeltaActionData(
               .normalize();
           }
 
-          const deltaBlender = threeDeltaQuaternionToBlender(deltaThree);
+          const deltaForBlender =
+            out.rotationSpace === 'basis'
+              ? deltaThree.clone()
+              : threeDeltaQuaternionToBlender(deltaThree);
+
+          // Keep quaternion hemisphere stable between baked frames so dense
+          // Quaternion/Euler conversion cannot jump through the long arc.
+          const previous = out.rotationDeltas[out.rotationDeltas.length - 1];
+          if (previous) {
+            const prevQ = new THREE.Quaternion(
+              previous[1], previous[2], previous[3], previous[0]
+            );
+            if (prevQ.dot(deltaForBlender) < 0) {
+              deltaForBlender.x *= -1;
+              deltaForBlender.y *= -1;
+              deltaForBlender.z *= -1;
+              deltaForBlender.w *= -1;
+            }
+          }
 
           out.rotationDeltas.push([
-            deltaBlender.w,
-            deltaBlender.x,
-            deltaBlender.y,
-            deltaBlender.z
+            deltaForBlender.w,
+            deltaForBlender.x,
+            deltaForBlender.y,
+            deltaForBlender.z
           ]);
         }
 
@@ -351,7 +369,7 @@ export function buildBlenderActionScript(
     '',
     'scene.frame_set(0)',
     "print('[Retarget-to-play] Original rig Action ready:', action.name)",
-    "print('[Retarget-to-play] Local-basis upper controls: FK-Shoulder.L, FK-Shoulder.R, FK-Neck, FK-Head)",
+    "print('[Retarget-to-play] Local-basis upper controls (no global axis conjugation): FK-Shoulder.L, FK-Shoulder.R, FK-Neck, FK-Head)",
     ''
   ].join('\\n');
 }
