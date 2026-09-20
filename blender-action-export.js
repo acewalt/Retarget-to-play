@@ -154,10 +154,16 @@ export function buildOriginalRigDeltaData(
     resetSlotToRest(slot);
   }
 
+  const hasIk = [...records.values()].some(record =>
+    /^IK-(Hand|Foot)\./.test(record.bone) ||
+    /^POLE-(Arm|Leg)\./.test(record.bone)
+  );
+
   return {
     name: (clip.name || 'Retargeted_FK') +
       (rotationMode === 'quaternion' ? '_OriginalRig_Quaternion' : '_OriginalRig_XYZ'),
     rotationMode,
+    hasIk,
     fps,
     frameEnd: frames.length ? Math.round(frames[frames.length - 1]) : 0,
     frames,
@@ -193,7 +199,10 @@ if rig is None or rig.type != 'ARMATURE':
 scene = bpy.context.scene
 view_layer = bpy.context.view_layer
 
-# CloudRig usa 0=FK y 1=IK. Los HNG con 0 siguen su parent anatomico.
+# CloudRig usa 0=FK y 1=IK. Si la Action contiene IK-Hand/IK-Foot/POLE,
+# deja el rig directamente en IK; en una Action FK pura lo deja en FK.
+USE_IK = bool(DATA.get('hasIk', False))
+IK_SWITCH_VALUE = 1 if USE_IK else 0
 NON_SWITCH_IK = ('ik_stretch', 'ik_parents', 'ik_pole_follow', 'ik_hinge')
 changed_props = []
 for pb in rig.pose.bones:
@@ -205,9 +214,9 @@ for pb in rig.pose.bones:
         if not isinstance(value, (int, float)):
             continue
         if key.startswith('ik_') and not key.startswith(NON_SWITCH_IK):
-            if value != 0:
-                pb[key] = type(value)(0)
-                changed_props.append(pb.name + ':' + key + '=0')
+            if value != IK_SWITCH_VALUE:
+                pb[key] = type(value)(IK_SWITCH_VALUE)
+                changed_props.append(pb.name + ':' + key + '=' + str(IK_SWITCH_VALUE))
         elif key.startswith('fk_hinge_'):
             if value != 0:
                 pb[key] = type(value)(0)
@@ -348,7 +357,7 @@ scene.frame_set(0)
 view_layer.update()
 
 print('[Retarget-to-play] Action creada:', action.name)
-print('[Retarget-to-play] FK/HNG preparados. Props cambiadas:', len(changed_props))
+print('[Retarget-to-play] CloudRig modo:', 'IK' if USE_IK else 'FK', '· props cambiadas:', len(changed_props))
 for item in changed_props:
     print('  ', item)
 `;
