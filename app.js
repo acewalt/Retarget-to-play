@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-footlock2';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-lowerframe1';
 import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-footlock2';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-lowerframe1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -664,257 +664,7 @@ function virtualFkChildPosition(slot, parentName, childName, parentVirtualPositi
   return parentVirtualPosition.clone().add(offset);
 }
 
-function averageQuaternionSamples(quaternions, start, end) {
-  if (end < start || !quaternions[start]) return new THREE.Quaternion();
-
-  const reference = quaternions[start];
-  let x = 0, y = 0, z = 0, w = 0;
-
-  for (let i = start; i <= end; i++) {
-    const q = quaternions[i];
-    if (!q) continue;
-
-    const sign = reference.dot(q) < 0 ? -1 : 1;
-    x += q.x * sign;
-    y += q.y * sign;
-    z += q.z * sign;
-    w += q.w * sign;
-  }
-
-  const out = new THREE.Quaternion(x, y, z, w);
-  return out.lengthSq() > 1e-12 ? out.normalize() : reference.clone();
-}
-
-function cleanContactFlags(flags, maxGap = 2, minRun = 2) {
-  const out = [...flags];
-
-  // Close tiny one/two-frame gaps. Those are the main source of foot chatter.
-  let i = 0;
-  while (i < out.length) {
-    if (out[i]) { i++; continue; }
-
-    const start = i;
-    while (i < out.length && !out[i]) i++;
-    const end = i - 1;
-    const length = end - start + 1;
-
-    if (
-      length <= maxGap &&
-      start > 0 &&
-      i < out.length &&
-      out[start - 1] &&
-      out[i]
-    ) {
-      for (let j = start; j <= end; j++) out[j] = true;
-    }
-  }
-
-  // Remove isolated false-positive contacts.
-  i = 0;
-  while (i < out.length) {
-    if (!out[i]) { i++; continue; }
-
-    const start = i;
-    while (i < out.length && out[i]) i++;
-    const end = i - 1;
-
-    if (end - start + 1 < minRun) {
-      for (let j = start; j <= end; j++) out[j] = false;
-    }
-  }
-
-  return out;
-}
-
-function buildFootContactPlan(src, side, times) {
-  const footSemantic = side === 'L' ? 'LeftFoot' : 'RightFoot';
-  const toeSemantic = side === 'L' ? 'LeftToeBase' : 'RightToeBase';
-
-  const footName = findSemanticBone(src, footSemantic);
-  const toeName = findSemanticBone(src, toeSemantic);
-
-  const foot = footName ? src.bones.get(footName) : null;
-  const toe = toeName ? src.bones.get(toeName) : null;
-
-  const footRest = footName ? src.rest.get(footName) : null;
-  const toeRest = toeName ? src.rest.get(toeName) : null;
-
-  const hipsName =
-    findBoneByOriginalExact(src, ['mixamorig1:Hips', 'mixamorig:Hips', 'Hips']) ||
-    findSemanticBone(src, 'Hips');
-  const hipsRest = hipsName ? src.rest.get(hipsName) : null;
-
-  if (!foot || !footRest || !hipsRest || !src.mixer || !times.length) return null;
-
-  const footPositions = [];
-  const footRotations = [];
-  const toePositions = [];
-  const toeRotations = [];
-
-  for (const time of times) {
-    restoreRest(src);
-    src.mixer.setTime(Number(time));
-    updateSlotWorld(src);
-
-    footPositions.push(foot.getWorldPosition(new THREE.Vector3()));
-    footRotations.push(foot.getWorldQuaternion(new THREE.Quaternion()));
-
-    if (toe) {
-      toePositions.push(toe.getWorldPosition(new THREE.Vector3()));
-      toeRotations.push(toe.getWorldQuaternion(new THREE.Quaternion()));
-    }
-  }
-
-  restoreRest(src);
-
-  const legLength = Math.max(
-    0.1,
-    hipsRest.worldPos.distanceTo(footRest.worldPos)
-  );
-
-  function sampleSpeed(positions, i) {
-    if (!positions?.length || positions.length < 2) return 0;
-    const i0 = Math.max(0, i - 1);
-    const i1 = Math.min(positions.length - 1, i + 1);
-    const dt = Math.max(1e-6, Number(times[i1]) - Number(times[i0]));
-    return positions[i1].distanceTo(positions[i0]) / dt;
-  }
-
-  const footFloor = Math.min(...footPositions.map(p => p.y));
-  const toeFloor = toePositions.length
-    ? Math.min(...toePositions.map(p => p.y))
-    : footFloor;
-
-  const footEnterHeight = Math.max(0.018, legLength * 0.035);
-  const footExitHeight = Math.max(0.035, legLength * 0.070);
-  const toeEnterHeight = Math.max(0.014, legLength * 0.028);
-  const toeExitHeight = Math.max(0.030, legLength * 0.060);
-
-  const enterSpeed = Math.max(0.040, legLength * 0.095);
-  const exitSpeed = Math.max(0.090, legLength * 0.20);
-
-  const raw = [];
-  let planted = false;
-  let enterCount = 0;
-  let exitCount = 0;
-
-  for (let i = 0; i < footPositions.length; i++) {
-    const footHeight = footPositions[i].y - footFloor;
-    const footSpeed = sampleSpeed(footPositions, i);
-
-    const hasToe = toePositions.length === footPositions.length;
-    const toeHeight = hasToe ? toePositions[i].y - toeFloor : footHeight;
-    const toeSpeed = hasToe ? sampleSpeed(toePositions, i) : footSpeed;
-
-    // FULL-foot support requires both ankle/foot and toe base to be quiet.
-    // A dancer pivoting on the toe no longer gets classified as a rigid plant.
-    const enter =
-      footHeight <= footEnterHeight &&
-      footSpeed <= enterSpeed &&
-      (!hasToe || (
-        toeHeight <= toeEnterHeight &&
-        toeSpeed <= enterSpeed
-      ));
-
-    const stay =
-      footHeight <= footExitHeight &&
-      footSpeed <= exitSpeed &&
-      (!hasToe || (
-        toeHeight <= toeExitHeight &&
-        toeSpeed <= exitSpeed
-      ));
-
-    if (!planted) {
-      enterCount = enter ? enterCount + 1 : 0;
-      if (enterCount >= 2) {
-        planted = true;
-        exitCount = 0;
-      }
-    } else {
-      exitCount = stay ? 0 : exitCount + 1;
-      if (exitCount >= 3) {
-        planted = false;
-        enterCount = 0;
-      }
-    }
-
-    raw.push(planted);
-  }
-
-  const contacts = cleanContactFlags(raw, 3, 3);
-  const weights = new Array(times.length).fill(0);
-  const segmentIds = new Array(times.length).fill(-1);
-  const anchors = new Array(times.length).fill(null);
-  const rotationAnchors = new Array(times.length).fill(null);
-  const toeRotationAnchors = new Array(times.length).fill(null);
-
-  let segmentId = 0;
-  let i = 0;
-
-  while (i < contacts.length) {
-    if (!contacts[i]) { i++; continue; }
-
-    const begin = i;
-    while (i < contacts.length && contacts[i]) i++;
-    const finish = i - 1;
-
-    const anchor = new THREE.Vector3();
-    for (let j = begin; j <= finish; j++) {
-      anchor.add(footPositions[j]);
-    }
-    anchor.multiplyScalar(1 / Math.max(1, finish - begin + 1));
-
-    const footQ = averageQuaternionSamples(footRotations, begin, finish);
-    const toeQ = toeRotations.length
-      ? averageQuaternionSamples(toeRotations, begin, finish)
-      : null;
-
-    const ramp = Math.min(4, Math.floor((finish - begin + 1) / 2));
-
-    for (let j = begin; j <= finish; j++) {
-      const inWeight = ramp > 0
-        ? THREE.MathUtils.clamp((j - begin + 1) / ramp, 0, 1)
-        : 1;
-      const outWeight = ramp > 0
-        ? THREE.MathUtils.clamp((finish - j + 1) / ramp, 0, 1)
-        : 1;
-
-      weights[j] = Math.min(inWeight, outWeight);
-      segmentIds[j] = segmentId;
-      anchors[j] = anchor;
-      rotationAnchors[j] = footQ;
-      toeRotationAnchors[j] = toeQ;
-    }
-
-    segmentId++;
-  }
-
-  return {
-    positions: footPositions,
-    rotations: footRotations,
-    toePositions,
-    toeRotations,
-    footRest,
-    toeRest,
-    weights,
-    segmentIds,
-    anchors,
-    rotationAnchors,
-    toeRotationAnchors,
-    contactFrames: contacts.filter(Boolean).length,
-    totalFrames: contacts.length
-  };
-}
-
-function applyFootContactCorrection(
-  src,
-  tgt,
-  side,
-  motionScale,
-  contactPlan = null,
-  frameIndex = 0,
-  lockState = null
-) {
+function applyFootContactCorrection(src, tgt, side, motionScale) {
   if (!$('footMatch')?.checked) return false;
 
   const suffix = side === 'L' ? '.L' : '.R';
@@ -926,7 +676,14 @@ function applyFootContactCorrection(
 
   const sourceToeSemantic = side === 'L' ? 'LeftToeBase' : 'RightToeBase';
   const sourceToeName = findSemanticBone(src, sourceToeSemantic);
+  const sourceToe = sourceToeName ? src.bones.get(sourceToeName) : null;
   const sourceToeRest = sourceToeName ? src.rest.get(sourceToeName) : null;
+
+  const sourceHipsName =
+    findBoneByOriginalExact(src, ['mixamorig1:Hips', 'mixamorig:Hips', 'Hips']) ||
+    findSemanticBone(src, 'Hips');
+  const sourceHips = sourceHipsName ? src.bones.get(sourceHipsName) : null;
+  const sourceHipsRest = sourceHipsName ? src.rest.get(sourceHipsName) : null;
 
   const hipName = findBoneByOriginalExact(tgt, ['FK-Hips']);
   const thighName = findBoneByOriginalExact(tgt, [`FK-Thigh${suffix}`]);
@@ -944,95 +701,79 @@ function applyFootContactCorrection(
   const foot = tgt.bones.get(footName);
   const toe = toeName ? tgt.bones.get(toeName) : null;
 
+  const hipRest = tgt.rest.get(hipName);
   const thighRest = tgt.rest.get(thighName);
   const kneeRest = tgt.rest.get(kneeName);
   const footRest = tgt.rest.get(footName);
   const toeRest = toeName ? tgt.rest.get(toeName) : null;
 
-  if (!hip || !thigh || !knee || !foot || !thighRest || !kneeRest || !footRest) {
+  if (!hip || !thigh || !knee || !foot || !hipRest || !thighRest || !kneeRest || !footRest) {
     return false;
   }
 
-  // Desired end-effector trajectory: reproduce the Source foot displacement
-  // relative to its own rest pose, scaled onto the Target rest foot.
-  const sourceFootWorld =
-    contactPlan?.positions?.[frameIndex]?.clone() ||
-    sourceFoot.getWorldPosition(new THREE.Vector3());
+  // Desired end-effector trajectory in the HIPS frame, not raw world space.
+  //
+  // Source Mixamo Hips contains global root motion. Target TORSO-Spine already
+  // receives that global translation/yaw. If Foot Match uses Source Foot world
+  // displacement again, a turn is effectively counted twice and the lower body
+  // fights the root motion. That is the wobble seen in dance/turn clips.
+  const sourceFootWorld = sourceFoot.getWorldPosition(new THREE.Vector3());
+  let desiredFoot;
 
-  const desiredFoot = footRest.worldPos.clone().add(
-    sourceFootWorld.clone()
-      .sub(sourceFootRest.worldPos)
-      .multiplyScalar(motionScale)
-  );
+  if (sourceHips && sourceHipsRest) {
+    const sourceHipsWorld = sourceHips.getWorldPosition(new THREE.Vector3());
+    const sourceHipsWorldQ = sourceHips.getWorldQuaternion(new THREE.Quaternion());
+    const sourceHipsDeltaQ = sourceHipsWorldQ
+      .clone()
+      .multiply(sourceHipsRest.worldQuat.clone().invert())
+      .normalize();
 
-  const contactWeight = THREE.MathUtils.clamp(
-    Number(contactPlan?.weights?.[frameIndex] || 0),
-    0,
-    1
-  );
-  const segmentId = Number(contactPlan?.segmentIds?.[frameIndex] ?? -1);
-  const sourceAnchor = contactPlan?.anchors?.[frameIndex];
+    const sourceRootYaw = extractWorldTwistQuaternion(
+      sourceHipsDeltaQ,
+      new THREE.Vector3(0, 1, 0),
+      new THREE.Quaternion()
+    );
 
-  if (sourceAnchor && contactWeight > 0) {
-    const lockedFoot = footRest.worldPos.clone().add(
-      sourceAnchor.clone()
+    // Where the Source foot would be if it only followed Hips translation+yaw.
+    const sourceRestOffset = sourceFootRest.worldPos
+      .clone()
+      .sub(sourceHipsRest.worldPos)
+      .applyQuaternion(sourceRootYaw);
+
+    const sourceRootOnlyFoot = sourceHipsWorld
+      .clone()
+      .add(sourceRestOffset);
+
+    // True leg/step motion after removing global root motion.
+    const localFootResidual = sourceFootWorld
+      .clone()
+      .sub(sourceRootOnlyFoot)
+      .multiplyScalar(motionScale);
+
+    // Target lower section is driven from FK-Hips / HIP(HTP)-Spine under the
+    // common TORSO-Spine carrier. Build the same root-only base with Target
+    // proportions, then add only the residual step motion.
+    const targetHipWorld = hip.getWorldPosition(new THREE.Vector3());
+    const targetRestOffset = footRest.worldPos
+      .clone()
+      .sub(hipRest.worldPos)
+      .applyQuaternion(sourceRootYaw);
+
+    desiredFoot = targetHipWorld
+      .clone()
+      .add(targetRestOffset)
+      .add(localFootResidual);
+  } else {
+    // Fallback for non-Mixamo/unknown sources.
+    desiredFoot = footRest.worldPos.clone().add(
+      sourceFootWorld.clone()
         .sub(sourceFootRest.worldPos)
         .multiplyScalar(motionScale)
     );
-
-    desiredFoot.lerp(lockedFoot, contactWeight);
   }
 
-  // Preserve the independently retargeted world rotations. Foot-contact
-  // correction changes parents (thigh/knee/foot), so these must be restored
-  // afterwards; otherwise FK-Toes inherits an extra rotation from FK-Foot.
+  // Preserve the retargeted foot orientation while solving thigh/knee.
   const desiredFootWorldQ = foot.getWorldQuaternion(new THREE.Quaternion());
-  const desiredToeWorldQ = toe
-    ? toe.getWorldQuaternion(new THREE.Quaternion())
-    : null;
-
-  // During a real full-foot plant, use the average Source orientation of the
-  // whole contact segment instead of noisy frame-by-frame ankle/toe values.
-  const sourceFootAnchorQ = contactPlan?.rotationAnchors?.[frameIndex];
-  if (contactWeight > 0 && sourceFootAnchorQ && sourceFootRest) {
-    const sourceDeltaQ = sourceFootAnchorQ.clone()
-      .multiply(sourceFootRest.worldQuat.clone().invert())
-      .normalize();
-
-    const plantedFootQ = sourceDeltaQ
-      .multiply(footRest.worldQuat.clone())
-      .normalize();
-
-    desiredFootWorldQ.slerp(plantedFootQ, contactWeight);
-  }
-
-  const sourceToeAnchorQ = contactPlan?.toeRotationAnchors?.[frameIndex];
-  let plantedToeQ = null;
-
-  if (
-    contactWeight > 0 &&
-    sourceToeAnchorQ &&
-    sourceToeRest &&
-    toeRest
-  ) {
-    const sourceToeDeltaQ = sourceToeAnchorQ.clone()
-      .multiply(sourceToeRest.worldQuat.clone().invert())
-      .normalize();
-
-    plantedToeQ = sourceToeDeltaQ
-      .multiply(toeRest.worldQuat.clone())
-      .normalize();
-  }
-
-  if (lockState) {
-    if (segmentId >= 0 && lockState.segmentId !== segmentId) {
-      lockState.segmentId = segmentId;
-      lockState.bendDirection = null;
-    } else if (segmentId < 0) {
-      lockState.segmentId = -1;
-      lockState.bendDirection = null;
-    }
-  }
 
   const hipVirtual = hip.getWorldPosition(new THREE.Vector3());
   const A = virtualFkChildPosition(tgt, hipName, thighName, hipVirtual);
@@ -1078,18 +819,6 @@ function applyFootContactCorrection(
     bendDir.negate();
   }
 
-  if (lockState && contactWeight > 0) {
-    if (!lockState.bendDirection) {
-      lockState.bendDirection = bendDir.clone();
-    } else {
-      if (lockState.bendDirection.dot(bendDir) < 0) bendDir.negate();
-      bendDir.lerp(
-        lockState.bendDirection,
-        THREE.MathUtils.clamp(contactWeight * 0.9, 0, 0.9)
-      ).normalize();
-    }
-  }
-
   const x = (l1 * l1 - l2 * l2 + distance * distance) / (2 * distance);
   const h = Math.sqrt(Math.max(0, l1 * l1 - x * x));
 
@@ -1131,18 +860,50 @@ function applyFootContactCorrection(
   // the correction rotations of thigh/knee.
   setBoneWorldQuaternion(tgt, foot, desiredFootWorldQ);
 
-  // Critical: preserve the TOE WORLD orientation that came from retargeting.
-  // Re-applying its old Foot->Toe relative rotation after changing FK-Foot
-  // double-applies the foot correction and is what produced the visible
-  // FK-Toes.R twist in dance clips.
-  if (toe && desiredToeWorldQ) {
-    const finalToeWorldQ = desiredToeWorldQ.clone();
+  // FK-Toes is NOT a child of FK-Foot in the exported CloudRig hierarchy.
+  // It is an independent control at armature level, while DEF-Toes belongs to
+  // the deforming foot chain. Therefore transfer toe FLEX relative to Foot,
+  // then reconstruct the desired Toe world orientation from corrected FK-Foot.
+  // This prevents FK-Toes.R from accumulating an unrelated world twist.
+  if (sourceToe && sourceToeRest && toe && toeRest) {
+    const sourceFootWorldQ = sourceFoot.getWorldQuaternion(new THREE.Quaternion());
+    const sourceToeWorldQ = sourceToe.getWorldQuaternion(new THREE.Quaternion());
 
-    if (plantedToeQ && contactWeight > 0) {
-      finalToeWorldQ.slerp(plantedToeQ, contactWeight);
-    }
+    const sourceRestRelativeQ = sourceFootRest.worldQuat
+      .clone()
+      .invert()
+      .multiply(sourceToeRest.worldQuat)
+      .normalize();
 
-    setBoneWorldQuaternion(tgt, toe, finalToeWorldQ);
+    const sourcePoseRelativeQ = sourceFootWorldQ
+      .clone()
+      .invert()
+      .multiply(sourceToeWorldQ)
+      .normalize();
+
+    const sourceToeFlexDeltaQ = sourcePoseRelativeQ
+      .clone()
+      .multiply(sourceRestRelativeQ.clone().invert())
+      .normalize();
+
+    const targetRestRelativeQ = footRest.worldQuat
+      .clone()
+      .invert()
+      .multiply(toeRest.worldQuat)
+      .normalize();
+
+    const targetPoseRelativeQ = sourceToeFlexDeltaQ
+      .clone()
+      .multiply(targetRestRelativeQ)
+      .normalize();
+
+    const correctedFootWorldQ = foot.getWorldQuaternion(new THREE.Quaternion());
+    const desiredToeWorldQ = correctedFootWorldQ
+      .clone()
+      .multiply(targetPoseRelativeQ)
+      .normalize();
+
+    setBoneWorldQuaternion(tgt, toe, desiredToeWorldQ);
   }
 
   return true;
@@ -1229,27 +990,7 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     src.action = src.mixer.clipAction(clip).play();
   }
 
-  const footContactPlans = {
-    L: buildFootContactPlan(src, 'L', times),
-    R: buildFootContactPlan(src, 'R', times)
-  };
-
-  const footLockState = {
-    L: { segmentId: -1, bendDirection: null },
-    R: { segmentId: -1, bendDirection: null }
-  };
-
-  for (const side of ['L', 'R']) {
-    const plan = footContactPlans[side];
-    if (plan) {
-      log(
-        `Foot lock ${side}: ${plan.contactFrames}/${plan.totalFrames} frames detectados como apoyo.`
-      );
-    }
-  }
-
-  for (let frameIndex = 0; frameIndex < times.length; frameIndex++) {
-    const time = times[frameIndex];
+  for (const time of times) {
     restoreRest(src);
     src.mixer.setTime(time);
     updateSlotWorld(src);
@@ -1364,24 +1105,8 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
     // End-effector correction for feet. This pass keeps the source foot
     // trajectory/contact while preserving FK controls as the actual output.
-    applyFootContactCorrection(
-      src,
-      tgt,
-      'L',
-      motionScale,
-      footContactPlans.L,
-      frameIndex,
-      footLockState.L
-    );
-    applyFootContactCorrection(
-      src,
-      tgt,
-      'R',
-      motionScale,
-      footContactPlans.R,
-      frameIndex,
-      footLockState.R
-    );
+    applyFootContactCorrection(src, tgt, 'L', motionScale);
+    applyFootContactCorrection(src, tgt, 'R', motionScale);
 
     for (const pair of ordered) {
       const bone = tgt.bones.get(pair.target);
