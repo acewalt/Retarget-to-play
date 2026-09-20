@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260919-rootturn1" />
+  <link rel="stylesheet" href="./styles.css?v=20260919-rootturn2" />
   <script type="importmap">
   {
     "imports": {
@@ -287,7 +287,7 @@
               <input id="downloadOriginalRigAction" class="switch" type="checkbox" checked />
             </label>
 
-            <p class="hint">La Action FK ahora se hornea como matrix_basis portable del CloudRig original: Shoulder sigue FK-Chest, Neck sigue FK-Chest, Head sigue FK-Neck y los brazos siguen Shoulder → UpperArm → Forearm → Hand. El FBX standalone usa DEF Preview para mover la malla; la Action FK está pensada para reutilizarse en el rig original.</p>
+            <p class="hint">La Action FK se hornea como matrix_basis portable del CloudRig original. TORSO-Spine ahora también se convierte relativo a root para que los giros globales no se deformen al reutilizar la Action en Blender. El FBX standalone usa DEF Preview para mover la malla; la Action FK está pensada para reutilizarse en el rig original.</p>
 
             <label class="setting-row">
               <div><b>Action DEF Preview</b><small>Hace que el FBX standalone mueva la malla sin constraints</small></div>
@@ -315,6 +315,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260919-rootturn1"></script>
+  <script type="module" src="./app.js?v=20260919-rootturn2"></script>
 </body>
 </html>
