@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt2';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-export2';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-action1';
+import { buildBlenderXYZActionScript } from './blender-action-export.js?v=20260920-action1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -576,6 +577,53 @@ function skeletonScaleFor(map) {
   return Number.isFinite(ratio) && ratio > 0.05 && ratio < 20 ? ratio : 1;
 }
 
+function rootMotionScaleFor(map, fallback = 1) {
+  const srcHips =
+    findBoneByOriginalExact(state.source, ['mixamorig1:Hips', 'mixamorig:Hips', 'Hips']) ||
+    findSemanticBone(state.source, 'Hips');
+
+  const srcFeet = [
+    findBoneByOriginalExact(state.source, ['mixamorig1:LeftFoot', 'mixamorig:LeftFoot', 'LeftFoot']) ||
+      findSemanticBone(state.source, 'LeftFoot'),
+    findBoneByOriginalExact(state.source, ['mixamorig1:RightFoot', 'mixamorig:RightFoot', 'RightFoot']) ||
+      findSemanticBone(state.source, 'RightFoot')
+  ].filter(Boolean);
+
+  const tgtHips =
+    findBoneByOriginalExact(state.target, ['FK-Hips']) ||
+    map.find(p => /FK-Hips$/i.test(originalObjectName(state.target.bones.get(p.target)) || p.target))?.target ||
+    null;
+
+  const tgtFeet = [
+    findBoneByOriginalExact(state.target, ['FK-Foot.L']),
+    findBoneByOriginalExact(state.target, ['FK-Foot.R'])
+  ].filter(Boolean);
+
+  if (!srcHips || !tgtHips || !srcFeet.length || !tgtFeet.length) return fallback;
+
+  const sHip = state.source.rest.get(srcHips)?.worldPos;
+  const tHip = state.target.rest.get(tgtHips)?.worldPos;
+  if (!sHip || !tHip) return fallback;
+
+  const sDistances = srcFeet
+    .map(name => state.source.rest.get(name)?.worldPos)
+    .filter(Boolean)
+    .map(p => p.distanceTo(sHip));
+
+  const tDistances = tgtFeet
+    .map(name => state.target.rest.get(name)?.worldPos)
+    .filter(Boolean)
+    .map(p => p.distanceTo(tHip));
+
+  if (!sDistances.length || !tDistances.length) return fallback;
+
+  const sLeg = sDistances.reduce((a, b) => a + b, 0) / sDistances.length;
+  const tLeg = tDistances.reduce((a, b) => a + b, 0) / tDistances.length;
+  const ratio = sLeg > 1e-6 && tLeg > 1e-6 ? tLeg / sLeg : fallback;
+
+  return Number.isFinite(ratio) && ratio > 0.05 && ratio < 20 ? ratio : fallback;
+}
+
 function buildResolvedPreset(preset) {
   return preset.map(([s, t]) => ({
     source: findSemanticBone(state.source, s) || '',
@@ -653,7 +701,7 @@ function applyFootContactCorrection(src, tgt, side, scale) {
   const desiredFoot = footRest.worldPos.clone().add(
     sourceFootWorld.clone()
       .sub(sourceFootRest.worldPos)
-      .multiplyScalar(scale)
+      .multiplyScalar(motionScale)
   );
 
   // Preserve the retargeted foot orientation while solving thigh/knee.
@@ -756,7 +804,8 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
   const frameCount = Math.max(2, Math.ceil(clip.duration * fps) + 1);
   const times = Array.from({ length: frameCount }, (_, i) => Math.min(clip.duration, i / fps));
-  const scale = $('autoScale').checked ? skeletonScaleFor(map) : 1;
+  const torsoScale = $('autoScale').checked ? skeletonScaleFor(map) : 1;
+  const motionScale = $('autoScale').checked ? rootMotionScaleFor(map, torsoScale) : 1;
   const ordered = [...map].sort(
     (a, b) => boneDepth(tgt.bones.get(a.target)) - boneDepth(tgt.bones.get(b.target))
   );
@@ -807,7 +856,7 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
         const targetDeltaWorld = srcPos.clone()
           .sub(sourceHipsRest.worldPos)
-          .multiplyScalar(scale);
+          .multiplyScalar(motionScale);
 
         desiredPos.copy(motionRest.worldPos).add(targetDeltaWorld);
         localPos.copy(desiredPos);
@@ -863,8 +912,8 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
     // End-effector correction for feet. This pass keeps the source foot
     // trajectory/contact while preserving FK controls as the actual output.
-    applyFootContactCorrection(src, tgt, 'L', scale);
-    applyFootContactCorrection(src, tgt, 'R', scale);
+    applyFootContactCorrection(src, tgt, 'L', motionScale);
+    applyFootContactCorrection(src, tgt, 'R', motionScale);
 
     for (const pair of ordered) {
       const bone = tgt.bones.get(pair.target);
@@ -1243,6 +1292,37 @@ function temporarilyRestoreOriginalNames(root) {
   };
 }
 
+
+function downloadTextFile(text, fileName, mime = 'text/plain') {
+  const blob = new Blob([text], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = fileName;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportBlenderXYZAction() {
+  if (!state.target.root || !state.exportClip) return;
+
+  const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
+  const script = buildBlenderXYZActionScript(
+    state.exportClip,
+    state.target,
+    fps,
+    originalObjectName
+  );
+
+  const base = (state.target.fileName || 'target.fbx').replace(/\.fbx$/i, '');
+  downloadTextFile(script, base + '_Retargeted_XYZ_Blender.py', 'text/x-python');
+
+  setStatus('Action XYZ para Blender exportada', 'good');
+  log('Blender XYZ: Action generada en matrix_basis para aplicarla directamente al rig original.');
+}
+
 async function exportTargetFbx() {
   if (!state.target.root || !state.exportClip) return;
 
@@ -1536,6 +1616,7 @@ function updateButtons() {
   $('convertIk').disabled = !state.fkClip;
   $('exportFbx').disabled = !state.exportClip;
   if ($('exportWorkspaceButton')) $('exportWorkspaceButton').disabled = !state.exportClip;
+  if ($('exportBlenderAction')) $('exportBlenderAction').disabled = !state.exportClip;
   updateWorkflowUI();
 }
 
@@ -1642,6 +1723,7 @@ $('applyRetarget').onclick = applyRetarget;
 $('convertIk').onclick = convertFkToIk;
 $('exportFbx').onclick = exportTargetFbx;
 $('exportWorkspaceButton').onclick = exportTargetFbx;
+$('exportBlenderAction').onclick = exportBlenderXYZAction;
 
 $('exportMode')?.addEventListener('change', updateStats);
 $('rotationMode')?.addEventListener('change', updateStats);
