@@ -225,6 +225,18 @@ for pb in rig.pose.bones:
         except Exception:
             continue
 
+        if USE_RIGIFY and key == 'head_follow' and isinstance(value, (int, float)):
+            if float(value) != 0.0:
+                pb[key] = type(value)(0.0)
+                changed_props.append(pb.name + ':head_follow=0')
+            continue
+
+        if USE_RIGIFY and key == 'neck_follow' and isinstance(value, (int, float)):
+            if float(value) != 0.5:
+                pb[key] = type(value)(0.5)
+                changed_props.append(pb.name + ':neck_follow=0.5')
+            continue
+
         if USE_RIGIFY and key == 'IK_FK' and isinstance(value, (int, float)):
             if float(value) != RIGIFY_IK_VALUE:
                 pb[key] = type(value)(RIGIFY_IK_VALUE)
