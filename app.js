@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikblendcap2';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikblendcap2';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikblendcap2';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikblendcap3';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikblendcap3';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikblendcap3';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1421,6 +1421,7 @@ function virtualFkPose(tgt, runtimeName) {
 }
 
 function poseToMatrix(pose, out = new THREE.Matrix4()) {
+  if (pose?.matrix) return out.copy(pose.matrix);
   return out.compose(
     pose.position,
     pose.quaternion,
@@ -1428,7 +1429,7 @@ function poseToMatrix(pose, out = new THREE.Matrix4()) {
   );
 }
 
-function restWorldMatrix(tgt, runtimeName, out = new THREE.Matrix4()) {
+function composeRestWorldMatrix(tgt, runtimeName, out = new THREE.Matrix4()) {
   const rest = tgt.rest.get(runtimeName);
   if (!rest) return null;
   return out.compose(
@@ -1436,6 +1437,128 @@ function restWorldMatrix(tgt, runtimeName, out = new THREE.Matrix4()) {
     rest.worldQuat.clone(),
     rest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
   );
+}
+
+function composeRestLocalMatrix(tgt, runtimeName, out = new THREE.Matrix4()) {
+  const rest = tgt.rest.get(runtimeName);
+  if (!rest) return null;
+  return out.compose(
+    rest.position.clone(),
+    rest.quaternion.clone(),
+    rest.scale.clone()
+  );
+}
+
+function resolveOriginalRigLogicalParentName(tgt, runtimeName) {
+  const bone = tgt.bones.get(runtimeName);
+  if (!bone) return null;
+
+  const original = originalObjectName(bone) || runtimeName;
+  const spec = ORIGINAL_RIG_LOGICAL_PARENT[original];
+  if (!spec) return null;
+
+  const candidates = spec === '@LOWER'
+    ? ['HIP-Spine', 'HTP-Spine']
+    : [spec];
+
+  return candidates
+    .map(name => findBoneByOriginalExact(tgt, [name]))
+    .find(Boolean) || null;
+}
+
+// Reconstruct the pose that the ORIGINAL CloudRig gets when state.fkClip is
+// assigned to it. This is deliberately independent from WaltRig Runtime:
+// the Runtime exists to preview missing Blender constraints/DEF in Three.js,
+// while FK->IK export must use the exact pose-basis carrier that is already
+// proven to work on RIG-Sintel.
+function originalRigFkPoseMatrix(
+  tgt,
+  runtimeName,
+  cache,
+  out = new THREE.Matrix4()
+) {
+  if (cache?.has(runtimeName)) {
+    return out.copy(cache.get(runtimeName));
+  }
+
+  const bone = tgt.bones.get(runtimeName);
+  const rest = tgt.rest.get(runtimeName);
+  if (!bone || !rest) return null;
+
+  const rawRestLocal = composeRestLocalMatrix(
+    tgt, runtimeName, new THREE.Matrix4()
+  );
+  if (!rawRestLocal) return null;
+
+  const currentLocal = new THREE.Matrix4().compose(
+    bone.position.clone(),
+    bone.quaternion.clone(),
+    bone.scale.clone()
+  );
+
+  // state.fkClip stores rawFBXRestLocal * ORIGINAL_RIG_matrix_basis.
+  // Recover exactly that matrix_basis.
+  const basis = rawRestLocal.clone()
+    .invert()
+    .multiply(currentLocal);
+
+  const restWorld = composeRestWorldMatrix(
+    tgt, runtimeName, new THREE.Matrix4()
+  );
+  if (!restWorld) return null;
+
+  const parentName = resolveOriginalRigLogicalParentName(tgt, runtimeName);
+  let poseWorld;
+
+  if (parentName) {
+    const parentPose = originalRigFkPoseMatrix(
+      tgt, parentName, cache, new THREE.Matrix4()
+    );
+    const parentRest = composeRestWorldMatrix(
+      tgt, parentName, new THREE.Matrix4()
+    );
+
+    if (parentPose && parentRest) {
+      const restRelative = parentRest.clone()
+        .invert()
+        .multiply(restWorld);
+
+      poseWorld = parentPose.clone()
+        .multiply(restRelative)
+        .multiply(basis);
+    }
+  }
+
+  // Controls without a logical constrained parent (eg. root) are evaluated
+  // from their own rest-world transform plus matrix_basis.
+  if (!poseWorld) {
+    poseWorld = restWorld.clone().multiply(basis);
+  }
+
+  cache?.set(runtimeName, poseWorld.clone());
+  return out.copy(poseWorld);
+}
+
+function originalRigFkPose(tgt, runtimeName, cache) {
+  const bone = tgt.bones.get(runtimeName);
+  if (!bone) return null;
+
+  const matrix = originalRigFkPoseMatrix(
+    tgt, runtimeName, cache, new THREE.Matrix4()
+  );
+  if (!matrix) return null;
+
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  matrix.decompose(position, quaternion, scale);
+  quaternion.normalize();
+
+  return { bone, position, quaternion, scale, matrix };
+}
+
+function restWorldMatrix(tgt, runtimeName, out = new THREE.Matrix4()) {
+  return composeRestWorldMatrix(tgt, runtimeName, out);
 }
 
 function resolveCloudRigIkChains(tgt) {
@@ -1460,18 +1583,31 @@ function functionalIkParentName(tgt, chain, kind) {
   return findBoneByOriginalExact(tgt, ['root']) || null;
 }
 
-function functionalParentPoseMatrix(tgt, chain, kind, ikDesiredWorldByName, out) {
+function functionalParentPoseMatrix(
+  tgt,
+  chain,
+  kind,
+  ikDesiredWorldByName,
+  fkPoseCache,
+  out
+) {
   const parentName = functionalIkParentName(tgt, chain, kind);
   if (!parentName) return out.identity();
 
+  // CloudRig legs default ik_pole_follow=1: the pole helper follows IK-Foot.
   if (kind === 'POLE' && chain.kind === 'LEG') {
     const desiredIk = ikDesiredWorldByName.get(chain.ik);
     if (desiredIk) return out.copy(desiredIk);
   }
 
-  const parentBone = tgt.bones.get(parentName);
-  if (!parentBone) return out.identity();
-  return out.copy(parentBone.matrixWorld);
+  const parentPose = originalRigFkPoseMatrix(
+    tgt,
+    parentName,
+    fkPoseCache,
+    out
+  );
+
+  return parentPose || out.identity();
 }
 
 function functionalParentRestMatrix(tgt, chain, kind, out) {
@@ -1500,39 +1636,78 @@ function encodeOriginalRigControlLocal(
   const controlRest = tgt.rest.get(controlName);
   if (!control || !controlRest) return null;
 
-  const controlRestWorld = new THREE.Matrix4().compose(
-    controlRest.worldPos.clone(),
-    controlRest.worldQuat.clone(),
-    controlRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+  const controlRestWorld = composeRestWorldMatrix(
+    tgt, controlName, new THREE.Matrix4()
   );
-
-  // matrix_basis in the ORIGINAL rig:
-  // restRelative^-1 * desiredRelative.
-  const restRelative = functionalParentRest.clone()
-    .invert()
-    .multiply(controlRestWorld);
-  const desiredRelative = functionalParentPose.clone()
-    .invert()
-    .multiply(desiredWorld);
-  const basis = restRelative.clone()
-    .invert()
-    .multiply(desiredRelative);
-
-  // Our exact-FBX carrier expects tracks encoded as rawFBXRestLocal * basis,
-  // identical to the working FK export path.
-  const rawRestLocal = new THREE.Matrix4().compose(
-    controlRest.position.clone(),
-    controlRest.quaternion.clone(),
-    controlRest.scale.clone()
+  const rawRestLocal = composeRestLocalMatrix(
+    tgt, controlName, new THREE.Matrix4()
   );
+  if (!controlRestWorld || !rawRestLocal) return null;
 
+  let basis;
+
+  // CloudRig places animator IK/POLE controls below P-IK-* / P-POLE-* helper
+  // bones. Blender then carries those helpers through an ARMATURE constraint
+  // used by parent switching. BlendCap compensates that parent constraint
+  // before solving matrix_basis. Mirror the same operation here when the
+  // helper exists in the exported CloudRig FBX.
+  const helper = control.parent?.isBone ? control.parent : null;
+  const helperOriginal = helper
+    ? (originalObjectName(helper) || helper.name)
+    : '';
+
+  if (helper && /^P-(IK|POLE)-/i.test(helperOriginal)) {
+    const helperRestWorld = composeRestWorldMatrix(
+      tgt, helper.name, new THREE.Matrix4()
+    );
+
+    if (helperRestWorld) {
+      // ARMATURE carrier delta: D = parentPose * inverse(parentRest).
+      // CloudRig evaluates helperPose = D * helperRest.
+      const carrierDelta = functionalParentPose.clone()
+        .multiply(functionalParentRest.clone().invert());
+
+      const helperPoseWorld = carrierDelta
+        .multiply(helperRestWorld);
+
+      // At matrix_basis identity the visible control pose is helperPose times
+      // its rest transform relative to the P-helper.
+      const controlRestRelative = helperRestWorld.clone()
+        .invert()
+        .multiply(controlRestWorld);
+
+      const basisIdentityWorld = helperPoseWorld
+        .multiply(controlRestRelative);
+
+      basis = basisIdentityWorld.clone()
+        .invert()
+        .multiply(desiredWorld);
+    }
+  }
+
+  // Fallback for rigs/exports where the P-helper is absent.
+  if (!basis) {
+    const restRelative = functionalParentRest.clone()
+      .invert()
+      .multiply(controlRestWorld);
+    const desiredRelative = functionalParentPose.clone()
+      .invert()
+      .multiply(desiredWorld);
+
+    basis = restRelative.clone()
+      .invert()
+      .multiply(desiredRelative);
+  }
+
+  // Exact-FBX carrier convention, same as the proven FK path:
+  // localTrack = rawFBXRestLocal * ORIGINAL_RIG_matrix_basis.
   return outMatrix.copy(rawRestLocal).multiply(basis);
 }
 
-function chainPoseSnapshot(tgt, chain) {
-  const a = virtualFkPose(tgt, chain.a);
-  const b = virtualFkPose(tgt, chain.b);
-  const c = virtualFkPose(tgt, chain.c);
+function chainPoseSnapshot(tgt, chain, fkPoseCache) {
+  const a = originalRigFkPose(tgt, chain.a, fkPoseCache);
+  const b = originalRigFkPose(tgt, chain.b, fkPoseCache);
+  const c = originalRigFkPose(tgt, chain.c, fkPoseCache);
   if (!a || !b || !c) return null;
   return { a, b, c };
 }
@@ -1549,7 +1724,6 @@ function rawPolePerpFromPos(pa, pb, pc) {
 }
 
 function scanPoleAnchorLocal(tgt, mixer, chain, times) {
-  const runtime = tgt.rigRuntime;
   let bestLen = 0;
   let bestLocal = null;
   const step = Math.max(1, Math.floor(times.length / 60));
@@ -1559,10 +1733,8 @@ function scanPoleAnchorLocal(tgt, mixer, chain, times) {
     mixer.setTime(Number(times[i]));
     updateSlotWorld(tgt);
 
-    runtime?.update?.();
-    updateSlotWorld(tgt);
-
-    const snap = chainPoseSnapshot(tgt, chain);
+    const fkPoseCache = new Map();
+    const snap = chainPoseSnapshot(tgt, chain, fkPoseCache);
     if (!snap) continue;
 
     const upper = snap.b.position.clone().sub(snap.a.position);
@@ -1677,11 +1849,11 @@ function bakeIkFromFk() {
   if (!state.fkClip) throw new Error('Primero aplica el retargeting FK.');
 
   const tgt = state.target;
-  const runtime = tgt.rigRuntime;
 
-  // The WORKING FK result is state.fkClip + WaltRig's virtual CloudRig
-  // hierarchy. BlendCap samples the evaluated target FK chain; therefore we
-  // must sample virtualFk, not the raw FBX FK branches.
+  // IMPORTANT: state.fkClip is the exact pose-basis carrier that already
+  // reproduces the FK 1:1 when its Action is copied onto RIG-Sintel.
+  // Do not use WaltRig Runtime here: it is a Three.js preview simulation,
+  // not the source of truth for OriginalRig_Action export.
   const solveClip = state.fkClip;
 
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
@@ -1704,9 +1876,7 @@ function bakeIkFromFk() {
   const mixer = new THREE.AnimationMixer(tgt.root);
   const action = mixer.clipAction(solveClip).play();
 
-  const previousRuntimeEnabled = runtime?.enabled;
-  if (runtime) runtime.enabled = true;
-
+  // BlendCap: choose a stable local bend axis from the most-bent sample.
   const poleAnchors = new Map();
   for (const chain of chains) {
     poleAnchors.set(
@@ -1741,15 +1911,15 @@ function bakeIkFromFk() {
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      runtime?.update?.();
-      updateSlotWorld(tgt);
-
+      // Reconstruct the ORIGINAL CloudRig FK pose from the same pose-basis
+      // carrier used by the already-working OriginalRig_Action.
+      const fkPoseCache = new Map();
       const ikDesiredWorldByName = new Map();
 
-      // End effectors first: BlendCap formula exactly:
+      // End effectors. BlendCap formula:
       // desiredIK = FK_pose * inverse(FK_rest) * IK_rest.
       for (const chain of chains) {
-        const snap = chainPoseSnapshot(tgt, chain);
+        const snap = chainPoseSnapshot(tgt, chain, fkPoseCache);
         if (!snap) continue;
 
         poseToMatrix(snap.c, fkPoseWorld);
@@ -1764,7 +1934,12 @@ function bakeIkFromFk() {
         ikDesiredWorldByName.set(chain.ik, desiredIkWorld.clone());
 
         functionalParentPoseMatrix(
-          tgt, chain, 'IK', ikDesiredWorldByName, parentPose
+          tgt,
+          chain,
+          'IK',
+          ikDesiredWorldByName,
+          fkPoseCache,
+          parentPose
         );
         functionalParentRestMatrix(
           tgt, chain, 'IK', parentRest
@@ -1794,10 +1969,10 @@ function bakeIkFromFk() {
         d.s.push(s.x, s.y, s.z);
       }
 
-      // Poles second so Leg poles can use the just-computed IK foot as their
-      // effective CloudRig parent (ik_pole_follow default = 1 for legs).
+      // Poles second. For legs, CloudRig's default ik_pole_follow=1 means the
+      // P-POLE carrier follows the just-computed IK-Foot.
       for (const chain of chains) {
-        const snap = chainPoseSnapshot(tgt, chain);
+        const snap = chainPoseSnapshot(tgt, chain, fkPoseCache);
         if (!snap) continue;
 
         const poleWorldPos = computeBlendCapPolePointFromSnapshot(
@@ -1815,7 +1990,12 @@ function bakeIkFromFk() {
         );
 
         functionalParentPoseMatrix(
-          tgt, chain, 'POLE', ikDesiredWorldByName, parentPose
+          tgt,
+          chain,
+          'POLE',
+          ikDesiredWorldByName,
+          fkPoseCache,
+          parentPose
         );
         functionalParentRestMatrix(
           tgt, chain, 'POLE', parentRest
@@ -1848,7 +2028,6 @@ function bakeIkFromFk() {
   } finally {
     action.stop();
     mixer.stopAllAction();
-    if (runtime) runtime.enabled = previousRuntimeEnabled;
     restoreRest(tgt);
   }
 
@@ -1879,9 +2058,9 @@ function bakeIkFromFk() {
   }
 
   log(
-    'FK→IK BlendCap/CloudRig: muestreo del FK virtual evaluado; ' +
-    'IK = FKpose·FKrest⁻¹·IKrest; poles con bend-axis local; ' +
-    'IK/POLE codificados en matrix_basis del CloudRig original.'
+    'FK→IK BlendCap parity: fuente=OriginalRig matrix_basis (NO preview); ' +
+    'IK=FKpose·FKrest⁻¹·IKrest; P-IK/P-POLE carrier compensado; ' +
+    'poles=geometría FK + bend-axis local.'
   );
 
   return new THREE.AnimationClip(
