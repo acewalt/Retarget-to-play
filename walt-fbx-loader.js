@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
-export const WALT_FBX_VERSION = '0.3.0';
+export const WALT_FBX_VERSION = '0.3.1';
 
 // Los 31 DEF con pesos reales en x1.fbx se reconstruyen desde los
 // controles FK. Los segmentos _2 comparten el delta de su control principal;
@@ -74,6 +74,22 @@ const CLOUDRIG_FK_PARENT = {
   'FK-Knee.R': 'FK-Thigh.R',
   'FK-Foot.R': 'FK-Knee.R',
   'FK-Toes.R': 'FK-Foot.R'
+};
+
+const CLOUDRIG_PORTABLE_PARENT = {
+  'FK-Shoulder.L': 'FK-Chest',
+  'FK-Shoulder.R': 'FK-Chest',
+
+  'FK-Neck': 'FK-Chest',
+  'FK-Head': 'FK-Neck',
+
+  'FK-UpperArm.L': 'FK-Shoulder.L',
+  'FK-Forearm.L': 'FK-UpperArm.L',
+  'FK-Hand.L': 'FK-Forearm.L',
+
+  'FK-UpperArm.R': 'FK-Shoulder.R',
+  'FK-Forearm.R': 'FK-UpperArm.R',
+  'FK-Hand.R': 'FK-Forearm.R'
 };
 
 const CLOUDRIG_FK_ORDER = [
@@ -478,6 +494,8 @@ export class WaltCloudRigRuntime {
 
     const qCurrent = new THREE.Quaternion();
     const qDelta = new THREE.Quaternion();
+    const qBasis = new THREE.Quaternion();
+    const qRestRelative = new THREE.Quaternion();
     const qDesiredWorld = new THREE.Quaternion();
     const qParentWorld = new THREE.Quaternion();
     const qDesiredLocal = new THREE.Quaternion();
@@ -495,7 +513,39 @@ export class WaltCloudRigRuntime {
       const rest = this.rest.get(bone);
       if (!rest) continue;
 
-      bone.getWorldQuaternion(qCurrent);
+      // The portable upper-body clip stores restLocal * poseBasis.
+      // Rebuild the world rotation with the parent frame used by the original
+      // constrained CloudRig, not the static raw-FBX HNG/Chest branch.
+      const portableParentName = CLOUDRIG_PORTABLE_PARENT[name];
+      const portableParentVirtual = portableParentName
+        ? this.virtualFk.get(portableParentName)
+        : null;
+      const portableParentBone = portableParentName
+        ? this.rig.get(portableParentName)
+        : null;
+      const portableParentRest = portableParentBone
+        ? this.rest.get(portableParentBone)
+        : null;
+
+      if (portableParentVirtual && portableParentRest) {
+        qBasis.copy(rest.localQuaternion)
+          .invert()
+          .multiply(bone.quaternion)
+          .normalize();
+
+        qRestRelative.copy(portableParentRest.worldQuaternion)
+          .invert()
+          .multiply(rest.worldQuaternion)
+          .normalize();
+
+        qCurrent.copy(portableParentVirtual.quaternion)
+          .multiply(qRestRelative)
+          .multiply(qBasis)
+          .normalize();
+      } else {
+        bone.getWorldQuaternion(qCurrent);
+      }
+
       qDelta.copy(qCurrent)
         .multiply(rest.worldQuaternion.clone().invert())
         .normalize();
