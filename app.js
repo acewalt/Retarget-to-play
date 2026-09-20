@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik4';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik4';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik4';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik5';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik5';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik5';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -616,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyik4',
+      definition.path + '?v=20260920-rigifyik5',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -2294,6 +2294,46 @@ const RIGIFY_IK_CHAINS = [
   }
 ];
 
+// The exported Rigify FBX preserves the bone tree, but Blender does NOT
+// export Rigify's live COPY_TRANSFORMS / ARMATURE parent-switch constraints.
+// These are the animator-control relationships that the ORIGINAL .blend
+// evaluates when the already-correct FK Action is assigned.
+//
+// Reconstruct only the controls needed by Mixamo -> Rigify FK->IK. This is
+// intentionally separate from the raw FBX hierarchy.
+const RIGIFY_ORIGINAL_LOGICAL_PARENT = {
+  'torso': 'root',
+
+  // Rigify basic_spine has two FK branches below torso.
+  'spine_fk.001': 'torso',
+  'spine_fk': 'spine_fk.001',
+  'spine_fk.002': 'torso',
+  'spine_fk.003': 'spine_fk.002',
+
+  // shoulder is basic.super_copy: ORG-shoulder COPY_TRANSFORMS shoulder.
+  'shoulder.L': 'spine_fk.003',
+  'shoulder.R': 'spine_fk.003',
+
+  // Limb FK controls collapse the missing MCH/ORG helper chain to the
+  // animator-visible controls that actually determine the evaluated pose.
+  'upper_arm_fk.L': 'shoulder.L',
+  'forearm_fk.L': 'upper_arm_fk.L',
+  'hand_fk.L': 'forearm_fk.L',
+  'upper_arm_fk.R': 'shoulder.R',
+  'forearm_fk.R': 'upper_arm_fk.R',
+  'hand_fk.R': 'forearm_fk.R',
+
+  // Thigh parent lives below the lower spine result.
+  'thigh_fk.L': 'spine_fk',
+  'shin_fk.L': 'thigh_fk.L',
+  'foot_fk.L': 'shin_fk.L',
+  'toe_fk.L': 'foot_fk.L',
+  'thigh_fk.R': 'spine_fk',
+  'shin_fk.R': 'thigh_fk.R',
+  'foot_fk.R': 'shin_fk.R',
+  'toe_fk.R': 'foot_fk.R'
+};
+
 function resolveRigifyIkChains(tgt) {
   return RIGIFY_IK_CHAINS.map(def => {
     const resolved = { ...def };
@@ -2312,26 +2352,109 @@ function resolveRigifyIkChains(tgt) {
   }).filter(Boolean);
 }
 
-function evaluatedBonePose(tgt, runtimeName) {
+function resolveRigifyLogicalParentName(tgt, runtimeName) {
   const bone = tgt.bones.get(runtimeName);
   if (!bone) return null;
 
-  const position = bone.getWorldPosition(new THREE.Vector3());
-  const quaternion = bone.getWorldQuaternion(new THREE.Quaternion()).normalize();
-  const scale = bone.getWorldScale(new THREE.Vector3());
-  const matrix = new THREE.Matrix4().compose(
-    position.clone(),
-    quaternion.clone(),
-    scale.clone()
+  const original = originalObjectName(bone) || runtimeName;
+  const parentOriginal = RIGIFY_ORIGINAL_LOGICAL_PARENT[original];
+  if (!parentOriginal) return null;
+
+  return (
+    findBoneByOriginalExact(tgt, [parentOriginal]) ||
+    findSemanticBone(tgt, parentOriginal) ||
+    null
   );
+}
+
+// Reconstruct the pose that the ORIGINAL Rigify evaluates from the FK Action.
+// The critical difference from bone.matrixWorld is torso_parent and the
+// shoulder super_copy constraint: both are lost in an exported FBX.
+function rigifyOriginalFkPoseMatrix(
+  tgt,
+  runtimeName,
+  cache,
+  out = new THREE.Matrix4()
+) {
+  if (cache?.has(runtimeName)) {
+    return out.copy(cache.get(runtimeName));
+  }
+
+  const bone = tgt.bones.get(runtimeName);
+  if (!bone) return null;
+
+  const rawRestLocal = composeRestLocalMatrix(
+    tgt, runtimeName, new THREE.Matrix4()
+  );
+  const restWorld = composeRestWorldMatrix(
+    tgt, runtimeName, new THREE.Matrix4()
+  );
+  if (!rawRestLocal || !restWorld) return null;
+
+  const currentLocal = new THREE.Matrix4().compose(
+    bone.position.clone(),
+    bone.quaternion.clone(),
+    bone.scale.clone()
+  );
+
+  // The FK Action carrier stores raw FBX rest-local * Blender matrix_basis.
+  const basis = rawRestLocal.clone()
+    .invert()
+    .multiply(currentLocal);
+
+  const parentName = resolveRigifyLogicalParentName(tgt, runtimeName);
+  let poseWorld = null;
+
+  if (parentName) {
+    const parentPose = rigifyOriginalFkPoseMatrix(
+      tgt, parentName, cache, new THREE.Matrix4()
+    );
+    const parentRest = composeRestWorldMatrix(
+      tgt, parentName, new THREE.Matrix4()
+    );
+
+    if (parentPose && parentRest) {
+      const restRelative = parentRest.clone()
+        .invert()
+        .multiply(restWorld);
+
+      poseWorld = parentPose.clone()
+        .multiply(restRelative)
+        .multiply(basis);
+    }
+  }
+
+  // root and any non-mapped auxiliary fallback.
+  if (!poseWorld) {
+    poseWorld = restWorld.clone().multiply(basis);
+  }
+
+  cache?.set(runtimeName, poseWorld.clone());
+  return out.copy(poseWorld);
+}
+
+function rigifyOriginalFkPose(tgt, runtimeName, cache) {
+  const bone = tgt.bones.get(runtimeName);
+  if (!bone) return null;
+
+  const matrix = rigifyOriginalFkPoseMatrix(
+    tgt, runtimeName, cache, new THREE.Matrix4()
+  );
+  if (!matrix) return null;
+
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  matrix.decompose(position, quaternion, scale);
+  quaternion.normalize();
 
   return { bone, position, quaternion, scale, matrix };
 }
 
-function rigifyChainPoseSnapshot(tgt, chain) {
-  const a = evaluatedBonePose(tgt, chain.a);
-  const b = evaluatedBonePose(tgt, chain.b);
-  const c = evaluatedBonePose(tgt, chain.c);
+function rigifyChainPoseSnapshot(tgt, chain, cache) {
+  const a = rigifyOriginalFkPose(tgt, chain.a, cache);
+  const b = rigifyOriginalFkPose(tgt, chain.b, cache);
+  const c = rigifyOriginalFkPose(tgt, chain.c, cache);
   if (!a || !b || !c) return null;
   return { a, b, c };
 }
@@ -2346,7 +2469,8 @@ function scanRigifyPoleAnchorLocal(tgt, mixer, chain, times) {
     mixer.setTime(Number(times[i]));
     updateSlotWorld(tgt);
 
-    const snap = rigifyChainPoseSnapshot(tgt, chain);
+    const cache = new Map();
+    const snap = rigifyChainPoseSnapshot(tgt, chain, cache);
     if (!snap) continue;
 
     const upper = snap.b.position.clone().sub(snap.a.position);
@@ -2371,46 +2495,47 @@ function scanRigifyPoleAnchorLocal(tgt, mixer, chain, times) {
 }
 
 function rigifyPoleFunctionalParentName(tgt, chain) {
-  const mappedTargets = new Set(
-    state.boneMap
-      .filter(isPairValid)
-      .map(pair => pair.target)
+  // Rigify's pole_parent defaults to the limb's rig_parent_bone:
+  // arm -> ORG-shoulder (which is COPY_TRANSFORMS shoulder control)
+  // leg -> ORG-spine (lower torso result).
+  //
+  // Use equivalent animator controls so the parent delta is reconstructible
+  // from the FK Action even though ORG constraints are absent in the FBX.
+  const parentOriginal = chain.kind === 'ARM'
+    ? `shoulder.${chain.side}`
+    : 'spine_fk';
+
+  return (
+    findBoneByOriginalExact(tgt, [parentOriginal]) ||
+    findSemanticBone(tgt, parentOriginal) ||
+    findBoneByOriginalExact(tgt, ['root']) ||
+    null
   );
-  const excluded = new Set([chain.a, chain.b, chain.c, chain.ik, chain.pole]);
-
-  let bone = tgt.bones.get(chain.a)?.parent || null;
-  while (bone) {
-    if (
-      bone.isBone &&
-      mappedTargets.has(bone.name) &&
-      !excluded.has(bone.name)
-    ) {
-      return bone.name;
-    }
-    bone = bone.parent;
-  }
-
-  return findBoneByOriginalExact(tgt, ['root']) || null;
 }
 
 function rigifyFunctionalParentName(tgt, chain, kind) {
-  // Rigify explicitly selects root for hand_ik / foot_ik.
+  // hand_ik / foot_ik explicitly select Root in SwitchParentBuilder.
   if (kind === 'IK') {
     return findBoneByOriginalExact(tgt, ['root']) || null;
   }
-
-  // Pole controls use their own MCH-*_ik_target.parent switch. Rigify does
-  // not explicitly select root for pole_parent; the default follows the
-  // limb's rig parent, so retain the nearest mapped FK ancestor here.
   return rigifyPoleFunctionalParentName(tgt, chain);
 }
 
-function rigifyFunctionalParentPoseMatrix(tgt, chain, kind, out) {
+function rigifyFunctionalParentPoseMatrix(
+  tgt,
+  chain,
+  kind,
+  fkPoseCache,
+  out
+) {
   const parentName = rigifyFunctionalParentName(tgt, chain, kind);
   if (!parentName) return out.identity();
 
-  const pose = evaluatedBonePose(tgt, parentName);
-  return pose ? out.copy(pose.matrix) : out.identity();
+  const pose = rigifyOriginalFkPoseMatrix(
+    tgt, parentName, fkPoseCache, out
+  );
+
+  return pose || out.identity();
 }
 
 function rigifyFunctionalParentRestMatrix(tgt, chain, kind, out) {
@@ -2445,9 +2570,7 @@ function encodeRigifyControlLocal(
     ? (originalObjectName(helper) || helper.name)
     : '';
 
-  let parentPose = functionalParentPose.clone();
-  let parentRest = functionalParentRest.clone();
-  let ctrlRelRest;
+  let basis = null;
 
   if (helper && /^MCH-.*\.parent$/i.test(helperOriginal)) {
     const helperRestWorld = composeRestWorldMatrix(
@@ -2455,67 +2578,60 @@ function encodeRigifyControlLocal(
     );
 
     if (helperRestWorld) {
-      // Rigify SwitchParentBuilder: the MCH helper is root-level in the
-      // exported hierarchy and receives the selected parent's pose delta
-      // through an ARMATURE constraint.
+      // SwitchParentBuilder evaluates the root-level MCH proxy from the
+      // selected parent's pose delta. The exported FBX has the proxy but
+      // loses this ARMATURE constraint.
       const carrierDelta = functionalParentPose.clone()
         .multiply(functionalParentRest.clone().invert());
 
-      parentPose = carrierDelta.multiply(helperRestWorld);
-      parentRest = helperRestWorld;
+      const helperPoseWorld = carrierDelta
+        .multiply(helperRestWorld);
 
-      ctrlRelRest = helperRestWorld.clone()
+      const controlRestRelative = helperRestWorld.clone()
         .invert()
         .multiply(controlRestWorld);
+
+      const basisIdentityWorld = helperPoseWorld
+        .multiply(controlRestRelative);
+
+      basis = basisIdentityWorld.clone()
+        .invert()
+        .multiply(desiredWorld);
     }
   }
 
-  if (!ctrlRelRest) {
-    ctrlRelRest = parentRest.clone()
+  if (!basis) {
+    const restRelative = functionalParentRest.clone()
       .invert()
       .multiply(controlRestWorld);
+
+    const desiredRelative = functionalParentPose.clone()
+      .invert()
+      .multiply(desiredWorld);
+
+    basis = restRelative.clone()
+      .invert()
+      .multiply(desiredRelative);
   }
 
-  const poseIdentity = parentPose.clone().multiply(ctrlRelRest);
-  const basisFull = poseIdentity.clone()
-    .invert()
-    .multiply(desiredWorld);
-
-  const basisQ = new THREE.Quaternion();
-  const basisScale = new THREE.Vector3();
-  const ignored = new THREE.Vector3();
-  basisFull.decompose(ignored, basisQ, basisScale);
-  basisQ.normalize();
-
-  // Stock Rigify generates IK controls with IK Local Location = ON
-  // (params.ik_local_location default=True). For that mode Blender expects
-  // the normal LOCAL basis translation obtained from the full inverse pose
-  // matrix. The previous build forced the use_local_location=False branch
-  // for every hand/foot/pole, which rotated the translation into the wrong
-  // frame and visibly sent pole targets toward the feet.
-  //
-  // NOTE: if a custom metarig explicitly disables IK Local Location this
-  // branch would need the alternate BlendCap back-solve. The official
-  // Mixamo -> Rigify preset now targets Rigify's standard generated mode.
-  const basisT = ignored.clone();
-
-  const basisMatrix = new THREE.Matrix4().compose(
-    basisT,
-    basisQ,
-    basisScale
-  );
-
-  return outMatrix.copy(rawRestLocal).multiply(basisMatrix);
+  // Exact-FBX carrier convention: raw rest local * Blender matrix_basis.
+  // Because desiredWorld and parentWorld share the displayRoot scale, the
+  // matrix inverse cancels metersPerUnit here; translation stays in FBX
+  // local units, matching Lcl Translation.
+  return outMatrix.copy(rawRestLocal).multiply(basis);
 }
 
 
 function bakeRigifyIkFromFk() {
-  if (!state.fkRawClip) {
+  if (!state.fkClip) {
     throw new Error('Primero aplica el retargeting FK de Rigify.');
   }
 
   const tgt = state.target;
-  const solveClip = state.fkRawClip;
+
+  // IMPORTANT: use the exact FK Action carrier that is already proven on
+  // the ORIGINAL Rigify, then reconstruct its missing live constraints.
+  const solveClip = state.fkClip;
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
   const frameCount = Math.max(2, Math.ceil(solveClip.duration * fps) + 1);
   const times = Array.from(
@@ -2561,7 +2677,7 @@ function bakeRigifyIkFromFk() {
 
   const p = new THREE.Vector3();
   const q = new THREE.Quaternion();
-  const s = new THREE.Vector3();
+  const s3 = new THREE.Vector3();
 
   try {
     for (const time of times) {
@@ -2569,21 +2685,27 @@ function bakeRigifyIkFromFk() {
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
+      // One logical-pose cache per frame. This reconstructs root -> torso
+      // carry and shoulder COPY_TRANSFORMS before any IK target is solved.
+      const fkPoseCache = new Map();
+
+      // End effectors from the evaluated ORIGINAL-Rigify FK pose.
       for (const chain of chains) {
-        const snap = rigifyChainPoseSnapshot(tgt, chain);
+        const snap = rigifyChainPoseSnapshot(tgt, chain, fkPoseCache);
         if (!snap) continue;
 
         poseToMatrix(snap.c, fkPoseWorld);
         if (!restWorldMatrix(tgt, chain.c, fkRestWorld)) continue;
         if (!restWorldMatrix(tgt, chain.ik, ikRestWorld)) continue;
 
-        // BlendCap: IK = FK_pose × inverse(FK_rest) × IK_rest.
+        // BlendCap bake principle:
+        // desired IK = evaluated FK end * FK-rest^-1 * IK-rest.
         desiredIkWorld.copy(fkPoseWorld)
           .multiply(fkRestWorld.clone().invert())
           .multiply(ikRestWorld);
 
         rigifyFunctionalParentPoseMatrix(
-          tgt, chain, 'IK', parentPose
+          tgt, chain, 'IK', fkPoseCache, parentPose
         );
         rigifyFunctionalParentRestMatrix(
           tgt, chain, 'IK', parentRest
@@ -2599,7 +2721,7 @@ function bakeRigifyIkFromFk() {
         );
         if (!encoded) continue;
 
-        encoded.decompose(p, q, s);
+        encoded.decompose(p, q, s3);
         q.normalize();
 
         const d = data.get(chain.ik);
@@ -2609,11 +2731,12 @@ function bakeRigifyIkFromFk() {
         d.lastQ = q.clone();
         d.p.push(p.x, p.y, p.z);
         d.q.push(q.x, q.y, q.z, q.w);
-        d.s.push(s.x, s.y, s.z);
+        d.s.push(s3.x, s3.y, s3.z);
       }
 
+      // Pole targets are derived from the SAME reconstructed FK geometry.
       for (const chain of chains) {
-        const snap = rigifyChainPoseSnapshot(tgt, chain);
+        const snap = rigifyChainPoseSnapshot(tgt, chain, fkPoseCache);
         if (!snap) continue;
 
         const poleWorldPos = computeBlendCapPolePointFromSnapshot(
@@ -2631,7 +2754,7 @@ function bakeRigifyIkFromFk() {
         );
 
         rigifyFunctionalParentPoseMatrix(
-          tgt, chain, 'POLE', parentPose
+          tgt, chain, 'POLE', fkPoseCache, parentPose
         );
         rigifyFunctionalParentRestMatrix(
           tgt, chain, 'POLE', parentRest
@@ -2647,7 +2770,7 @@ function bakeRigifyIkFromFk() {
         );
         if (!encoded) continue;
 
-        encoded.decompose(p, q, s);
+        encoded.decompose(p, q, s3);
         q.normalize();
 
         const d = data.get(chain.pole);
@@ -2657,7 +2780,7 @@ function bakeRigifyIkFromFk() {
         d.lastQ = q.clone();
         d.p.push(p.x, p.y, p.z);
         d.q.push(q.x, q.y, q.z, q.w);
-        d.s.push(s.x, s.y, s.z);
+        d.s.push(s3.x, s3.y, s3.z);
       }
     }
   } finally {
@@ -2686,9 +2809,9 @@ function bakeRigifyIkFromFk() {
   }
 
   log(
-    'FK→IK Rigify: IK=FKpose·FKrest⁻¹·IKrest; ' +
-    'IK_parent=root; IK Local Location=ON; ' +
-    'POLE compensado por MCH-*.parent; pole_vector=ON.'
+    'FK→IK Rigify original-evaluated: fuente=FK Action portable; ' +
+    'reconstruye root→torso + shoulder COPY_TRANSFORMS; ' +
+    'hand/foot parent=root; pole parent=shoulder/lower-spine.'
   );
 
   return new THREE.AnimationClip(
