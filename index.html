@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-twodownloads1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-originalhip1" />
   <script type="importmap">
   {
     "imports": {
@@ -296,7 +296,7 @@
               <input id="includeDefPreview" class="switch" type="checkbox" checked />
             </label>
 
-            <p class="hint">FBX CLEAN descarga dos archivos automáticamente: *_retarget_clean.fbx con Retargeted_Standalone para comprobar malla/animación, y *_OriginalRig_Action.fbx con una sola Action Retargeted_OriginalRig_FK, sin DEF ni helpers, para copiar al RIG-Sintel original.</p>
+            <p class="hint">FBX CLEAN descarga dos archivos. El OriginalRig_Action reconstruye además el frame inferior: HIP/HTP-Spine recibe la pose de pelvis que debe arrastrar las piernas, mientras FK-Hips queda neutral para no duplicar esa rotación. Sigue sin DEF ni helpers.</p>
           </section>
 
           <details class="diagnostics">
@@ -317,6 +317,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-twodownloads1"></script>
+  <script type="module" src="./app.js?v=20260920-originalhip1"></script>
 </body>
 </html>
