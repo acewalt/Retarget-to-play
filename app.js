@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikblendcap3';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikblendcap3';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikblendcap3';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikblendcap4';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikblendcap4';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikblendcap4';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1378,24 +1378,28 @@ const CLOUDRIG_IK_CHAINS = [
   {
     kind: 'ARM', side: 'L',
     a: 'FK-UpperArm.L', b: 'FK-Forearm.L', c: 'FK-Hand.L',
+    evalA: 'DEF-UpperArm_1.L', evalB: 'DEF-Forearm_1.L', evalC: 'DEF-Hand.L',
     ik: 'IK-Hand.L', pole: 'POLE-Arm.L',
     owner: 'IK-M-Forearm.L'
   },
   {
     kind: 'ARM', side: 'R',
     a: 'FK-UpperArm.R', b: 'FK-Forearm.R', c: 'FK-Hand.R',
+    evalA: 'DEF-UpperArm_1.R', evalB: 'DEF-Forearm_1.R', evalC: 'DEF-Hand.R',
     ik: 'IK-Hand.R', pole: 'POLE-Arm.R',
     owner: 'IK-M-Forearm.R'
   },
   {
     kind: 'LEG', side: 'L',
     a: 'FK-Thigh.L', b: 'FK-Knee.L', c: 'FK-Foot.L',
+    evalA: 'DEF-Thigh_1.L', evalB: 'DEF-Knee_1.L', evalC: 'DEF-Foot.L',
     ik: 'IK-Foot.L', pole: 'POLE-Leg.L',
     owner: 'IK-M-Knee.L'
   },
   {
     kind: 'LEG', side: 'R',
     a: 'FK-Thigh.R', b: 'FK-Knee.R', c: 'FK-Foot.R',
+    evalA: 'DEF-Thigh_1.R', evalB: 'DEF-Knee_1.R', evalC: 'DEF-Foot.R',
     ik: 'IK-Foot.R', pole: 'POLE-Leg.R',
     owner: 'IK-M-Knee.R'
   }
@@ -1569,6 +1573,15 @@ function resolveCloudRigIkChains(tgt) {
       if (!runtimeName) return null;
       resolved[key] = runtimeName;
     }
+
+    // Evaluated DEF chain is optional as a compatibility fallback, but on
+    // Sintel/CloudRig it is the preferred FK->IK source because WaltRig has
+    // already reconstructed the missing Blender FK constraints there.
+    for (const key of ['evalA', 'evalB', 'evalC']) {
+      const runtimeName = findBoneByOriginalExact(tgt, [def[key]]);
+      resolved[key] = runtimeName || '';
+    }
+
     const ownerName = findBoneByOriginalExact(tgt, [def.owner]);
     resolved.owner = ownerName || '';
     return resolved;
@@ -1712,6 +1725,47 @@ function chainPoseSnapshot(tgt, chain, fkPoseCache) {
   return { a, b, c };
 }
 
+function liveBonePose(tgt, runtimeName) {
+  const bone = runtimeName ? tgt.bones.get(runtimeName) : null;
+  if (!bone) return null;
+
+  const matrix = bone.matrixWorld.clone();
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+  matrix.decompose(position, quaternion, scale);
+  quaternion.normalize();
+
+  return { bone, position, quaternion, scale, matrix };
+}
+
+function evaluatedIkSourceSnapshot(tgt, chain, fkPoseCache) {
+  // Preferred path for CloudRig: sample the DEF chain AFTER WaltRig Runtime
+  // evaluates the working FK. The visible standalone preview is driven by
+  // these exact transforms, so this is a stronger source of truth for IK
+  // geometry than reconstructing FK-HNG/hinge carries a second time.
+  if (chain.evalA && chain.evalB && chain.evalC) {
+    const a = liveBonePose(tgt, chain.evalA);
+    const b = liveBonePose(tgt, chain.evalB);
+    const c = liveBonePose(tgt, chain.evalC);
+    if (a && b && c) {
+      return {
+        a, b, c,
+        endRestName: chain.evalC,
+        source: 'DEF-evaluated'
+      };
+    }
+  }
+
+  const fk = chainPoseSnapshot(tgt, chain, fkPoseCache);
+  if (!fk) return null;
+  return {
+    ...fk,
+    endRestName: chain.c,
+    source: 'FK-matrix_basis'
+  };
+}
+
 function rawPolePerpFromPos(pa, pb, pc) {
   const chain = pc.clone().sub(pa);
   if (chain.lengthSq() < 1e-10) return null;
@@ -1733,8 +1787,11 @@ function scanPoleAnchorLocal(tgt, mixer, chain, times) {
     mixer.setTime(Number(times[i]));
     updateSlotWorld(tgt);
 
+    tgt.rigRuntime?.update?.();
+    updateSlotWorld(tgt);
+
     const fkPoseCache = new Map();
-    const snap = chainPoseSnapshot(tgt, chain, fkPoseCache);
+    const snap = evaluatedIkSourceSnapshot(tgt, chain, fkPoseCache);
     if (!snap) continue;
 
     const upper = snap.b.position.clone().sub(snap.a.position);
@@ -1849,11 +1906,12 @@ function bakeIkFromFk() {
   if (!state.fkClip) throw new Error('Primero aplica el retargeting FK.');
 
   const tgt = state.target;
+  const runtime = tgt.rigRuntime;
 
-  // IMPORTANT: state.fkClip is the exact pose-basis carrier that already
-  // reproduces the FK 1:1 when its Action is copied onto RIG-Sintel.
-  // Do not use WaltRig Runtime here: it is a Three.js preview simulation,
-  // not the source of truth for OriginalRig_Action export.
+  // state.fkClip remains the FK Action source. For CloudRig geometry we then
+  // evaluate WaltRig's DEF reconstruction and sample the resulting anatomical
+  // chain. This does NOT change the exported FK curves; it only supplies the
+  // end-effector/pole geometry used to derive IK controls.
   const solveClip = state.fkClip;
 
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
@@ -1875,6 +1933,9 @@ function bakeIkFromFk() {
 
   const mixer = new THREE.AnimationMixer(tgt.root);
   const action = mixer.clipAction(solveClip).play();
+
+  const previousRuntimeEnabled = runtime?.enabled;
+  if (runtime) runtime.enabled = true;
 
   // BlendCap: choose a stable local bend axis from the most-bent sample.
   const poleAnchors = new Map();
@@ -1911,20 +1972,28 @@ function bakeIkFromFk() {
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      // Reconstruct the ORIGINAL CloudRig FK pose from the same pose-basis
-      // carrier used by the already-working OriginalRig_Action.
+      // Evaluate the same DEF result that makes the browser preview correct.
+      // This is our baked FK geometry for the IK solve.
+      runtime?.update?.();
+      updateSlotWorld(tgt);
+
       const fkPoseCache = new Map();
       const ikDesiredWorldByName = new Map();
 
       // End effectors. BlendCap formula:
       // desiredIK = FK_pose * inverse(FK_rest) * IK_rest.
       for (const chain of chains) {
-        const snap = chainPoseSnapshot(tgt, chain, fkPoseCache);
+        const snap = evaluatedIkSourceSnapshot(
+          tgt, chain, fkPoseCache
+        );
         if (!snap) continue;
 
         poseToMatrix(snap.c, fkPoseWorld);
 
-        if (!restWorldMatrix(tgt, chain.c, fkRestWorld)) continue;
+        // BlendCap transfers the chain-end delta-from-rest. When DEF is the
+        // evaluated source, use DEF's own rest matrix so the rigid delta is
+        // identical to the final deformation we can actually verify.
+        if (!restWorldMatrix(tgt, snap.endRestName, fkRestWorld)) continue;
         if (!restWorldMatrix(tgt, chain.ik, ikRestWorld)) continue;
 
         desiredIkWorld.copy(fkPoseWorld)
@@ -1972,7 +2041,9 @@ function bakeIkFromFk() {
       // Poles second. For legs, CloudRig's default ik_pole_follow=1 means the
       // P-POLE carrier follows the just-computed IK-Foot.
       for (const chain of chains) {
-        const snap = chainPoseSnapshot(tgt, chain, fkPoseCache);
+        const snap = evaluatedIkSourceSnapshot(
+          tgt, chain, fkPoseCache
+        );
         if (!snap) continue;
 
         const poleWorldPos = computeBlendCapPolePointFromSnapshot(
@@ -2028,6 +2099,7 @@ function bakeIkFromFk() {
   } finally {
     action.stop();
     mixer.stopAllAction();
+    if (runtime) runtime.enabled = previousRuntimeEnabled;
     restoreRest(tgt);
   }
 
@@ -2058,9 +2130,9 @@ function bakeIkFromFk() {
   }
 
   log(
-    'FK→IK BlendCap parity: fuente=OriginalRig matrix_basis (NO preview); ' +
-    'IK=FKpose·FKrest⁻¹·IKrest; P-IK/P-POLE carrier compensado; ' +
-    'poles=geometría FK + bend-axis local.'
+    'FK→IK BlendCap parity: fuente=DEF evaluado del FK funcional; ' +
+    'IK=DEFpose·DEFrest⁻¹·IKrest; P-IK/P-POLE carrier compensado; ' +
+    'poles=geometría DEF evaluada + bend-axis local.'
   );
 
   return new THREE.AnimationClip(
