@@ -48,6 +48,7 @@ const state = {
   target: makeSlot('target'),
   boneMap: [],
   fkClip: null,
+  fkRawClip: null,
   ikOnlyClip: null,
   deformPreviewClip: null,
   exportClip: null,
@@ -329,7 +330,7 @@ async function loadFbx(file, slot, view) {
     log(`WaltFBX v${WALT_FBX_VERSION} Target: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; Actions descartadas=${loadedAnimations.length}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}; WaltRig FK→DEF=${runtimeInfo ? `${runtimeInfo.bindings}/${runtimeInfo.requestedBindings}` : 'n/a'}.`);
   }
 
-  state.fkClip = state.ikOnlyClip = state.deformPreviewClip = state.exportClip = state.targetPreviewClip = null;
+  state.fkClip = state.fkRawClip = state.ikOnlyClip = state.deformPreviewClip = state.exportClip = state.targetPreviewClip = null;
   state.exported = false;
   refreshMapUi();
   updateButtons();
@@ -1074,11 +1075,11 @@ function applyRetarget() {
     const map = validMap();
     if (!map.length) throw new Error('No hay pares válidos en el Bone Map.');
 
-    const viewportClip = bakeRetarget(map, 'Retargeted_FK_RAW');
+    state.fkRawClip = bakeRetarget(map, 'Retargeted_FK_RAW');
     // Convert the upper body to the pose-basis that the ORIGINAL CloudRig
-    // expects. The browser runtime reconstructs the same virtual constrained
-    // parent frames, so preview and exported Action now use one representation.
-    state.fkClip = buildOriginalRigTransferClip(viewportClip);
+    // expects. Keep fkRawClip only for internal FK->IK geometry calculations.
+    // Preview/export use the portable basis clip.
+    state.fkClip = buildOriginalRigTransferClip(state.fkRawClip);
     state.fkClip.name = 'Retargeted_FK';
     state.ikOnlyClip = null;
     state.exportClip = state.fkClip;
@@ -1153,9 +1154,10 @@ function computePolePoint(a, b, c, poleBone) {
 function bakeIkFromFk() {
   if (!state.fkClip) throw new Error('Primero aplica el retargeting FK.');
   const tgt = state.target;
+  const solveClip = state.fkRawClip || state.fkClip;
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
-  const frameCount = Math.max(2, Math.ceil(state.fkClip.duration * fps) + 1);
-  const times = Array.from({ length: frameCount }, (_, i) => Math.min(state.fkClip.duration, i / fps));
+  const frameCount = Math.max(2, Math.ceil(solveClip.duration * fps) + 1);
+  const times = Array.from({ length: frameCount }, (_, i) => Math.min(solveClip.duration, i / fps));
 
   const chainDefs = [
     { a: 'FK-UpperArm.L', b: 'FK-Forearm.L', c: 'FK-Hand.L', ik: 'IK-Hand.L', pole: 'POLE-Arm.L' },
@@ -1179,7 +1181,7 @@ function bakeIkFromFk() {
   restoreRest(tgt);
   tgt.mixer?.stopAllAction();
   tgt.mixer = new THREE.AnimationMixer(tgt.root);
-  const action = tgt.mixer.clipAction(state.fkClip).play();
+  const action = tgt.mixer.clipAction(solveClip).play();
   const data = new Map();
 
   for (const chain of chains) {
@@ -1231,7 +1233,7 @@ function bakeIkFromFk() {
     tracks.push(new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q));
     tracks.push(new THREE.VectorKeyframeTrack(`${name}.scale`, times, d.s));
   }
-  return new THREE.AnimationClip('Retargeted_IK', state.fkClip.duration, tracks);
+  return new THREE.AnimationClip('Retargeted_IK', solveClip.duration, tracks);
 }
 
 function convertFkToIk() {
