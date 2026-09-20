@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikblendcap5';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikblendcap5';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikblendcap5';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-poleroot1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-poleroot1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-poleroot1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1576,10 +1576,11 @@ function resolveCloudRigIkChains(tgt) {
 }
 
 function functionalIkParentName(tgt, chain, kind) {
-  // CloudRig's prepare_parent_switch() defaults every limb IK parent to
-  // the first candidate: Root. Leg poles additionally default
-  // ik_pole_follow=1, so their effective parent is the IK foot control.
-  if (kind === 'POLE' && chain.kind === 'LEG') return chain.ik;
+  // Stable-pole mode:
+  // POLE-Arm already works because its parent space is stable/root-like.
+  // Treat POLE-Leg exactly the same. On the original CloudRig this must
+  // be paired with ik_pole_follow=0; otherwise P-POLE-Leg is carried by
+  // IK-Foot again after our baked location is applied.
   return findBoneByOriginalExact(tgt, ['root']) || null;
 }
 
@@ -1593,12 +1594,6 @@ function functionalParentPoseMatrix(
 ) {
   const parentName = functionalIkParentName(tgt, chain, kind);
   if (!parentName) return out.identity();
-
-  // CloudRig legs default ik_pole_follow=1: the pole helper follows IK-Foot.
-  if (kind === 'POLE' && chain.kind === 'LEG') {
-    const desiredIk = ikDesiredWorldByName.get(chain.ik);
-    if (desiredIk) return out.copy(desiredIk);
-  }
 
   const parentPose = originalRigFkPoseMatrix(
     tgt,
@@ -1723,51 +1718,6 @@ function rawPolePerpFromPos(pa, pb, pc) {
   return { pa, pb, pc, chain, perp };
 }
 
-// BlendCap does NOT use the end-control head as the third pole point.
-// It uses mid_pb.tail: for a leg that means the posed tail of FK-Knee.
-// This matters on CloudRig feet, where the foot control can carry extra
-// orientation/mechanism offsets even though the knee tail is the actual IK
-// chain endpoint used to define the knee bend plane.
-function blendCapMidTailWorld(tgt, chain, snap) {
-  if (chain.kind !== 'LEG') return snap.c.position.clone();
-
-  const midRest = tgt.rest.get(chain.b);
-  const endRest = tgt.rest.get(chain.c);
-  if (!midRest || !endRest || !snap.b?.matrix) {
-    return snap.c.position.clone();
-  }
-
-  const midRestWorld = new THREE.Matrix4().compose(
-    midRest.worldPos.clone(),
-    midRest.worldQuat.clone(),
-    midRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
-  );
-
-  // Rest FK-Foot head is the FK-Knee tail in the raw CloudRig hierarchy.
-  // Map that rest point through the CURRENT FK-Knee pose, equivalent to:
-  // mid_pb.matrix @ Vector((0, mid_pb.bone.length, 0)) in BlendCap.
-  return endRest.worldPos.clone()
-    .applyMatrix4(midRestWorld.clone().invert())
-    .applyMatrix4(snap.b.matrix);
-}
-
-function restPosePoleAnchorLocal(tgt, chain) {
-  const a = tgt.rest.get(chain.a);
-  const b = tgt.rest.get(chain.b);
-  const c = tgt.rest.get(chain.c);
-  if (!a || !b || !c) return null;
-
-  const upper = b.worldPos.clone().sub(a.worldPos);
-  const lower = c.worldPos.clone().sub(b.worldPos);
-  const bendAxisWorld = upper.cross(lower);
-  if (bendAxisWorld.lengthSq() < 1e-12) return null;
-
-  const local = bendAxisWorld
-    .applyQuaternion(b.worldQuat.clone().invert());
-
-  return local.lengthSq() > 1e-12 ? local.normalize() : null;
-}
-
 function scanPoleAnchorLocal(tgt, mixer, chain, times) {
   let bestLen = 0;
   let bestLocal = null;
@@ -1782,9 +1732,8 @@ function scanPoleAnchorLocal(tgt, mixer, chain, times) {
     const snap = chainPoseSnapshot(tgt, chain, fkPoseCache);
     if (!snap) continue;
 
-    const midTail = blendCapMidTailWorld(tgt, chain, snap);
     const upper = snap.b.position.clone().sub(snap.a.position);
-    const lower = midTail.clone().sub(snap.b.position);
+    const lower = snap.c.position.clone().sub(snap.b.position);
     const bendAxisWorld = upper.clone().cross(lower);
     const len = bendAxisWorld.length();
 
@@ -1801,23 +1750,14 @@ function scanPoleAnchorLocal(tgt, mixer, chain, times) {
   }
 
   restoreRest(tgt);
-
-  // BlendCap falls back to the authored rest-pose bend when the sampled
-  // animation never gives a trustworthy bend plane.
-  return bestLocal || restPosePoleAnchorLocal(tgt, chain);
+  return bestLocal;
 }
 
-function computeBlendCapPolePointFromSnapshot(
-  tgt,
-  chainDef,
-  snap,
-  anchorLocal
-) {
-  const chainEnd = blendCapMidTailWorld(tgt, chainDef, snap);
+function computeBlendCapPolePointFromSnapshot(snap, anchorLocal) {
   const raw = rawPolePerpFromPos(
     snap.a.position,
     snap.b.position,
-    chainEnd
+    snap.c.position
   );
 
   if (!raw) return snap.b.position.clone();
@@ -1834,13 +1774,7 @@ function computeBlendCapPolePointFromSnapshot(
     }
 
     if (perp.length() < 1e-6) {
-      // BlendCap canonical fallback is armature-local +Y. Keep the old +Z
-      // fallback for arms because their poles are already validated; apply
-      // +Y specifically to the remaining CloudRig leg-pole problem.
-      const fallback = chainDef.kind === 'LEG'
-        ? new THREE.Vector3(0, 1, 0)
-        : new THREE.Vector3(0, 0, 1);
-
+      const fallback = new THREE.Vector3(0, 0, 1);
       perp = fallback.sub(
         chain.clone().multiplyScalar(
           fallback.dot(chain) / Math.max(chain.lengthSq(), 1e-10)
@@ -1865,6 +1799,7 @@ function computeBlendCapPolePointFromSnapshot(
     }
   }
 
+  // BlendCap constant.
   return pb.clone().addScaledVector(perp, chain.length() * 0.4);
 }
 
@@ -2036,8 +1971,6 @@ function bakeIkFromFk() {
         if (!snap) continue;
 
         const poleWorldPos = computeBlendCapPolePointFromSnapshot(
-          tgt,
-          chain,
           snap,
           poleAnchors.get(chain.pole)
         );
@@ -2095,42 +2028,34 @@ function bakeIkFromFk() {
 
   const tracks = [];
   for (const [name, d] of data) {
-    const bone = tgt.bones.get(name);
-    const original = originalObjectName(bone) || name;
-    const isPole = /^POLE-(Arm|Leg)\./.test(original);
-
     if (d.p.length === times.length * 3) {
       tracks.push(
         new THREE.VectorKeyframeTrack(`${name}.position`, times, d.p)
       );
     }
-
-    // BlendCap's POLE pair has do_loc=True, do_rot=False. The IK solver
-    // reads the pole position; baking pole rotation/scale only adds FBX
-    // conversion noise and is not part of the reference algorithm.
-    if (!isPole && d.q.length === times.length * 4) {
+    if (d.q.length === times.length * 4) {
       tracks.push(
         new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q)
       );
     }
-    if (!isPole && d.s.length === times.length * 3) {
+    if (d.s.length === times.length * 3) {
       tracks.push(
         new THREE.VectorKeyframeTrack(`${name}.scale`, times, d.s)
       );
     }
   }
 
-  if (tracks.length < 16) {
+  if (tracks.length < 24) {
     log(
-      `FK→IK aviso: se generaron ${tracks.length}/16 curvas esperadas ` +
-      '(4 IK × TRS + 4 POLE × posición).'
+      `FK→IK aviso: se generaron ${tracks.length}/24 curvas esperadas ` +
+      '(4 IK + 4 POLE × TRS).'
     );
   }
 
   log(
     'FK→IK BlendCap parity: fuente=OriginalRig matrix_basis (NO preview); ' +
-    'IK=FKpose·FKrest⁻¹·IKrest; P-IK/P-POLE carrier compensado; ' +
-    'poles=mid-tail FK (knee/elbow) + bend-axis local; POLE=bake sólo location.'
+    'IK=FKpose·FKrest⁻¹·IKrest; manos/pies sin cambios; ' +
+    'POLE-Arm y POLE-Leg usan el mismo espacio estable de root (pole_follow=0).'
   );
 
   return new THREE.AnimationClip(
