@@ -1,15 +1,16 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
-export const WALT_FBX_VERSION = '0.3.1';
+export const WALT_FBX_VERSION = '0.4.0';
 
-// Los 31 DEF con pesos reales en x1.fbx se reconstruyen desde los
-// controles FK. Los segmentos _2 comparten el delta de su control principal;
-// los DEF-Hip.L/R siguen el delta rígido de FK-Hips.
+// Los DEF se reconstruyen desde los controles funcionales del CloudRig.
+// BlendCap's shipped Mixamo→CloudRig preset drives HIP-Spine (not FK-Hips)
+// from source Hips rotation, so the pelvis DEF must inherit the lower-section
+// frame. @LOWER resolves to HIP-Spine or HTP-Spine depending on the FBX.
 const CLOUDRIG_BINDINGS = [
-  { driver: 'FK-Hips', driven: 'DEF-Hips' },
-  { driver: 'FK-Hips', driven: 'DEF-Hip.L' },
-  { driver: 'FK-Hips', driven: 'DEF-Hip.R' },
+  { driver: '@LOWER', driven: 'DEF-Hips' },
+  { driver: '@LOWER', driven: 'DEF-Hip.L' },
+  { driver: '@LOWER', driven: 'DEF-Hip.R' },
   { driver: 'FK-Spine', driven: 'DEF-Spine' },
   { driver: 'FK-Chest', driven: 'DEF-Chest' },
   { driver: 'FK-Neck', driven: 'DEF-Neck' },
@@ -49,8 +50,8 @@ const CLOUDRIG_BINDINGS = [
 // Blender resolvía sus posiciones mediante constraints. Esos constraints
 // no existen en el FBX, así que reconstruimos la jerarquía anatómica aquí.
 const CLOUDRIG_FK_PARENT = {
-  'FK-Hips': null,
-  'FK-Spine': 'FK-Hips',
+  'FK-Hips': '@LOWER',
+  'FK-Spine': 'TORSO-Spine',
   'FK-Chest': 'FK-Spine',
   'FK-Neck': 'FK-Chest',
   'FK-Head': 'FK-Neck',
@@ -65,19 +66,26 @@ const CLOUDRIG_FK_PARENT = {
   'FK-Forearm.R': 'FK-UpperArm.R',
   'FK-Hand.R': 'FK-Forearm.R',
 
-  // Keep the ORIGINAL runtime leg chain exactly as before the regression.
-  'FK-Thigh.L': 'FK-Hips',
+  // CloudRig hinge_setup carries the first FK limb control from the lower
+  // section; the raw FBX lost that ARMATURE constraint.
+  'FK-Thigh.L': '@LOWER',
   'FK-Knee.L': 'FK-Thigh.L',
   'FK-Foot.L': 'FK-Knee.L',
+  // FK-Toes is parentless in data but carried from FK-Foot in FK mode.
   'FK-Toes.L': 'FK-Foot.L',
 
-  'FK-Thigh.R': 'FK-Hips',
+  'FK-Thigh.R': '@LOWER',
   'FK-Knee.R': 'FK-Thigh.R',
   'FK-Foot.R': 'FK-Knee.R',
   'FK-Toes.R': 'FK-Foot.R'
 };
 
 const CLOUDRIG_PORTABLE_PARENT = {
+  'FK-Hips': '@LOWER',
+
+  'FK-Spine': 'TORSO-Spine',
+  'FK-Chest': 'FK-Spine',
+
   'FK-Shoulder.L': 'FK-Chest',
   'FK-Shoulder.R': 'FK-Chest',
 
@@ -91,6 +99,16 @@ const CLOUDRIG_PORTABLE_PARENT = {
   'FK-UpperArm.R': 'FK-Shoulder.R',
   'FK-Forearm.R': 'FK-UpperArm.R',
   'FK-Hand.R': 'FK-Forearm.R',
+
+  'FK-Thigh.L': '@LOWER',
+  'FK-Knee.L': 'FK-Thigh.L',
+  'FK-Foot.L': 'FK-Knee.L',
+  'FK-Toes.L': 'FK-Foot.L',
+
+  'FK-Thigh.R': '@LOWER',
+  'FK-Knee.R': 'FK-Thigh.R',
+  'FK-Foot.R': 'FK-Knee.R',
+  'FK-Toes.R': 'FK-Foot.R'
 };
 
 const CLOUDRIG_FK_ORDER = [
@@ -132,6 +150,23 @@ function canonical(name) {
   if (n.includes(':') || n.includes('|')) n = n.split(/[:|]/).pop();
   n = n.replace(/^mixamorig\d*/i, '');
   return n.replace(/[\[\].:/_\s-]/g, '').toLowerCase();
+}
+
+function resolveCloudRigBone(rig, spec) {
+  if (!rig || !spec) return null;
+  if (spec === '@LOWER') {
+    return rig.get('HIP-Spine') || rig.get('HTP-Spine') || null;
+  }
+  return rig.get(spec);
+}
+
+function cloudRigVirtualKeys(spec, bone) {
+  const keys = new Set();
+  if (spec) keys.add(spec);
+  const original = originalName(bone);
+  if (original) keys.add(original);
+  if (bone?.name) keys.add(bone.name);
+  return [...keys];
 }
 
 function depthOf(object) {
@@ -433,7 +468,8 @@ export class WaltCloudRigRuntime {
     this.bindings = CLOUDRIG_BINDINGS
       .map(binding => ({
         ...binding,
-        driverBone: this.rig.get(binding.driver),
+        driverKey: binding.driver,
+        driverBone: resolveCloudRigBone(this.rig, binding.driver),
         drivenBone: this.rig.get(binding.driven)
       }))
       .filter(x => x.driverBone && x.drivenBone)
@@ -453,6 +489,11 @@ export class WaltCloudRigRuntime {
     for (const b of this.bindings) {
       unique.add(b.driverBone);
       unique.add(b.drivenBone);
+    }
+
+    for (const spec of ['root', 'TORSO-Spine', '@LOWER', ...CLOUDRIG_FK_ORDER]) {
+      const bone = resolveCloudRigBone(this.rig, spec);
+      if (bone) unique.add(bone);
     }
 
     for (const bone of unique) {
@@ -506,6 +547,32 @@ export class WaltCloudRigRuntime {
     const pDesiredWorld = new THREE.Vector3();
     const pDesiredLocal = new THREE.Vector3();
 
+    // Live section frames. These direct controls replace the Blender
+    // constraints that are absent from the FBX.
+    for (const spec of ['root', 'TORSO-Spine', '@LOWER']) {
+      const frameBone = resolveCloudRigBone(this.rig, spec);
+      if (!frameBone) continue;
+
+      const frameRest = this.rest.get(frameBone);
+      if (!frameRest) continue;
+
+      const framePos = frameBone.getWorldPosition(new THREE.Vector3());
+      const frameQ = frameBone.getWorldQuaternion(new THREE.Quaternion());
+      const frameDeltaQ = frameQ.clone()
+        .multiply(frameRest.worldQuaternion.clone().invert())
+        .normalize();
+
+      const entry = {
+        position: framePos,
+        quaternion: frameQ,
+        deltaQuaternion: frameDeltaQ
+      };
+
+      for (const key of cloudRigVirtualKeys(spec, frameBone)) {
+        this.virtualFk.set(key, entry);
+      }
+    }
+
     // 1) Reconstrucción de posiciones FK virtuales.
     for (const name of CLOUDRIG_FK_ORDER) {
       const bone = this.rig.get(name);
@@ -522,7 +589,7 @@ export class WaltCloudRigRuntime {
         ? this.virtualFk.get(portableParentName)
         : null;
       const portableParentBone = portableParentName
-        ? this.rig.get(portableParentName)
+        ? resolveCloudRigBone(this.rig, portableParentName)
         : null;
       const portableParentRest = portableParentBone
         ? this.rest.get(portableParentBone)
@@ -555,10 +622,9 @@ export class WaltCloudRigRuntime {
       let virtualPosition;
 
       if (!parentName) {
-        // FK-Hips sí recibe root motion real desde la Action.
         virtualPosition = bone.getWorldPosition(new THREE.Vector3());
       } else {
-        const parentBone = this.rig.get(parentName);
+        const parentBone = resolveCloudRigBone(this.rig, parentName);
         const parentRest = parentBone ? this.rest.get(parentBone) : null;
         const parentVirtual = this.virtualFk.get(parentName);
 
@@ -581,11 +647,15 @@ export class WaltCloudRigRuntime {
         }
       }
 
-      this.virtualFk.set(name, {
+      const virtualEntry = {
         position: virtualPosition,
         quaternion: qCurrent.clone(),
         deltaQuaternion: qDelta.clone()
-      });
+      };
+
+      for (const key of cloudRigVirtualKeys(name, bone)) {
+        this.virtualFk.set(key, virtualEntry);
+      }
     }
 
     // 2) Los DEF siguen el FK virtual, no el pivot crudo del FBX.
@@ -596,7 +666,10 @@ export class WaltCloudRigRuntime {
       const rr = this.rest.get(driven);
       if (!dr || !rr) continue;
 
-      const virtual = this.virtualFk.get(binding.driver);
+      const virtual =
+        this.virtualFk.get(binding.driverKey) ||
+        this.virtualFk.get(binding.driver) ||
+        this.virtualFk.get(originalName(driver));
       if (virtual) {
         pCurrent.copy(virtual.position);
         qCurrent.copy(virtual.quaternion);
