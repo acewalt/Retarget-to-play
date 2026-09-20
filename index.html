@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-splitactions1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-splitfiles1" />
   <script type="importmap">
   {
     "imports": {
@@ -281,7 +281,8 @@
               <option value="quaternion">Quaternion · WXYZ</option>
             </select>
 
-            <button id="exportBlenderAction" class="wide-button" type="button" disabled>Exportar Action para rig original</button>
+            <button id="exportBlenderAction" class="wide-button" type="button" disabled>Exportar Action .py para rig original</button>
+            <button id="exportOriginalRigFbxAction" class="wide-button" type="button" disabled>Exportar FBX Action para rig original</button>
 
             <label class="setting-row">
               <div><b>Action original junto al FBX</b><small>Descarga también el .py que crea la Action directamente en RIG-Sintel</small></div>
@@ -295,7 +296,7 @@
               <input id="includeDefPreview" class="switch" type="checkbox" checked />
             </label>
 
-            <p class="hint">FBX CLEAN incluye dos Actions: Retargeted_Standalone usa DEF baked para que el FBX importado mueva su malla; Retargeted_OriginalRig_FK contiene sólo controles y es la que debes asignar al RIG-Sintel original. Nunca copies Retargeted_Standalone al rig original.</p>
+            <p class="hint">FBX CLEAN contiene sólo Retargeted_Standalone y mueve su propia malla con DEF baked. Para el RIG-Sintel original usa “Exportar FBX Action para rig original”: genera otro FBX con una sola Action, Retargeted_OriginalRig_FK, y DEF=0.</p>
           </section>
 
           <details class="diagnostics">
@@ -316,6 +317,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-splitactions1"></script>
+  <script type="module" src="./app.js?v=20260920-splitfiles1"></script>
 </body>
 </html>
