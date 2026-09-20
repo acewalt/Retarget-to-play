@@ -80,16 +80,6 @@ const CLOUDRIG_PORTABLE_PARENT = {
   'FK-UpperArm.R': 'FK-Shoulder.R',
   'FK-Forearm.R': 'FK-UpperArm.R',
   'FK-Hand.R': 'FK-Forearm.R',
-
-  'FK-Thigh.L': 'FK-Hips',
-  'FK-Knee.L': 'FK-Thigh.L',
-  'FK-Foot.L': 'FK-Knee.L',
-  'FK-Toes.L': 'FK-Foot.L',
-
-  'FK-Thigh.R': 'FK-Hips',
-  'FK-Knee.R': 'FK-Thigh.R',
-  'FK-Foot.R': 'FK-Knee.R',
-  'FK-Toes.R': 'FK-Foot.R'
 };
 
 const CLOUDRIG_FK_ORDER = [
