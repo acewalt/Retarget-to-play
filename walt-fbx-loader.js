@@ -562,7 +562,10 @@ export class WaltCloudRigRuntime {
         const parentVirtual = this.virtualFk.get(parentName);
 
         if (parentBone && parentRest && parentVirtual) {
-          parentBone.getWorldQuaternion(qParentWorld);
+          // Use the reconstructed parent rotation. For portable upper-body
+          // controls the raw FBX parent/world quaternion is intentionally not
+          // the constrained CloudRig pose anymore.
+          qParentWorld.copy(parentVirtual.quaternion);
           const parentDelta = qParentWorld.clone()
             .multiply(parentRest.worldQuaternion.clone().invert())
             .normalize();
