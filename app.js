@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik2';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik2';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik2';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -616,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyik1',
+      definition.path + '?v=20260920-rigifyik2',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -2394,14 +2394,14 @@ function rigifyPoleFunctionalParentName(tgt, chain) {
 }
 
 function rigifyFunctionalParentName(tgt, chain, kind) {
-  // Rigify explicitly defaults IK_parent to root.
+  // Rigify explicitly selects root for hand_ik / foot_ik.
   if (kind === 'IK') {
     return findBoneByOriginalExact(tgt, ['root']) || null;
   }
 
-  // Pole parent defaults to the limb's original rig parent. Walking from the
-  // first FK control to the nearest mapped ancestor reproduces shoulder/torso
-  // carry without depending on generated MCH names.
+  // Pole controls use their own MCH-*_ik_target.parent switch. Rigify does
+  // not explicitly select root for pole_parent; the default follows the
+  // limb's rig parent, so retain the nearest mapped FK ancestor here.
   return rigifyPoleFunctionalParentName(tgt, chain);
 }
 
@@ -2440,14 +2440,14 @@ function encodeRigifyControlLocal(
 
   if (!controlRestWorld || !rawRestLocal) return null;
 
-  let basis = null;
-
-  // Rigify SwitchParentBuilder creates MCH-<control>.parent, parents the
-  // visible control to it, and drives that MCH via an ARMATURE constraint.
   const helper = control.parent?.isBone ? control.parent : null;
   const helperOriginal = helper
     ? (originalObjectName(helper) || helper.name)
     : '';
+
+  let parentPose = functionalParentPose.clone();
+  let parentRest = functionalParentRest.clone();
+  let ctrlRelRest;
 
   if (helper && /^MCH-.*\.parent$/i.test(helperOriginal)) {
     const helperRestWorld = composeRestWorldMatrix(
@@ -2455,41 +2455,102 @@ function encodeRigifyControlLocal(
     );
 
     if (helperRestWorld) {
+      // Rigify SwitchParentBuilder: the MCH helper is root-level in the
+      // exported hierarchy and receives the selected parent's pose delta
+      // through an ARMATURE constraint.
       const carrierDelta = functionalParentPose.clone()
         .multiply(functionalParentRest.clone().invert());
 
-      const helperPoseWorld = carrierDelta
-        .multiply(helperRestWorld);
+      parentPose = carrierDelta.multiply(helperRestWorld);
+      parentRest = helperRestWorld;
 
-      const controlRestRelative = helperRestWorld.clone()
+      ctrlRelRest = helperRestWorld.clone()
         .invert()
         .multiply(controlRestWorld);
-
-      const basisIdentityWorld = helperPoseWorld
-        .multiply(controlRestRelative);
-
-      basis = basisIdentityWorld.clone()
-        .invert()
-        .multiply(desiredWorld);
     }
   }
 
-  if (!basis) {
-    const restRelative = functionalParentRest.clone()
+  if (!ctrlRelRest) {
+    ctrlRelRest = parentRest.clone()
       .invert()
       .multiply(controlRestWorld);
-
-    const desiredRelative = functionalParentPose.clone()
-      .invert()
-      .multiply(desiredWorld);
-
-    basis = restRelative.clone()
-      .invert()
-      .multiply(desiredRelative);
   }
 
-  return outMatrix.copy(rawRestLocal).multiply(basis);
+  const poseIdentity = parentPose.clone().multiply(ctrlRelRest);
+  const basisFull = poseIdentity.clone()
+    .invert()
+    .multiply(desiredWorld);
+
+  const basisQ = new THREE.Quaternion();
+  const basisScale = new THREE.Vector3();
+  const ignored = new THREE.Vector3();
+  basisFull.decompose(ignored, basisQ, basisScale);
+  basisQ.normalize();
+
+  // BlendCap has a dedicated Rigify path for controls whose Blender bone
+  // has use_local_location=False. Their location channels are expressed in
+  // the parent pose/rest frame, NOT the bone's own rest orientation. A
+  // normal Matrix4.decompose() rotates that translation again and produces
+  // the huge hand/foot offsets seen in Blender.
+  //
+  // The generated Rigify IK/pole controls are the problematic family, so
+  // use the authoritative BlendCap back-solve for these names.
+  const original = originalObjectName(control) || controlName;
+  const noLocalLocation =
+    /^(hand_ik|foot_ik|upper_arm_ik_target|thigh_ik_target)\.[LR]$/i
+      .test(original);
+
+  let basisT;
+  if (noLocalLocation) {
+    const restOffset = new THREE.Vector3();
+    const dummyQ = new THREE.Quaternion();
+    const dummyS = new THREE.Vector3();
+    ctrlRelRest.decompose(restOffset, dummyQ, dummyS);
+
+    const restHeadAtPose = restOffset.clone()
+      .applyMatrix4(parentPose);
+
+    const desiredT = new THREE.Vector3();
+    desiredWorld.decompose(
+      desiredT,
+      new THREE.Quaternion(),
+      new THREE.Vector3()
+    );
+
+    const deltaArm = desiredT.sub(restHeadAtPose);
+
+    const parentPoseQ = new THREE.Quaternion();
+    const parentPoseS = new THREE.Vector3();
+    const parentPoseT = new THREE.Vector3();
+    parentPose.decompose(parentPoseT, parentPoseQ, parentPoseS);
+    parentPoseQ.normalize();
+
+    const parentRestQ = new THREE.Quaternion();
+    parentRest.decompose(
+      new THREE.Vector3(),
+      parentRestQ,
+      new THREE.Vector3()
+    );
+    parentRestQ.normalize();
+
+    const frameQ = parentPoseQ.clone()
+      .multiply(parentRestQ.clone().invert())
+      .normalize();
+
+    basisT = deltaArm.applyQuaternion(frameQ.invert());
+  } else {
+    basisT = ignored.clone();
+  }
+
+  const basisMatrix = new THREE.Matrix4().compose(
+    basisT,
+    basisQ,
+    basisScale
+  );
+
+  return outMatrix.copy(rawRestLocal).multiply(basisMatrix);
 }
+
 
 function bakeRigifyIkFromFk() {
   if (!state.fkRawClip) {
@@ -3242,18 +3303,24 @@ function buildRigifyOriginalRigTransferClip(clip) {
   const childName =
     findBoneByOriginalExact(tgt, ['head']) ||
     findSemanticBone(tgt, 'head');
-  const parentName =
-    findBoneByOriginalExact(tgt, ['neck']) ||
-    findSemanticBone(tgt, 'neck');
+  const helperName =
+    findBoneByOriginalExact(tgt, ['MCH-ROT-head']);
+  const followName =
+    findBoneByOriginalExact(tgt, ['torso']);
 
-  if (!childName || !parentName) return clip.clone();
+  if (!childName || !helperName || !followName) {
+    return clip.clone();
+  }
 
   const child = tgt.bones.get(childName);
-  const parent = tgt.bones.get(parentName);
+  const helper = tgt.bones.get(helperName);
+  const follow = tgt.bones.get(followName);
   const childRest = tgt.rest.get(childName);
-  const parentRest = tgt.rest.get(parentName);
+  const helperRest = tgt.rest.get(helperName);
 
-  if (!child || !parent || !childRest || !parentRest) return clip.clone();
+  if (!child || !helper || !follow || !childRest || !helperRest) {
+    return clip.clone();
+  }
 
   const sourceTracks = clip.tracks.map(track => track.clone());
   const headTrack = sourceTracks.find(track => {
@@ -3263,26 +3330,37 @@ function buildRigifyOriginalRigTransferClip(clip) {
 
   if (!headTrack) return clip.clone();
 
-  // Rigify's visible head control is parented to MCH-ROT-head, which follows
-  // neck in Blender. The FBX helper is static, so a raw local solve gives the
-  // wrong matrix_basis when the Action is copied back to the original rig.
-  // Solve head exactly against the animated neck frame instead.
+  // Actual exported Rigify hierarchy:
+  // neck -> MCH-ROT-head -> head
+  //
+  // In Blender, however, MCH-ROT-head has COPY_ROTATION from Rigify's
+  // follow bone. Stock super_head creates head_follow with default 0,
+  // and its driver uses influence = 1 - head_follow; therefore the
+  // helper's rotation is carried by torso at the default setting.
+  // The FBX contains the helper hierarchy but not that live constraint.
+  //
+  // Bake the head matrix_basis against the pose the ORIGINAL helper
+  // will actually have at playback:
+  //   helperPoseRot = torsoPoseRot
+  //   identityHeadRot = helperPoseRot * helperRest^-1 * headRest
+  //   basis = identityHeadRot^-1 * desiredHeadRot
   restoreRest(tgt);
   tgt.mixer?.stopAllAction();
 
   const mixer = new THREE.AnimationMixer(tgt.root);
   const action = mixer.clipAction(clip).play();
 
-  const restRelative = parentRest.worldQuat.clone()
+  const helperRestQ = helperRest.worldQuat.clone().normalize();
+  const headRestWorldQ = childRest.worldQuat.clone().normalize();
+  const relRestQ = helperRestQ.clone()
     .invert()
-    .multiply(childRest.worldQuat)
+    .multiply(headRestWorldQ)
     .normalize();
-  const restRelativeInv = restRelative.clone().invert();
 
   const values = [];
-  const childWorld = new THREE.Quaternion();
-  const parentWorld = new THREE.Quaternion();
-  const poseRelative = new THREE.Quaternion();
+  const desiredHeadQ = new THREE.Quaternion();
+  const followPoseQ = new THREE.Quaternion();
+  const identityHeadQ = new THREE.Quaternion();
   const basisDelta = new THREE.Quaternion();
   const exportLocal = new THREE.Quaternion();
   let previous = null;
@@ -3293,20 +3371,18 @@ function buildRigifyOriginalRigTransferClip(clip) {
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      child.getWorldQuaternion(childWorld);
-      parent.getWorldQuaternion(parentWorld);
+      child.getWorldQuaternion(desiredHeadQ).normalize();
+      follow.getWorldQuaternion(followPoseQ).normalize();
 
-      poseRelative.copy(parentWorld)
+      identityHeadQ.copy(followPoseQ)
+        .multiply(relRestQ)
+        .normalize();
+
+      basisDelta.copy(identityHeadQ)
         .invert()
-        .multiply(childWorld)
+        .multiply(desiredHeadQ)
         .normalize();
 
-      basisDelta.copy(restRelativeInv)
-        .multiply(poseRelative)
-        .normalize();
-
-      // Same carrier convention used by OriginalRig_Action:
-      // FBX local = raw rest local × Blender matrix_basis.
       exportLocal.copy(childRest.quaternion)
         .multiply(basisDelta)
         .normalize();
@@ -3342,7 +3418,10 @@ function buildRigifyOriginalRigTransferClip(clip) {
     track.name === headTrack.name ? replacement : track
   );
 
-  log('Rigify OriginalRig basis: head relativo a neck/MCH-ROT-head.');
+  log(
+    'Rigify OriginalRig basis: head compensado contra ' +
+    'MCH-ROT-head con follow real de torso (head_follow=0).'
+  );
 
   return new THREE.AnimationClip(
     clip.name || 'Retargeted_FK',
