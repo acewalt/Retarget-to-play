@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikexact1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikexact1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikexact1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikblendcap2';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikblendcap2';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikblendcap2';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -2685,18 +2685,12 @@ function exportBlenderXYZAction() {
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
   const rotationMode = $('rotationMode')?.value === 'quaternion' ? 'quaternion' : 'xyz';
   const resumeTime = state.playTime;
-  const exactIkRequested = !!state.ikOnlyClip;
-  const scriptSource = exactIkRequested ? state.fkClip : state.exportClip;
   const script = buildBlenderActionScript(
-    scriptSource,
+    state.exportClip,
     state.target,
     fps,
     originalObjectName,
-    rotationMode,
-    {
-      convertToIk: exactIkRequested,
-      keepLimbFk: $('keepFk')?.checked ?? true
-    }
+    rotationMode
   );
 
   playTargetClip(state.targetPreviewClip);
@@ -2715,8 +2709,7 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
     throw new Error('Falta Target, retarget o FBX original.');
   }
 
-  const carrierSource = state.ikOnlyClip ? state.fkClip : state.exportClip;
-  const controlClip = buildOriginalRigControlOnlyClip(carrierSource);
+  const controlClip = buildOriginalRigControlOnlyClip(state.exportClip);
   if (!controlClip || !controlClip.tracks.length) {
     throw new Error('No pude construir la Action de controles del CloudRig original.');
   }
@@ -2741,15 +2734,11 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
     state.target.originalBuffer,
     [{
       clip: originalRigAction,
-      actionName: state.ikOnlyClip
-        ? 'Retargeted_OriginalRig_FK_SourceForIK'
-        : 'Retargeted_OriginalRig_FK'
+      actionName: 'Retargeted_OriginalRig_FK'
     }],
     {
       rotationMode,
-      currentActionName: state.ikOnlyClip
-        ? 'Retargeted_OriginalRig_FK_SourceForIK'
-        : 'Retargeted_OriginalRig_FK'
+      currentActionName: 'Retargeted_OriginalRig_FK'
       // No hierarchyRewrite: este carrier conserva el FBX original.
     }
   );
@@ -2775,38 +2764,11 @@ async function exportOriginalRigActionFbx() {
       `${base}_OriginalRig_Action.fbx`
     );
 
-    if (state.ikOnlyClip) {
-      const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
-      const exactScript = buildBlenderActionScript(
-        state.fkClip,
-        state.target,
-        fps,
-        originalObjectName,
-        rotationMode === 'quaternion' ? 'quaternion' : 'xyz',
-        {
-          convertToIk: true,
-          keepLimbFk: $('keepFk')?.checked ?? true
-        }
-      );
-
-      const suffix = rotationMode === 'quaternion' ? 'Quaternion' : 'XYZ';
-      downloadTextFile(
-        exactScript,
-        `${base}_OriginalRig_IK_EXACT_${suffix}.py`,
-        'text/x-python'
-      );
-
-      setStatus('FK carrier + IK exacto para Blender exportados', 'good');
-      log(
-        'IK exacto: el FBX carrier conserva la Action FK 1:1 como fuente; ' +
-        'el .py adjunto hornea IK-Hand/IK-Foot/POLE dentro del CloudRig ORIGINAL usando sus constraints reales.'
-      );
-    } else {
-      setStatus('Action FBX para rig original exportada', 'good');
-      log(
-        `OriginalRig Action FBX: 1 stack · ${pkg.action.tracks.length} tracks · helpers/DEF=0 · perfil CloudRig.`
-      );
-    }
+    setStatus('Action FBX para rig original exportada', 'good');
+    log(
+      `OriginalRig Action FBX: 1 stack · ${pkg.action.tracks.length} tracks · helpers/DEF=0 · BlendCap CloudRig profile. ` +
+      'Importa este FBX sólo para extraer Retargeted_OriginalRig_FK.'
+    );
   } catch (err) {
     console.error(err);
     setStatus('Error exportando Action FBX', 'bad');
@@ -3014,18 +2976,12 @@ async function exportTargetFbx() {
         $('rotationMode')?.value === 'quaternion' ? 'quaternion' : 'xyz';
       const resumeTime = state.playTime;
 
-      const exactIkRequested = !!state.ikOnlyClip;
-      const scriptSource = exactIkRequested ? state.fkClip : state.exportClip;
       const script = buildBlenderActionScript(
-        scriptSource,
+        state.exportClip,
         state.target,
         fps,
         originalObjectName,
-        originalRigRotationMode,
-        {
-          convertToIk: exactIkRequested,
-          keepLimbFk: $('keepFk')?.checked ?? true
-        }
+        originalRigRotationMode
       );
 
       const suffix =
@@ -3224,12 +3180,7 @@ function updateButtons() {
   $('exportFbx').disabled = !state.exportClip;
   if ($('exportWorkspaceButton')) $('exportWorkspaceButton').disabled = !state.exportClip;
   if ($('exportBlenderAction')) $('exportBlenderAction').disabled = !state.exportClip;
-  if ($('exportOriginalRigFbxAction')) {
-    $('exportOriginalRigFbxAction').disabled = !state.exportClip;
-    $('exportOriginalRigFbxAction').textContent = state.ikOnlyClip
-      ? 'Exportar FK carrier + IK exacto .py'
-      : 'Exportar FBX Action para rig original';
-  }
+  if ($('exportOriginalRigFbxAction')) $('exportOriginalRigFbxAction').disabled = !state.exportClip;
   updateWorkflowUI();
 }
 

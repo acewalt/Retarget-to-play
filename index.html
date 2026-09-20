@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-ikexact1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-ikblendcap2" />
   <script type="importmap">
   {
     "imports": {
@@ -283,7 +283,6 @@
 
             <button id="exportBlenderAction" class="wide-button" type="button" disabled>Exportar Action .py para rig original</button>
             <button id="exportOriginalRigFbxAction" class="wide-button" type="button" disabled>Exportar FBX Action para rig original</button>
-            <p class="hint">Con FK→IK activo, la salida exacta se hornea dentro de Blender sobre el CloudRig original. El FBX no conserva los constraints/parent-switches necesarios para calcular una Action IK 1:1 por sí solo.</p>
 
             <label class="setting-row">
               <div><b>Action original junto al FBX</b><small>Descarga también el .py que crea la Action directamente en RIG-Sintel</small></div>
@@ -318,6 +317,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-ikexact1"></script>
+  <script type="module" src="./app.js?v=20260920-ikblendcap2"></script>
 </body>
 </html>
