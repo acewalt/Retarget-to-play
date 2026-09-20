@@ -423,15 +423,15 @@ function modelRotationOrder(modelNode) {
 }
 
 function eulerOrderFromFbx(value) {
-  // Same mapping used by FBXLoader.
   switch (Number(value)) {
-    case 0: return 'ZYX';
-    case 1: return 'YZX';
-    case 2: return 'XZY';
-    case 3: return 'ZXY';
-    case 4: return 'YXZ';
-    case 5: return 'XYZ';
-    default: return 'ZYX';
+    case 0: return 'XYZ';
+    case 1: return 'XZY';
+    case 2: return 'YZX';
+    case 3: return 'YXZ';
+    case 4: return 'ZXY';
+    case 5: return 'ZYX';
+    case 6: return 'XYZ';
+    default: return 'XYZ';
   }
 }
 
