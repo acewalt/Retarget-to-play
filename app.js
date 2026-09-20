@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rootsplit1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-cleanrig1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rootsplit1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-splitactions1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-splitactions1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1853,6 +1853,36 @@ function bakeCleanHierarchyControlClip(sourceClip, rewritePlan) {
   );
 }
 
+function buildOriginalRigControlOnlyClip(clip) {
+  if (!clip) return null;
+
+  const allowedControl = /^(root|TORSO-Spine|FK-|IK-|POLE-)/i;
+  const tracks = clip.tracks
+    .filter(track => {
+      const parsed = parseTrackTarget(track.name);
+      if (!parsed) return false;
+
+      const bone = state.target.bones.get(parsed.nodeName);
+      const original = originalObjectName(bone) || parsed.nodeName;
+
+      // Critical separation:
+      // the Action copied back to the ORIGINAL CloudRig must never contain
+      // DEF/STR/P-STR/helper channels. Those are evaluated by the rig itself.
+      if (/^(DEF-|STR-|P-STR-|P-IK-|P-POLE-|IK-M-|SCALE-|ROOT-Thigh)/i.test(original)) {
+        return false;
+      }
+
+      return allowedControl.test(original);
+    })
+    .map(track => track.clone());
+
+  return new THREE.AnimationClip(
+    'Retargeted_OriginalRig_FK',
+    clip.duration,
+    tracks
+  );
+}
+
 function buildStandaloneCleanExport() {
   const hierarchy = buildCloudRigCleanHierarchyPlan();
 
@@ -1939,21 +1969,49 @@ async function exportTargetFbx() {
 
     if (exportMode === 'clean') {
       const clean = buildStandaloneCleanExport();
+
+      // Action A: standalone. Contains baked DEF because the exported FBX no
+      // longer has the Blender constraints/drivers that normally move them.
       const originalStandalone = createOriginalNameExportClip(
         clean.clip,
         state.target
       );
 
+      // Action B: copy-back Action for the ORIGINAL .blend rig.
+      // NO DEF curves. On the original CloudRig the DEF/STR chains must be
+      // driven by its own constraints from the FK/IK controls.
+      const originalRigControlClip = buildOriginalRigControlOnlyClip(
+        state.exportClip
+      );
+
+      if (!originalRigControlClip || !originalRigControlClip.tracks.length) {
+        throw new Error(
+          'No pude construir la Action de controles para el CloudRig original.'
+        );
+      }
+
+      const originalRigAction = createOriginalNameExportClip(
+        originalRigControlClip,
+        state.target
+      );
+
       const result = injectAnimationsIntoOriginalFBX(
         state.target.originalBuffer,
-        [{
-          clip: originalStandalone,
-          actionName: 'Retargeted_Standalone',
-          includeDeformPositions: true,
-          includeControlPositions: true
-        }],
+        [
+          {
+            clip: originalRigAction,
+            actionName: 'Retargeted_OriginalRig_FK'
+          },
+          {
+            clip: originalStandalone,
+            actionName: 'Retargeted_Standalone',
+            includeDeformPositions: true,
+            includeControlPositions: true
+          }
+        ],
         {
           rotationMode,
+          // Open/import the FBX using the self-contained preview Action.
           currentActionName: 'Retargeted_Standalone',
           hierarchyRewrite: clean.hierarchy
         }
@@ -1962,10 +2020,17 @@ async function exportTargetFbx() {
       bytes = result.bytes;
       report = result.report;
 
+      const originalRigDefTracks = originalRigAction.tracks.filter(track => {
+        const parsed = parseTrackTarget(track.name);
+        return parsed && /^DEF-/i.test(parsed.nodeName);
+      }).length;
+
       log(
         `FBX CLEAN: jerarquía FK reescrita=${report.hierarchy?.rewired || 0}; ` +
-        `controles=${clean.controlTracks} tracks; DEF baked=${clean.defTracks} tracks. ` +
-        'La Action Retargeted_Standalone mueve controles y malla sin constraints.'
+        `Standalone=${clean.controlTracks + clean.defTracks} tracks ` +
+        `(DEF baked=${clean.defTracks}); OriginalRig_FK=${originalRigAction.tracks.length} tracks, ` +
+        `DEF en OriginalRig_FK=${originalRigDefTracks}. ` +
+        'Para el .blend original usa Retargeted_OriginalRig_FK, NO Retargeted_Standalone.'
       );
     } else if (exportMode === 'exact') {
       const exactActions = [
