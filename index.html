@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-lowerframe1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-rootsplit1" />
   <script type="importmap">
   {
     "imports": {
@@ -287,7 +287,7 @@
               <input id="downloadOriginalRigAction" class="switch" type="checkbox" checked />
             </label>
 
-            <p class="hint">Lower body: Foot Match trabaja relativo a Hips/TORSO para no contar dos veces el giro global. FK-Toes se resuelve como flexión relativa a FK-Foot porque en el FBX exportado es un control independiente.</p>
+            <p class="hint">CloudRig root motion: root recibe desplazamiento X/Z + yaw; TORSO-Spine recibe sólo la altura Y. FK-Spine y HTP/HIP-Spine quedan libres para sus secciones superior e inferior.</p>
 
             <label class="setting-row">
               <div><b>Action DEF Preview</b><small>Hace que el FBX standalone mueva la malla sin constraints</small></div>
@@ -315,6 +315,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-lowerframe1"></script>
+  <script type="module" src="./app.js?v=20260920-rootsplit1"></script>
 </body>
 </html>
