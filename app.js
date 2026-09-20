@@ -1070,6 +1070,16 @@ function setMappingCollapsed(collapsed, remember = true) {
   if (icon) icon.textContent = value ? '⌄' : '⌃';
 }
 
+function resizeViewports() {
+  for (const view of [sourceView, targetView]) {
+    const w = Math.max(1, view.container.clientWidth);
+    const h = Math.max(1, view.container.clientHeight);
+    view.renderer.setSize(w, h, false);
+    view.camera.aspect = w / h;
+    view.camera.updateProjectionMatrix();
+  }
+}
+
 function setWorkspaceView(view) {
   const allowed = new Set(['workspace', 'mappings', 'animations', 'export']);
   const next = allowed.has(view) ? view : 'workspace';
@@ -1078,6 +1088,9 @@ function setWorkspaceView(view) {
   const workspace = $('mainWorkspace');
   if (workspace) workspace.dataset.view = next;
 
+  const shell = document.querySelector('.workspace-shell');
+  shell?.classList.toggle('animations-focus', next === 'animations');
+
   document.querySelectorAll('[data-workspace]').forEach(button => {
     button.classList.toggle('active', button.dataset.workspace === next);
   });
@@ -1085,24 +1098,12 @@ function setWorkspaceView(view) {
   if (next === 'mappings') {
     setMappingCollapsed(false, false);
   } else if (next === 'workspace') {
-    setMappingCollapsed(state.workspaceMappingCollapsed, false);
+    setMappingCollapsed(true, false);
   }
 
   requestAnimationFrame(() => {
-    sourceView.renderer.setSize(
-      Math.max(1, sourceView.container.clientWidth),
-      Math.max(1, sourceView.container.clientHeight),
-      false
-    );
-    targetView.renderer.setSize(
-      Math.max(1, targetView.container.clientWidth),
-      Math.max(1, targetView.container.clientHeight),
-      false
-    );
-    sourceView.camera.aspect = Math.max(1, sourceView.container.clientWidth) / Math.max(1, sourceView.container.clientHeight);
-    targetView.camera.aspect = Math.max(1, targetView.container.clientWidth) / Math.max(1, targetView.container.clientHeight);
-    sourceView.camera.updateProjectionMatrix();
-    targetView.camera.updateProjectionMatrix();
+    resizeViewports();
+    requestAnimationFrame(resizeViewports);
   });
 }
 
