@@ -215,7 +215,10 @@ USE_IK = bool(DATA.get('hasIk', False))
 USE_RIGIFY = bool(DATA.get('hasRigify', False))
 USE_RIGIFY_IK = bool(DATA.get('hasRigifyIk', False))
 IK_SWITCH_VALUE = 1 if USE_IK else 0
-RIGIFY_IK_VALUE = 1.0 if USE_RIGIFY_IK else 0.0
+# Rigify convention is reversed from CloudRig:
+#   IK_FK = 0.0 -> IK
+#   IK_FK = 1.0 -> FK
+RIGIFY_IK_VALUE = 0.0 if USE_RIGIFY_IK else 1.0
 NON_SWITCH_IK = ('ik_stretch', 'ik_parents', 'ik_pole_follow', 'ik_hinge')
 changed_props = []
 for pb in rig.pose.bones:
