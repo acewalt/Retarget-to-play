@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-presets2';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-presets2';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-presets2';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -175,6 +175,29 @@ function targetLooksCloudRig() {
 
 function usesCloudRigPipeline() {
   return state.activePreset?.targetFamily === 'cloudrig' && targetLooksCloudRig();
+}
+
+function targetLooksRigify() {
+  const tgt = state.target;
+  if (!tgt?.root) return false;
+  return !!(
+    findBoneByOriginalExact(tgt, ['upper_arm_fk.L']) &&
+    findBoneByOriginalExact(tgt, ['forearm_fk.L']) &&
+    findBoneByOriginalExact(tgt, ['hand_fk.L']) &&
+    findBoneByOriginalExact(tgt, ['thigh_fk.L']) &&
+    findBoneByOriginalExact(tgt, ['shin_fk.L']) &&
+    findBoneByOriginalExact(tgt, ['foot_fk.L']) &&
+    findBoneByOriginalExact(tgt, ['hand_ik.L']) &&
+    findBoneByOriginalExact(tgt, ['foot_ik.L'])
+  );
+}
+
+function usesRigifyPipeline() {
+  return state.activePreset?.targetFamily === 'rigify' && targetLooksRigify();
+}
+
+function supportsFkToIk() {
+  return usesCloudRigPipeline() || usesRigifyPipeline();
 }
 
 const state = {
@@ -593,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-presets2',
+      definition.path + '?v=20260920-rigifyik1',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -1770,7 +1793,9 @@ function applyRetarget() {
     // ARP and Mixamo presets keep the generic baked target controls directly.
     state.fkClip = usesCloudRigPipeline()
       ? buildOriginalRigTransferClip(state.fkRawClip)
-      : state.fkRawClip.clone();
+      : usesRigifyPipeline()
+        ? buildRigifyOriginalRigTransferClip(state.fkRawClip)
+        : state.fkRawClip.clone();
 
     state.fkClip.name = 'Retargeted_FK';
     state.ikOnlyClip = null;
@@ -1780,7 +1805,12 @@ function applyRetarget() {
     // No horneamos DEF. WaltRig Runtime reproduce en tiempo real dentro
     // del navegador la relación FK -> DEF que el FBX no contiene.
     state.deformPreviewClip = null;
-    state.targetPreviewClip = state.fkClip;
+    // Rigify's portable head curve is encoded for the ORIGINAL Blender rig.
+    // The raw browser hierarchy lacks MCH-ROT-head evaluation, so preview the
+    // geometrically correct raw FK while exporting the corrected basis clip.
+    state.targetPreviewClip = usesRigifyPipeline()
+      ? state.fkRawClip
+      : state.fkClip;
     state.playTime = 0;
     playTargetClip(state.targetPreviewClip);
     updateTimelineBounds();
@@ -2237,6 +2267,420 @@ function computeBlendCapPolePointFromSnapshot(snap, anchorLocal) {
   return pb.clone().addScaledVector(perp, chain.length() * 0.4);
 }
 
+const RIGIFY_IK_CHAINS = [
+  {
+    kind: 'ARM', side: 'L',
+    a: 'upper_arm_fk.L', b: 'forearm_fk.L', c: 'hand_fk.L',
+    ik: 'hand_ik.L', pole: 'upper_arm_ik_target.L',
+    owner: 'MCH-forearm_ik.L'
+  },
+  {
+    kind: 'ARM', side: 'R',
+    a: 'upper_arm_fk.R', b: 'forearm_fk.R', c: 'hand_fk.R',
+    ik: 'hand_ik.R', pole: 'upper_arm_ik_target.R',
+    owner: 'MCH-forearm_ik.R'
+  },
+  {
+    kind: 'LEG', side: 'L',
+    a: 'thigh_fk.L', b: 'shin_fk.L', c: 'foot_fk.L',
+    ik: 'foot_ik.L', pole: 'thigh_ik_target.L',
+    owner: 'MCH-shin_ik.L'
+  },
+  {
+    kind: 'LEG', side: 'R',
+    a: 'thigh_fk.R', b: 'shin_fk.R', c: 'foot_fk.R',
+    ik: 'foot_ik.R', pole: 'thigh_ik_target.R',
+    owner: 'MCH-shin_ik.R'
+  }
+];
+
+function resolveRigifyIkChains(tgt) {
+  return RIGIFY_IK_CHAINS.map(def => {
+    const resolved = { ...def };
+    for (const key of ['a', 'b', 'c', 'ik', 'pole']) {
+      const runtimeName =
+        findBoneByOriginalExact(tgt, [def[key]]) ||
+        findSemanticBone(tgt, def[key]);
+      if (!runtimeName) return null;
+      resolved[key] = runtimeName;
+    }
+    resolved.owner =
+      findBoneByOriginalExact(tgt, [def.owner]) ||
+      findSemanticBone(tgt, def.owner) ||
+      '';
+    return resolved;
+  }).filter(Boolean);
+}
+
+function evaluatedBonePose(tgt, runtimeName) {
+  const bone = tgt.bones.get(runtimeName);
+  if (!bone) return null;
+
+  const position = bone.getWorldPosition(new THREE.Vector3());
+  const quaternion = bone.getWorldQuaternion(new THREE.Quaternion()).normalize();
+  const scale = bone.getWorldScale(new THREE.Vector3());
+  const matrix = new THREE.Matrix4().compose(
+    position.clone(),
+    quaternion.clone(),
+    scale.clone()
+  );
+
+  return { bone, position, quaternion, scale, matrix };
+}
+
+function rigifyChainPoseSnapshot(tgt, chain) {
+  const a = evaluatedBonePose(tgt, chain.a);
+  const b = evaluatedBonePose(tgt, chain.b);
+  const c = evaluatedBonePose(tgt, chain.c);
+  if (!a || !b || !c) return null;
+  return { a, b, c };
+}
+
+function scanRigifyPoleAnchorLocal(tgt, mixer, chain, times) {
+  let bestLen = 0;
+  let bestLocal = null;
+  const step = Math.max(1, Math.floor(times.length / 60));
+
+  for (let i = 0; i < times.length; i += step) {
+    restoreRest(tgt);
+    mixer.setTime(Number(times[i]));
+    updateSlotWorld(tgt);
+
+    const snap = rigifyChainPoseSnapshot(tgt, chain);
+    if (!snap) continue;
+
+    const upper = snap.b.position.clone().sub(snap.a.position);
+    const lower = snap.c.position.clone().sub(snap.b.position);
+    const bendAxisWorld = upper.clone().cross(lower);
+    const len = bendAxisWorld.length();
+
+    if (len <= bestLen || len < 1e-6) continue;
+
+    const local = bendAxisWorld
+      .clone()
+      .applyQuaternion(snap.b.quaternion.clone().invert());
+
+    if (local.lengthSq() < 1e-10) continue;
+
+    bestLen = len;
+    bestLocal = local.normalize();
+  }
+
+  restoreRest(tgt);
+  return bestLocal;
+}
+
+function rigifyPoleFunctionalParentName(tgt, chain) {
+  const mappedTargets = new Set(
+    state.boneMap
+      .filter(isPairValid)
+      .map(pair => pair.target)
+  );
+  const excluded = new Set([chain.a, chain.b, chain.c, chain.ik, chain.pole]);
+
+  let bone = tgt.bones.get(chain.a)?.parent || null;
+  while (bone) {
+    if (
+      bone.isBone &&
+      mappedTargets.has(bone.name) &&
+      !excluded.has(bone.name)
+    ) {
+      return bone.name;
+    }
+    bone = bone.parent;
+  }
+
+  return findBoneByOriginalExact(tgt, ['root']) || null;
+}
+
+function rigifyFunctionalParentName(tgt, chain, kind) {
+  // Rigify explicitly defaults IK_parent to root.
+  if (kind === 'IK') {
+    return findBoneByOriginalExact(tgt, ['root']) || null;
+  }
+
+  // Pole parent defaults to the limb's original rig parent. Walking from the
+  // first FK control to the nearest mapped ancestor reproduces shoulder/torso
+  // carry without depending on generated MCH names.
+  return rigifyPoleFunctionalParentName(tgt, chain);
+}
+
+function rigifyFunctionalParentPoseMatrix(tgt, chain, kind, out) {
+  const parentName = rigifyFunctionalParentName(tgt, chain, kind);
+  if (!parentName) return out.identity();
+
+  const pose = evaluatedBonePose(tgt, parentName);
+  return pose ? out.copy(pose.matrix) : out.identity();
+}
+
+function rigifyFunctionalParentRestMatrix(tgt, chain, kind, out) {
+  const parentName = rigifyFunctionalParentName(tgt, chain, kind);
+  if (!parentName) return out.identity();
+
+  return composeRestWorldMatrix(tgt, parentName, out) || out.identity();
+}
+
+function encodeRigifyControlLocal(
+  tgt,
+  controlName,
+  desiredWorld,
+  functionalParentPose,
+  functionalParentRest,
+  outMatrix
+) {
+  const control = tgt.bones.get(controlName);
+  if (!control) return null;
+
+  const controlRestWorld = composeRestWorldMatrix(
+    tgt, controlName, new THREE.Matrix4()
+  );
+  const rawRestLocal = composeRestLocalMatrix(
+    tgt, controlName, new THREE.Matrix4()
+  );
+
+  if (!controlRestWorld || !rawRestLocal) return null;
+
+  let basis = null;
+
+  // Rigify SwitchParentBuilder creates MCH-<control>.parent, parents the
+  // visible control to it, and drives that MCH via an ARMATURE constraint.
+  const helper = control.parent?.isBone ? control.parent : null;
+  const helperOriginal = helper
+    ? (originalObjectName(helper) || helper.name)
+    : '';
+
+  if (helper && /^MCH-.*\.parent$/i.test(helperOriginal)) {
+    const helperRestWorld = composeRestWorldMatrix(
+      tgt, helper.name, new THREE.Matrix4()
+    );
+
+    if (helperRestWorld) {
+      const carrierDelta = functionalParentPose.clone()
+        .multiply(functionalParentRest.clone().invert());
+
+      const helperPoseWorld = carrierDelta
+        .multiply(helperRestWorld);
+
+      const controlRestRelative = helperRestWorld.clone()
+        .invert()
+        .multiply(controlRestWorld);
+
+      const basisIdentityWorld = helperPoseWorld
+        .multiply(controlRestRelative);
+
+      basis = basisIdentityWorld.clone()
+        .invert()
+        .multiply(desiredWorld);
+    }
+  }
+
+  if (!basis) {
+    const restRelative = functionalParentRest.clone()
+      .invert()
+      .multiply(controlRestWorld);
+
+    const desiredRelative = functionalParentPose.clone()
+      .invert()
+      .multiply(desiredWorld);
+
+    basis = restRelative.clone()
+      .invert()
+      .multiply(desiredRelative);
+  }
+
+  return outMatrix.copy(rawRestLocal).multiply(basis);
+}
+
+function bakeRigifyIkFromFk() {
+  if (!state.fkRawClip) {
+    throw new Error('Primero aplica el retargeting FK de Rigify.');
+  }
+
+  const tgt = state.target;
+  const solveClip = state.fkRawClip;
+  const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
+  const frameCount = Math.max(2, Math.ceil(solveClip.duration * fps) + 1);
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(solveClip.duration, i / fps)
+  );
+
+  const chains = resolveRigifyIkChains(tgt);
+  if (chains.length !== 4) {
+    throw new Error(
+      `FK→IK Rigify incompleto: encontré ${chains.length}/4 cadenas IK.`
+    );
+  }
+
+  restoreRest(tgt);
+  tgt.mixer?.stopAllAction();
+
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(solveClip).play();
+
+  const poleAnchors = new Map();
+  for (const chain of chains) {
+    poleAnchors.set(
+      chain.pole,
+      scanRigifyPoleAnchorLocal(tgt, mixer, chain, times)
+    );
+  }
+
+  const data = new Map();
+  for (const chain of chains) {
+    data.set(chain.ik, { p: [], q: [], s: [], lastQ: null });
+    data.set(chain.pole, { p: [], q: [], s: [], lastQ: null });
+  }
+
+  const fkPoseWorld = new THREE.Matrix4();
+  const fkRestWorld = new THREE.Matrix4();
+  const ikRestWorld = new THREE.Matrix4();
+  const desiredIkWorld = new THREE.Matrix4();
+  const desiredPoleWorld = new THREE.Matrix4();
+  const parentPose = new THREE.Matrix4();
+  const parentRest = new THREE.Matrix4();
+  const encodedLocal = new THREE.Matrix4();
+
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+
+  try {
+    for (const time of times) {
+      restoreRest(tgt);
+      mixer.setTime(Number(time));
+      updateSlotWorld(tgt);
+
+      for (const chain of chains) {
+        const snap = rigifyChainPoseSnapshot(tgt, chain);
+        if (!snap) continue;
+
+        poseToMatrix(snap.c, fkPoseWorld);
+        if (!restWorldMatrix(tgt, chain.c, fkRestWorld)) continue;
+        if (!restWorldMatrix(tgt, chain.ik, ikRestWorld)) continue;
+
+        // BlendCap: IK = FK_pose × inverse(FK_rest) × IK_rest.
+        desiredIkWorld.copy(fkPoseWorld)
+          .multiply(fkRestWorld.clone().invert())
+          .multiply(ikRestWorld);
+
+        rigifyFunctionalParentPoseMatrix(
+          tgt, chain, 'IK', parentPose
+        );
+        rigifyFunctionalParentRestMatrix(
+          tgt, chain, 'IK', parentRest
+        );
+
+        const encoded = encodeRigifyControlLocal(
+          tgt,
+          chain.ik,
+          desiredIkWorld,
+          parentPose,
+          parentRest,
+          encodedLocal
+        );
+        if (!encoded) continue;
+
+        encoded.decompose(p, q, s);
+        q.normalize();
+
+        const d = data.get(chain.ik);
+        if (d.lastQ && d.lastQ.dot(q) < 0) {
+          q.x *= -1; q.y *= -1; q.z *= -1; q.w *= -1;
+        }
+        d.lastQ = q.clone();
+        d.p.push(p.x, p.y, p.z);
+        d.q.push(q.x, q.y, q.z, q.w);
+        d.s.push(s.x, s.y, s.z);
+      }
+
+      for (const chain of chains) {
+        const snap = rigifyChainPoseSnapshot(tgt, chain);
+        if (!snap) continue;
+
+        const poleWorldPos = computeBlendCapPolePointFromSnapshot(
+          snap,
+          poleAnchors.get(chain.pole)
+        );
+
+        const poleRest = tgt.rest.get(chain.pole);
+        if (!poleRest) continue;
+
+        desiredPoleWorld.compose(
+          poleWorldPos,
+          poleRest.worldQuat.clone(),
+          poleRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+        );
+
+        rigifyFunctionalParentPoseMatrix(
+          tgt, chain, 'POLE', parentPose
+        );
+        rigifyFunctionalParentRestMatrix(
+          tgt, chain, 'POLE', parentRest
+        );
+
+        const encoded = encodeRigifyControlLocal(
+          tgt,
+          chain.pole,
+          desiredPoleWorld,
+          parentPose,
+          parentRest,
+          encodedLocal
+        );
+        if (!encoded) continue;
+
+        encoded.decompose(p, q, s);
+        q.normalize();
+
+        const d = data.get(chain.pole);
+        if (d.lastQ && d.lastQ.dot(q) < 0) {
+          q.x *= -1; q.y *= -1; q.z *= -1; q.w *= -1;
+        }
+        d.lastQ = q.clone();
+        d.p.push(p.x, p.y, p.z);
+        d.q.push(q.x, q.y, q.z, q.w);
+        d.s.push(s.x, s.y, s.z);
+      }
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    restoreRest(tgt);
+  }
+
+  const tracks = [];
+  for (const [name, d] of data) {
+    if (d.p.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(`${name}.position`, times, d.p)
+      );
+    }
+    if (d.q.length === times.length * 4) {
+      tracks.push(
+        new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q)
+      );
+    }
+    if (d.s.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(`${name}.scale`, times, d.s)
+      );
+    }
+  }
+
+  log(
+    'FK→IK Rigify: IK=FKpose·FKrest⁻¹·IKrest; ' +
+    'IK_parent=root; POLE parent compensado por MCH-*.parent; ' +
+    'pole_vector debe estar ON en el Rigify original.'
+  );
+
+  return new THREE.AnimationClip(
+    'Retargeted_IK_Controls',
+    solveClip.duration,
+    tracks
+  );
+}
+
+
 function buildConvertedOutputClip(keepLimbFk) {
   const fk = state.fkClip;
   const ik = state.ikOnlyClip;
@@ -2248,12 +2692,21 @@ function buildConvertedOutputClip(keepLimbFk) {
 
   // "Convert" must NOT discard root/spine/head/fingers/toes.
   // Only remove the FK rotations that the four IK chains replace.
-  const replaced = new Set([
-    'FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L',
-    'FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R',
-    'FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L',
-    'FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R'
-  ]);
+  const replaced = new Set(
+    usesRigifyPipeline()
+      ? [
+          'upper_arm_fk.L', 'forearm_fk.L', 'hand_fk.L',
+          'upper_arm_fk.R', 'forearm_fk.R', 'hand_fk.R',
+          'thigh_fk.L', 'shin_fk.L', 'foot_fk.L',
+          'thigh_fk.R', 'shin_fk.R', 'foot_fk.R'
+        ]
+      : [
+          'FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L',
+          'FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R',
+          'FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L',
+          'FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R'
+        ]
+  );
 
   const retained = fk.tracks.filter(track => {
     const parsed = parseTrackTarget(track.name);
@@ -2503,7 +2956,9 @@ function convertFkToIk() {
   try {
     setStatus('Baking FK → IK…');
 
-    state.ikOnlyClip = bakeIkFromFk();
+    state.ikOnlyClip = usesRigifyPipeline()
+      ? bakeRigifyIkFromFk()
+      : bakeIkFromFk();
     state.exportClip = buildConvertedOutputClip($('keepFk').checked);
     state.exported = false;
 
@@ -2513,7 +2968,10 @@ function convertFkToIk() {
     // validate the generated control curves.
     state.targetPreviewClip = mergeClips(
       'Preview_FK_IK',
-      [state.fkClip, state.ikOnlyClip]
+      [
+        usesRigifyPipeline() ? state.fkRawClip : state.fkClip,
+        state.ikOnlyClip
+      ]
     );
 
     playTargetClip(state.targetPreviewClip);
@@ -2768,6 +3226,123 @@ function buildOriginalRigTransferClip(clip) {
   }
 
   const tracks = sourceTracks.map(track => replacement.get(track.name) || track);
+
+  return new THREE.AnimationClip(
+    clip.name || 'Retargeted_FK',
+    clip.duration,
+    tracks
+  );
+}
+
+
+function buildRigifyOriginalRigTransferClip(clip) {
+  const tgt = state.target;
+  if (!clip || !tgt.root) return clip;
+
+  const childName =
+    findBoneByOriginalExact(tgt, ['head']) ||
+    findSemanticBone(tgt, 'head');
+  const parentName =
+    findBoneByOriginalExact(tgt, ['neck']) ||
+    findSemanticBone(tgt, 'neck');
+
+  if (!childName || !parentName) return clip.clone();
+
+  const child = tgt.bones.get(childName);
+  const parent = tgt.bones.get(parentName);
+  const childRest = tgt.rest.get(childName);
+  const parentRest = tgt.rest.get(parentName);
+
+  if (!child || !parent || !childRest || !parentRest) return clip.clone();
+
+  const sourceTracks = clip.tracks.map(track => track.clone());
+  const headTrack = sourceTracks.find(track => {
+    const parsed = parseTrackTarget(track.name);
+    return parsed?.nodeName === childName && parsed.property === 'quaternion';
+  });
+
+  if (!headTrack) return clip.clone();
+
+  // Rigify's visible head control is parented to MCH-ROT-head, which follows
+  // neck in Blender. The FBX helper is static, so a raw local solve gives the
+  // wrong matrix_basis when the Action is copied back to the original rig.
+  // Solve head exactly against the animated neck frame instead.
+  restoreRest(tgt);
+  tgt.mixer?.stopAllAction();
+
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(clip).play();
+
+  const restRelative = parentRest.worldQuat.clone()
+    .invert()
+    .multiply(childRest.worldQuat)
+    .normalize();
+  const restRelativeInv = restRelative.clone().invert();
+
+  const values = [];
+  const childWorld = new THREE.Quaternion();
+  const parentWorld = new THREE.Quaternion();
+  const poseRelative = new THREE.Quaternion();
+  const basisDelta = new THREE.Quaternion();
+  const exportLocal = new THREE.Quaternion();
+  let previous = null;
+
+  try {
+    for (const time of headTrack.times) {
+      restoreRest(tgt);
+      mixer.setTime(Number(time));
+      updateSlotWorld(tgt);
+
+      child.getWorldQuaternion(childWorld);
+      parent.getWorldQuaternion(parentWorld);
+
+      poseRelative.copy(parentWorld)
+        .invert()
+        .multiply(childWorld)
+        .normalize();
+
+      basisDelta.copy(restRelativeInv)
+        .multiply(poseRelative)
+        .normalize();
+
+      // Same carrier convention used by OriginalRig_Action:
+      // FBX local = raw rest local × Blender matrix_basis.
+      exportLocal.copy(childRest.quaternion)
+        .multiply(basisDelta)
+        .normalize();
+
+      if (previous && previous.dot(exportLocal) < 0) {
+        exportLocal.x *= -1;
+        exportLocal.y *= -1;
+        exportLocal.z *= -1;
+        exportLocal.w *= -1;
+      }
+
+      values.push(
+        exportLocal.x,
+        exportLocal.y,
+        exportLocal.z,
+        exportLocal.w
+      );
+      previous = exportLocal.clone();
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    restoreRest(tgt);
+  }
+
+  const replacement = new THREE.QuaternionKeyframeTrack(
+    headTrack.name,
+    Array.from(headTrack.times),
+    values
+  );
+
+  const tracks = sourceTracks.map(track =>
+    track.name === headTrack.name ? replacement : track
+  );
+
+  log('Rigify OriginalRig basis: head relativo a neck/MCH-ROT-head.');
 
   return new THREE.AnimationClip(
     clip.name || 'Retargeted_FK',
@@ -3784,7 +4359,7 @@ function updateWorkflowUI() {
 function updateButtons() {
   const ready = !!state.source.root && !!state.target.root && !!state.source.activeClip && validMap().length > 0;
   $('applyRetarget').disabled = !ready;
-  $('convertIk').disabled = !state.fkClip || !usesCloudRigPipeline();
+  $('convertIk').disabled = !state.fkClip || !supportsFkToIk();
   $('exportFbx').disabled = !state.exportClip;
   if ($('exportWorkspaceButton')) $('exportWorkspaceButton').disabled = !state.exportClip;
   if ($('exportBlenderAction')) $('exportBlenderAction').disabled = !state.exportClip;
