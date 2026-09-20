@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-poleroot1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-presets1" />
   <script type="importmap">
   {
     "imports": {
@@ -221,7 +221,20 @@
             <div class="settings-heading"><div><span class="eyebrow">MAPPING</span><h2>Preset</h2></div></div>
             <label class="field-label" for="preset">Skeleton preset</label>
             <select id="preset">
-              <option value="cloudrig-sintel">Mixamo → CloudRig / Sintel (FK)</option>
+              <optgroup label="Mixamo source">
+                <option value="mixamo_to_cloudrig">Mixamo → CloudRig / Sintel</option>
+                <option value="mixamo_to_rigify">Mixamo → Rigify</option>
+                <option value="mixamo_to_arp">Mixamo → Auto-Rig Pro</option>
+                <option value="mixamo_to_mixamo_ctrl">Mixamo → Mixamo Control Rig</option>
+              </optgroup>
+              <optgroup label="BlendCap source">
+                <option value="blendcap_to_cloudrig">BlendCap → CloudRig</option>
+                <option value="blendcap_to_rigify_new">BlendCap → Rigify (New)</option>
+                <option value="blendcap_to_rigify_old">BlendCap → Rigify (Old)</option>
+                <option value="blendcap_to_arp">BlendCap → Auto-Rig Pro</option>
+                <option value="blendcap_to_mixamo">BlendCap → Mixamo</option>
+                <option value="blendcap_to_mixamo_ctrl">BlendCap → Mixamo Control Rig</option>
+              </optgroup>
               <option value="none">— Sin preset —</option>
             </select>
             <div class="stacked-fields">
@@ -318,6 +331,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-poleroot1"></script>
+  <script type="module" src="./app.js?v=20260920-presets1"></script>
 </body>
 </html>
