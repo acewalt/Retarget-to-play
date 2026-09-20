@@ -93,8 +93,17 @@ h2,p{margin:0}
 .diagnostics{padding:14px 16px}.diagnostics summary{cursor:pointer;color:var(--muted);font-size:10px;font-weight:700}.diagnostics pre{max-height:180px;overflow:auto;white-space:pre-wrap;color:var(--muted);font:9px/1.45 ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
 .export-sticky{border-top:1px solid var(--border);background:color-mix(in srgb,var(--surface) 96%,transparent);backdrop-filter:blur(14px);padding:12px 14px;box-shadow:0 -8px 20px rgba(0,0,0,.05)}
 .export-sticky-copy{display:flex;align-items:end;justify-content:space-between;gap:8px;margin-bottom:8px}.export-sticky-copy strong{font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.export-button{width:100%;min-height:44px;background:linear-gradient(135deg,var(--primary-2),var(--primary));border:0;color:#fff;font-weight:800;box-shadow:0 9px 20px color-mix(in srgb,var(--primary) 25%,transparent)}.export-button span{font-size:16px;margin-right:4px}.stats{margin-top:8px;padding:8px;border:1px solid var(--border);border-radius:8px;background:var(--surface-2);color:var(--muted);font-size:8.5px;white-space:pre-wrap;max-height:74px;overflow:auto}
+.main-workspace[data-view="workspace"] .mapping-card{display:none}
 .main-workspace[data-view="mappings"] .retarget-stage,.main-workspace[data-view="mappings"] .timeline-card{display:none}.main-workspace[data-view="mappings"] .mapping-card{display:block;flex:1;min-height:calc(100vh - 110px)}.main-workspace[data-view="mappings"] .bone-map{max-height:calc(100vh - 315px)}
-.main-workspace[data-view="animations"] .mapping-card,.main-workspace[data-view="animations"] .export-workbench{display:none}.main-workspace[data-view="animations"] .retarget-stage{grid-template-columns:minmax(0,1fr) 96px minmax(0,1fr)}.main-workspace[data-view="animations"] .viewport-wrap{min-height:460px}.main-workspace[data-view="animations"] .timeline-card{min-height:108px}
+.workspace-shell.animations-focus{grid-template-columns:minmax(0,1fr)}
+.workspace-shell.animations-focus .workflow-sidebar,.workspace-shell.animations-focus .settings-panel{display:none}
+.main-workspace[data-view="animations"]{padding:18px 24px;overflow:hidden}
+.main-workspace[data-view="animations"] .mapping-card,.main-workspace[data-view="animations"] .export-workbench,.main-workspace[data-view="animations"] .retarget-bridge{display:none}
+.main-workspace[data-view="animations"] .retarget-stage{grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:18px;min-height:0;flex:1}
+.main-workspace[data-view="animations"] .viewport-card{height:100%;min-height:0;grid-template-rows:56px minmax(0,1fr)}
+.main-workspace[data-view="animations"] .viewport-foot{display:none}
+.main-workspace[data-view="animations"] .viewport-wrap{aspect-ratio:auto;min-height:0;height:100%}
+.main-workspace[data-view="animations"] .timeline-card{min-height:104px;flex:0 0 auto}
 .main-workspace[data-view="export"] .mapping-card,.main-workspace[data-view="export"] .timeline-card,.main-workspace[data-view="export"] .source-card,.main-workspace[data-view="export"] .retarget-bridge{display:none}.main-workspace[data-view="export"] .retarget-stage{grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr);align-items:stretch}.main-workspace[data-view="export"] .target-card{min-width:0}.main-workspace[data-view="export"] .export-workbench{display:flex}.main-workspace[data-view="export"] .viewport-wrap{min-height:500px}
 ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:99px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}
 @media(max-width:1350px){.workspace-shell{grid-template-columns:190px minmax(580px,1fr) 300px}.topbar{grid-template-columns:210px 1fr auto}.progress-shell{width:130px}.viewport-wrap{min-height:330px}}
@@ -103,3 +112,15 @@ h2,p{margin:0}
 
 .main-workspace[data-view="mappings"] .collapse-button{display:none}
 .main-workspace[data-view="mappings"] .mapping-head{position:sticky;top:0;z-index:2;background:var(--surface)}
+
+/* Workspace principal: solo carga/transfer/preview. Mapping vive en su propia mesa. */
+.main-workspace[data-view="workspace"]{overflow:auto}
+.main-workspace[data-view="workspace"] .retarget-stage{flex:0 0 auto}
+.main-workspace[data-view="workspace"] .timeline-card{flex:0 0 auto}
+
+/* Animation desk: máxima superficie útil para comparar Source y Target. */
+.workspace-shell.animations-focus .main-workspace{grid-column:1/-1;width:100%;max-width:none}
+.main-workspace[data-view="animations"] .viewport-label{bottom:12px}
+@media(min-width:1081px){
+  .main-workspace[data-view="animations"] .retarget-stage{height:calc(100vh - 70px - 18px - 18px - 118px - 14px)}
+}
