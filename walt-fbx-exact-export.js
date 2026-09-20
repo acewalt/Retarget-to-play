@@ -422,21 +422,41 @@ function modelRotationOrder(modelNode) {
   return value?.length ? Number(value[0]) : 0;
 }
 
+// FBX Euler orders are extrinsic. THREE.Euler is intrinsic, so FBXLoader
+// uses the reversed order below. We must use the SAME convention when
+// converting a Three.js quaternion back into FBX Lcl Rotation curves.
 function eulerOrderFromFbx(value) {
   switch (Number(value)) {
-    case 0: return 'XYZ';
-    case 1: return 'XZY';
-    case 2: return 'YZX';
-    case 3: return 'YXZ';
-    case 4: return 'ZXY';
-    case 5: return 'ZYX';
-    case 6: return 'XYZ';
-    default: return 'XYZ';
+    case 0: return 'ZYX'; // FBX XYZ
+    case 1: return 'YZX'; // FBX XZY
+    case 2: return 'XZY'; // FBX YZX
+    case 3: return 'ZXY'; // FBX YXZ
+    case 4: return 'YXZ'; // FBX ZXY
+    case 5: return 'XYZ'; // FBX ZYX
+    case 6: return 'ZYX';
+    default: return 'ZYX';
   }
 }
 
-function rotationPrelude(modelNode, requestedMode) {
-  if (requestedMode === 'xyz') return 'XYZ';
+function modelVector3(modelNode, name, fallback = [0, 0, 0]) {
+  const value = p70Value(modelNode, name);
+  if (!value || value.length < 3) return [...fallback];
+  return [Number(value[0]) || 0, Number(value[1]) || 0, Number(value[2]) || 0];
+}
+
+function quaternionFromDegreesXYZ(values) {
+  // FBXLoader explicitly evaluates PreRotation/PostRotation using order 0,
+  // which maps to THREE intrinsic ZYX (FBX extrinsic XYZ).
+  const e = new THREE.Euler(
+    THREE.MathUtils.degToRad(values[0] || 0),
+    THREE.MathUtils.degToRad(values[1] || 0),
+    THREE.MathUtils.degToRad(values[2] || 0),
+    'ZYX'
+  );
+  return new THREE.Quaternion().setFromEuler(e);
+}
+
+function rotationPrelude(modelNode) {
   return eulerOrderFromFbx(modelRotationOrder(modelNode));
 }
 
@@ -449,16 +469,36 @@ function unwrapEuler(prev, curr) {
   return curr;
 }
 
-function quaternionTrackToEulerAxes(track, modelNode, requestedMode) {
-  const order = rotationPrelude(modelNode, requestedMode);
-  const q = new THREE.Quaternion();
+function quaternionTrackToEulerAxes(track, modelNode) {
+  const order = rotationPrelude(modelNode);
+
+  const pre = quaternionFromDegreesXYZ(
+    modelVector3(modelNode, 'PreRotation')
+  );
+  const post = quaternionFromDegreesXYZ(
+    modelVector3(modelNode, 'PostRotation')
+  );
+  const preInv = pre.clone().invert();
+
+  const qCombined = new THREE.Quaternion();
+  const qLcl = new THREE.Quaternion();
   const e = new THREE.Euler(0, 0, 0, order);
   const axes = [[], [], []];
   let prev = null;
 
   for (let i = 0; i < track.times.length; i++) {
-    q.fromArray(track.values, i * 4).normalize();
-    e.setFromQuaternion(q, order);
+    qCombined.fromArray(track.values, i * 4).normalize();
+
+    // FBXLoader reconstructs:
+    // qThree = qPre * qLcl * inverse(qPost)
+    // Therefore the exact inverse for export is:
+    // qLcl = inverse(qPre) * qThree * qPost
+    qLcl.copy(preInv)
+      .multiply(qCombined)
+      .multiply(post)
+      .normalize();
+
+    e.setFromQuaternion(qLcl, order);
 
     const triple = [
       THREE.MathUtils.radToDeg(e.x),
@@ -686,7 +726,7 @@ function buildAnimationPlan(doc, clip, options) {
       continue;
     }
 
-    const converted = quaternionTrackToEulerAxes(track, model.node, options.rotationMode);
+    const converted = quaternionTrackToEulerAxes(track, model.node);
     groups.push({
       model,
       attrName: 'R',
@@ -832,7 +872,7 @@ export function injectAnimationsIntoOriginalFBX(originalBuffer, clips, {
       stacks: stackCount,
       curveNodes: curveNodeCount,
       curves: curveCount,
-      rotationMode
+      rotationMode: 'fbx-original-order'
     }
   };
 }
