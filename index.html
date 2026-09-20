@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-rigifyik2" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-rigifyik3" />
   <script type="importmap">
   {
     "imports": {
@@ -294,7 +294,7 @@
               <option value="quaternion" selected>Quaternion · WXYZ · recomendado</option>
             </select>
 
-            <p class="hint">CloudRig: deja <b>IK Pole Follow = 0</b> en las piernas. Rigify: la Action está horneada para los valores estándar <b>head_follow = 0</b> y <b>neck_follow = 0.5</b>; para IK usa <b>IK_FK = 1</b> y <b>pole_vector = ON</b> en upper_arm_parent.L/R y thigh_parent.L/R. El .py los configura automáticamente.</p>
+            <p class="hint">CloudRig: deja <b>IK Pole Follow = 0</b> en las piernas. Rigify: la Action está horneada para los valores estándar <b>head_follow = 0</b> y <b>neck_follow = 0.5</b>; para IK usa <b>IK_FK = 0</b> y <b>pole_vector = ON</b> en upper_arm_parent.L/R y thigh_parent.L/R. El .py los configura automáticamente.</p>
             <button id="exportBlenderAction" class="wide-button" type="button" disabled>Exportar Action .py para rig original</button>
             <button id="exportOriginalRigFbxAction" class="wide-button" type="button" disabled>Exportar FBX Action para rig original</button>
 
@@ -331,6 +331,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-rigifyik2"></script>
+  <script type="module" src="./app.js?v=20260920-rigifyik3"></script>
 </body>
 </html>
