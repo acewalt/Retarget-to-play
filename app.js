@@ -1136,12 +1136,13 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   );
 
   const isBlendCapCloudRig = map.some(p => p.profile === 'blendcap-cloudrig');
+  const isBlendCapPreset = map.some(p => String(p.profile || '').startsWith('blendcap-'));
   const torsoScale = $('autoScale').checked ? skeletonScaleFor(map) : 1;
 
-  // BlendCap's FK engine scales LOC by armature/object scale, not by leg
-  // length. WaltFBX already normalizes both source and target to meters,
-  // therefore the equivalent location scale is 1.0 for this profile.
-  const motionScale = isBlendCapCloudRig
+  // BlendCap scales locations in armature/object units. WaltFBX normalizes
+  // Source and Target to meters, so official BlendCap presets use 1:1 motion
+  // units. Manual maps keep the older proportional root-motion option.
+  const motionScale = isBlendCapPreset
     ? 1
     : ($('autoScale').checked ? rootMotionScaleFor(map, torsoScale) : 1);
 
@@ -1151,6 +1152,8 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
   const rotPairs = ordered.filter(p => (p.channels || 'ROT').includes('ROT'));
   const locPairs = ordered.filter(p => rootMotion && (p.channels || '').includes('LOC'));
+  const worldLocPairs = locPairs.filter(p => p.locSpace !== 'head_local');
+  const headLocPairs = locPairs.filter(p => p.locSpace === 'head_local');
 
   const data = new Map();
   for (const p of rotPairs) {
@@ -1172,6 +1175,82 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const desiredWorldPos = new THREE.Vector3();
   const currentWorldPos = new THREE.Vector3();
   const localPos = new THREE.Vector3();
+
+  // BlendCap face controls are authored in HEAD_LOCAL space. Build the two
+  // rest frames once, then evaluate motion relative to the animated heads.
+  let headLocalContext = null;
+  if (map.some(pair => pair.locSpace === 'head_local')) {
+    const preset = state.activePreset?.data || {};
+    const sourceHeadName =
+      findSemanticBone(src, preset.face_head_source || 'Head');
+    const targetHeadName =
+      findBoneByOriginalExact(tgt, [preset.face_head_target || 'head']) ||
+      findSemanticBone(tgt, preset.face_head_target || 'head');
+
+    const sourceHead = sourceHeadName ? src.bones.get(sourceHeadName) : null;
+    const targetHead = targetHeadName ? tgt.bones.get(targetHeadName) : null;
+    const sourceHeadRest = sourceHeadName ? src.rest.get(sourceHeadName) : null;
+    const targetHeadRest = targetHeadName ? tgt.rest.get(targetHeadName) : null;
+
+    if (sourceHead && targetHead && sourceHeadRest && targetHeadRest) {
+      const sourceHeadRestMatrix = new THREE.Matrix4().compose(
+        sourceHeadRest.worldPos.clone(),
+        sourceHeadRest.worldQuat.clone(),
+        sourceHeadRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+      );
+      const targetHeadRestMatrix = new THREE.Matrix4().compose(
+        targetHeadRest.worldPos.clone(),
+        targetHeadRest.worldQuat.clone(),
+        targetHeadRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+      );
+
+      const correctionQ = targetHeadRest.worldQuat.clone()
+        .invert()
+        .multiply(sourceHeadRest.worldQuat)
+        .normalize();
+
+      let faceScale = 1;
+      const srcEyeL = findSemanticBone(src, 'LeftEye');
+      const srcEyeR = findSemanticBone(src, 'RightEye');
+      const eyePairL = map.find(p => p.sourceSpec === 'LeftEye' && p.target);
+      const eyePairR = map.find(p => p.sourceSpec === 'RightEye' && p.target);
+
+      if (srcEyeL && srcEyeR && eyePairL?.target && eyePairR?.target) {
+        const srcEyeLRest = src.rest.get(srcEyeL);
+        const srcEyeRRest = src.rest.get(srcEyeR);
+        const tgtEyeLRest = tgt.rest.get(eyePairL.target);
+        const tgtEyeRRest = tgt.rest.get(eyePairR.target);
+
+        const srcDist = srcEyeLRest && srcEyeRRest
+          ? srcEyeLRest.worldPos.distanceTo(srcEyeRRest.worldPos)
+          : NaN;
+        const tgtDist = tgtEyeLRest && tgtEyeRRest
+          ? tgtEyeLRest.worldPos.distanceTo(tgtEyeRRest.worldPos)
+          : NaN;
+
+        if (
+          Number.isFinite(srcDist) && Number.isFinite(tgtDist) &&
+          srcDist > 1e-6 && tgtDist > 1e-6
+        ) {
+          faceScale = THREE.MathUtils.clamp(tgtDist / srcDist, 0.1, 10);
+        }
+      }
+
+      headLocalContext = {
+        sourceHead,
+        targetHead,
+        sourceHeadRest,
+        targetHeadRest,
+        sourceHeadRestInv: sourceHeadRestMatrix.clone().invert(),
+        targetHeadRestInv: targetHeadRestMatrix.clone().invert(),
+        correctionQ,
+        correctionQInv: correctionQ.clone().invert(),
+        faceScale
+      };
+    } else {
+      log('BlendCap head_local: no pude resolver Head Source/Target; se usará world-space.');
+    }
+  }
 
   if (!src.mixer) {
     src.mixer = new THREE.AnimationMixer(src.root);
@@ -1241,7 +1320,7 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     // LOCATION first so every child rotation sees the current root / torso
     // translation. The location transfer is a WORLD delta from source rest,
     // scaled to target proportions, then filtered in WORLD axes.
-    for (const pair of locPairs) {
+    for (const pair of worldLocPairs) {
       const sb = src.bones.get(pair.source);
       const tb = tgt.bones.get(pair.target);
       const sr = src.rest.get(pair.source);
@@ -1299,13 +1378,60 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
       sb.getWorldQuaternion(qSrc);
 
-      qDelta.copy(qSrc)
-        .multiply(sr.worldQuat.clone().invert())
-        .normalize();
+      if (pair.locSpace === 'head_local' && headLocalContext) {
+        const {
+          sourceHead,
+          targetHead,
+          sourceHeadRest,
+          targetHeadRest,
+          correctionQ,
+          correctionQInv
+        } = headLocalContext;
 
-      qDesired.copy(qDelta)
-        .multiply(tr.worldQuat)
-        .normalize();
+        const srcHeadPoseQ = sourceHead.getWorldQuaternion(
+          new THREE.Quaternion()
+        );
+        const tgtHeadPoseQ = targetHead.getWorldQuaternion(
+          new THREE.Quaternion()
+        );
+
+        const srcCurrentRel = srcHeadPoseQ.clone()
+          .invert()
+          .multiply(qSrc)
+          .normalize();
+
+        const srcRestRel = sourceHeadRest.worldQuat.clone()
+          .invert()
+          .multiply(sr.worldQuat)
+          .normalize();
+
+        const deltaHead = srcCurrentRel
+          .multiply(srcRestRel.clone().invert())
+          .normalize();
+
+        const mappedDelta = correctionQ.clone()
+          .multiply(deltaHead)
+          .multiply(correctionQInv)
+          .normalize();
+
+        const tgtRestRel = targetHeadRest.worldQuat.clone()
+          .invert()
+          .multiply(tr.worldQuat)
+          .normalize();
+
+        qDesired.copy(tgtHeadPoseQ)
+          .multiply(mappedDelta)
+          .multiply(tgtRestRel)
+          .normalize();
+      } else {
+        qDelta.copy(qSrc)
+          .multiply(sr.worldQuat.clone().invert())
+          .normalize();
+
+        qDesired.copy(qDelta)
+          .multiply(tr.worldQuat)
+          .normalize();
+      }
 
       if (tb.parent) {
         tb.parent.getWorldQuaternion(qParent);
@@ -1317,10 +1443,76 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
         qLocal.copy(qDesired);
       }
 
-      // ROT pairs do not invent child translation. Natural hierarchy and the
-      // mapped section controls are responsible for carrying positions.
-      tb.position.copy(tr.position);
+      // If this same target also has LOC, preserve the translation that was
+      // solved by its location rows (eg. BlendCap→Mixamo Hips).
+      if (!locData.has(pair.target)) tb.position.copy(tr.position);
       tb.quaternion.copy(qLocal);
+      tb.scale.copy(tr.scale);
+      updateSlotWorld(tgt);
+    }
+
+    // HEAD_LOCAL translation runs after target Head rotation, matching
+    // BlendCap's evaluated face-space semantics.
+    for (const pair of headLocPairs) {
+      const sb = src.bones.get(pair.source);
+      const tb = tgt.bones.get(pair.target);
+      const sr = src.rest.get(pair.source);
+      const tr = tgt.rest.get(pair.target);
+      if (!sb || !tb || !sr || !tr) continue;
+
+      if (!headLocalContext) {
+        sb.getWorldPosition(srcWorldPos);
+        const delta = srcWorldPos.clone()
+          .sub(sr.worldPos)
+          .multiplyScalar(motionScale);
+        desiredWorldPos.copy(tr.worldPos).add(delta);
+      } else {
+        const {
+          sourceHead,
+          targetHead,
+          sourceHeadRestInv,
+          targetHeadRestInv,
+          correctionQ,
+          faceScale
+        } = headLocalContext;
+
+        const sourceHeadPoseInv = sourceHead.matrixWorld.clone().invert();
+
+        const srcRestHead = sr.worldPos.clone()
+          .applyMatrix4(sourceHeadRestInv);
+        const srcPoseHead = sb.getWorldPosition(new THREE.Vector3())
+          .applyMatrix4(sourceHeadPoseInv);
+
+        const motionHead = srcPoseHead
+          .sub(srcRestHead)
+          .applyQuaternion(correctionQ)
+          .multiplyScalar(faceScale);
+
+        const targetRestHead = tr.worldPos.clone()
+          .applyMatrix4(targetHeadRestInv);
+
+        const axes = String(pair.axes || 'XYZ').toUpperCase();
+        if (axes === 'VERTICAL') {
+          motionHead.x = 0;
+          motionHead.z = 0;
+        } else if (axes === 'HORIZONTAL') {
+          motionHead.y = 0;
+        } else {
+          if (!axes.includes('X')) motionHead.x = 0;
+          if (!axes.includes('Y')) motionHead.y = 0;
+          if (!axes.includes('Z')) motionHead.z = 0;
+        }
+
+        desiredWorldPos.copy(
+          targetRestHead.add(motionHead)
+            .applyMatrix4(targetHead.matrixWorld)
+        );
+      }
+
+      localPos.copy(desiredWorldPos);
+      if (tb.parent) tb.parent.worldToLocal(localPos);
+
+      tb.position.copy(localPos);
       tb.scale.copy(tr.scale);
       updateSlotWorld(tgt);
     }
@@ -1386,9 +1578,8 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
     // Record location curves after every parent/constraint-style correction.
     // This includes BlendCap's leg-anchor compensation.
-    for (const pair of locPairs) {
-      const bone = tgt.bones.get(pair.target);
-      const d = locData.get(pair.target);
+    for (const [targetName, d] of locData) {
+      const bone = tgt.bones.get(targetName);
       if (!bone || !d) continue;
       d.p.push(
         bone.position.x,
@@ -1397,9 +1588,8 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       );
     }
 
-    for (const pair of rotPairs) {
-      const bone = tgt.bones.get(pair.target);
-      const d = data.get(pair.target);
+    for (const [targetName, d] of data) {
+      const bone = tgt.bones.get(targetName);
       if (!bone || !d) continue;
 
       const q = bone.quaternion.clone().normalize();
@@ -1447,9 +1637,9 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   }
 
   log(
-    'BlendCap profile bake: Hips ROT→HIP/HTP-Spine; ' +
-    'Hips vertical→TORSO-Spine; Hips horizontal→root; ' +
-    'Spine/Spine1→FK-Spine/FK-Chest. Sin root yaw inventado.'
+    `BlendCap bake: preset=${state.activePreset?.label || 'manual'} · ` +
+    `ROT=${rotPairs.length} · LOC=${locPairs.length} · ` +
+    `head_local=${headLocPairs.length}.`
   );
 
   return new THREE.AnimationClip(clipName, clip.duration, tracks);
