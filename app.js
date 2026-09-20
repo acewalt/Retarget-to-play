@@ -908,9 +908,6 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     (a, b) => boneDepth(tgt.bones.get(a.target)) - boneDepth(tgt.bones.get(b.target))
   );
 
-  // Per-animation cache used by BlendCap-style leg-anchor compensation.
-  bakeRetarget._blendcapLegCache = null;
-
   const rotPairs = ordered.filter(p => (p.channels || 'ROT').includes('ROT'));
   const locPairs = ordered.filter(p => rootMotion && (p.channels || '').includes('LOC'));
 
@@ -938,6 +935,60 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   if (!src.mixer) {
     src.mixer = new THREE.AnimationMixer(src.root);
     src.action = src.mixer.clipAction(clip).play();
+  }
+
+  // Setup BlendCap's leg-root drift compensation once, from REST.
+  let blendcapLegComp = null;
+  if (isBlendCapCloudRig) {
+    const lowerName =
+      findBoneByOriginalExact(tgt, ['HIP-Spine', 'HTP-Spine']);
+    const torsoName =
+      findBoneByOriginalExact(tgt, ['TORSO-Spine']);
+
+    const sourceLegNames = [
+      findSemanticBone(src, 'LeftUpLeg'),
+      findSemanticBone(src, 'RightUpLeg')
+    ].filter(Boolean);
+
+    const targetLegNames = [
+      findBoneByOriginalExact(tgt, ['FK-Thigh.L']),
+      findBoneByOriginalExact(tgt, ['FK-Thigh.R'])
+    ].filter(Boolean);
+
+    const lower = lowerName ? tgt.bones.get(lowerName) : null;
+    const torso = torsoName ? tgt.bones.get(torsoName) : null;
+
+    if (
+      lower && torso &&
+      sourceLegNames.length === 2 &&
+      targetLegNames.length === 2
+    ) {
+      restoreRest(src);
+      restoreRest(tgt);
+      updateSlotWorld(src);
+      updateSlotWorld(tgt);
+
+      const sourceRestAvg = new THREE.Vector3();
+      for (const name of sourceLegNames) {
+        sourceRestAvg.add(src.rest.get(name).worldPos);
+      }
+      sourceRestAvg.multiplyScalar(0.5);
+
+      const targetRestAvg = new THREE.Vector3();
+      for (const name of targetLegNames) {
+        targetRestAvg.add(tgt.rest.get(name).worldPos);
+      }
+      targetRestAvg.multiplyScalar(0.5);
+
+      blendcapLegComp = {
+        lower,
+        torso,
+        sourceLegNames,
+        targetLegNames,
+        lowerRestWorldInv: lower.matrixWorld.clone().invert(),
+        baseline: sourceRestAvg.clone().sub(targetRestAvg)
+      };
+    }
   }
 
   for (const time of times) {
@@ -1034,112 +1085,54 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     }
 
     // BlendCap leg-anchor compensation:
-    // Mixamo's thighs are direct Hips children while CloudRig's FK legs are
-    // carried through HIP/HTP-Spine. Rotating the spine/lower frame therefore
-    // creates a world-space root drift unless we translate the torso carrier.
-    // BlendCap measures the average leg-root drift every frame and patches the
-    // TORSO location pair. This is a major reason its feet/pelvis stay aligned.
-    if (isBlendCapCloudRig) {
-      const lowerName =
-        findBoneByOriginalExact(tgt, ['HIP-Spine', 'HTP-Spine']);
-      const torsoName =
-        findBoneByOriginalExact(tgt, ['TORSO-Spine']);
+    // source thigh roots are Hips children; target thigh roots are carried by
+    // HIP/HTP-Spine. Correct the resulting world drift through TORSO-Spine.
+    if (blendcapLegComp) {
+      const {
+        lower,
+        torso,
+        sourceLegNames,
+        targetLegNames,
+        lowerRestWorldInv,
+        baseline
+      } = blendcapLegComp;
 
-      const sourceLegNames = [
-        findSemanticBone(src, 'LeftUpLeg'),
-        findSemanticBone(src, 'RightUpLeg')
-      ].filter(Boolean);
+      const sourcePoseAvg = new THREE.Vector3();
+      for (const name of sourceLegNames) {
+        sourcePoseAvg.add(
+          src.bones.get(name).getWorldPosition(new THREE.Vector3())
+        );
+      }
+      sourcePoseAvg.multiplyScalar(0.5);
 
-      const targetLegNames = [
-        findBoneByOriginalExact(tgt, ['FK-Thigh.L']),
-        findBoneByOriginalExact(tgt, ['FK-Thigh.R'])
-      ].filter(Boolean);
+      // Simulate the CloudRig hinge carry: FK-Thigh's root follows the
+      // current lower-section deform delta even though the raw FBX lost that
+      // ARMATURE constraint.
+      const lowerDelta = lower.matrixWorld.clone()
+        .multiply(lowerRestWorldInv);
 
-      const lower = lowerName ? tgt.bones.get(lowerName) : null;
-      const torso = torsoName ? tgt.bones.get(torsoName) : null;
+      const targetPoseAvg = new THREE.Vector3();
+      for (const name of targetLegNames) {
+        targetPoseAvg.add(
+          tgt.rest.get(name).worldPos.clone().applyMatrix4(lowerDelta)
+        );
+      }
+      targetPoseAvg.multiplyScalar(0.5);
 
-      if (
-        lower && torso &&
-        sourceLegNames.length === 2 &&
-        targetLegNames.length === 2
-      ) {
-        // Cache rest-space values lazily on the function-local profile state.
-        if (!bakeRetarget._blendcapLegCache ||
-            bakeRetarget._blendcapLegCache.targetRoot !== tgt.root ||
-            bakeRetarget._blendcapLegCache.sourceRoot !== src.root) {
-          restoreRest(src);
-          restoreRest(tgt);
-          updateSlotWorld(src);
-          updateSlotWorld(tgt);
+      const deltaWorld = sourcePoseAvg
+        .clone()
+        .sub(targetPoseAvg)
+        .sub(baseline);
 
-          const sourceRestAvg = new THREE.Vector3();
-          for (const name of sourceLegNames) {
-            sourceRestAvg.add(src.rest.get(name).worldPos);
-          }
-          sourceRestAvg.multiplyScalar(0.5);
+      if (deltaWorld.lengthSq() > 1e-10) {
+        const torsoWorld = torso.getWorldPosition(new THREE.Vector3())
+          .add(deltaWorld);
 
-          const targetRestAvg = new THREE.Vector3();
-          for (const name of targetLegNames) {
-            targetRestAvg.add(tgt.rest.get(name).worldPos);
-          }
-          targetRestAvg.multiplyScalar(0.5);
+        const torsoLocal = torsoWorld.clone();
+        if (torso.parent) torso.parent.worldToLocal(torsoLocal);
 
-          bakeRetarget._blendcapLegCache = {
-            targetRoot: tgt.root,
-            sourceRoot: src.root,
-            lowerRestWorld: lower.matrixWorld.clone(),
-            lowerRestWorldInv: lower.matrixWorld.clone().invert(),
-            baseline: sourceRestAvg.clone().sub(targetRestAvg)
-          };
-
-          // Restore the current frame after the setup-time rest snapshot.
-          restoreRest(src);
-          src.mixer.setTime(time);
-          updateSlotWorld(src);
-          restoreRest(tgt);
-
-          // Re-evaluate the LOC + ROT work already solved above for this frame
-          // by replaying the current generated state from the local arrays is
-          // not possible here. The cache is normally created on frame 0 before
-          // meaningful motion; from frame 1 onward it is fully active.
-          // Frame 0 is rest-equivalent for compensation and needs no patch.
-        } else {
-          const cache = bakeRetarget._blendcapLegCache;
-
-          const sourcePoseAvg = new THREE.Vector3();
-          for (const name of sourceLegNames) {
-            const bone = src.bones.get(name);
-            sourcePoseAvg.add(
-              bone.getWorldPosition(new THREE.Vector3())
-            );
-          }
-          sourcePoseAvg.multiplyScalar(0.5);
-
-          const lowerDelta = lower.matrixWorld.clone()
-            .multiply(cache.lowerRestWorldInv);
-
-          const targetPoseAvg = new THREE.Vector3();
-          for (const name of targetLegNames) {
-            const restPos = tgt.rest.get(name).worldPos.clone();
-            targetPoseAvg.add(restPos.applyMatrix4(lowerDelta));
-          }
-          targetPoseAvg.multiplyScalar(0.5);
-
-          const deltaWorld = sourcePoseAvg
-            .clone()
-            .sub(targetPoseAvg)
-            .sub(cache.baseline);
-
-          if (deltaWorld.lengthSq() > 1e-10) {
-            const torsoWorld = torso.getWorldPosition(new THREE.Vector3())
-              .add(deltaWorld);
-
-            const torsoLocal = torsoWorld.clone();
-            if (torso.parent) torso.parent.worldToLocal(torsoLocal);
-            torso.position.copy(torsoLocal);
-            updateSlotWorld(tgt);
-          }
-        }
+        torso.position.copy(torsoLocal);
+        updateSlotWorld(tgt);
       }
     }
 
