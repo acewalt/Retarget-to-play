@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-blendcap3';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-blendcap3';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-blendcap3';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-ikblendcap1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-ikblendcap1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-ikblendcap1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1373,52 +1373,170 @@ function worldToLocalPoint(object, point) {
   return out;
 }
 
-function desiredControlTransformFromFk(driverBone, controlBone) {
-  // BlendCap FK->IK principle:
-  //   desired IK = FK_pose * inverse(FK_rest) * IK_rest
-  // implemented with world rotation delta + rotated rest offset.
-  const dr = state.target.rest.get(driverBone.name);
-  const cr = state.target.rest.get(controlBone.name);
-  if (!dr || !cr) return null;
-
-  const driverWorldPos = driverBone.getWorldPosition(new THREE.Vector3());
-  const driverWorldQ = driverBone.getWorldQuaternion(new THREE.Quaternion());
-
-  const deltaQ = driverWorldQ
-    .clone()
-    .multiply(dr.worldQuat.clone().invert())
-    .normalize();
-
-  const desiredWorldQ = deltaQ
-    .clone()
-    .multiply(cr.worldQuat)
-    .normalize();
-
-  const restOffset = cr.worldPos
-    .clone()
-    .sub(dr.worldPos)
-    .applyQuaternion(deltaQ);
-
-  const desiredWorldPos = driverWorldPos
-    .clone()
-    .add(restOffset);
-
-  const localPos = worldToLocalPoint(controlBone, desiredWorldPos);
-  let localQ = desiredWorldQ.clone();
-
-  if (controlBone.parent) {
-    const parentQ = controlBone.parent.getWorldQuaternion(new THREE.Quaternion());
-    localQ = parentQ.invert().multiply(desiredWorldQ).normalize();
+const CLOUDRIG_IK_CHAINS = [
+  {
+    kind: 'ARM', side: 'L',
+    a: 'FK-UpperArm.L', b: 'FK-Forearm.L', c: 'FK-Hand.L',
+    ik: 'IK-Hand.L', pole: 'POLE-Arm.L',
+    owner: 'IK-M-Forearm.L'
+  },
+  {
+    kind: 'ARM', side: 'R',
+    a: 'FK-UpperArm.R', b: 'FK-Forearm.R', c: 'FK-Hand.R',
+    ik: 'IK-Hand.R', pole: 'POLE-Arm.R',
+    owner: 'IK-M-Forearm.R'
+  },
+  {
+    kind: 'LEG', side: 'L',
+    a: 'FK-Thigh.L', b: 'FK-Knee.L', c: 'FK-Foot.L',
+    ik: 'IK-Foot.L', pole: 'POLE-Leg.L',
+    owner: 'IK-M-Knee.L'
+  },
+  {
+    kind: 'LEG', side: 'R',
+    a: 'FK-Thigh.R', b: 'FK-Knee.R', c: 'FK-Foot.R',
+    ik: 'IK-Foot.R', pole: 'POLE-Leg.R',
+    owner: 'IK-M-Knee.R'
   }
+];
 
-  return { position: localPos, quaternion: localQ };
+function virtualFkPose(tgt, runtimeName) {
+  const runtime = tgt.rigRuntime;
+  const bone = tgt.bones.get(runtimeName);
+  if (!bone) return null;
+
+  const virtual = runtime?.virtualFk?.get(runtimeName);
+
+  return {
+    bone,
+    position: virtual?.position
+      ? virtual.position.clone()
+      : bone.getWorldPosition(new THREE.Vector3()),
+    quaternion: virtual?.quaternion
+      ? virtual.quaternion.clone()
+      : bone.getWorldQuaternion(new THREE.Quaternion()),
+    scale: bone.getWorldScale(new THREE.Vector3())
+  };
 }
 
-function rawPolePerp(a, b, c) {
-  const pa = a.getWorldPosition(new THREE.Vector3());
-  const pb = b.getWorldPosition(new THREE.Vector3());
-  const pc = c.getWorldPosition(new THREE.Vector3());
+function poseToMatrix(pose, out = new THREE.Matrix4()) {
+  return out.compose(
+    pose.position,
+    pose.quaternion,
+    pose.scale || new THREE.Vector3(1, 1, 1)
+  );
+}
 
+function restWorldMatrix(tgt, runtimeName, out = new THREE.Matrix4()) {
+  const rest = tgt.rest.get(runtimeName);
+  if (!rest) return null;
+  return out.compose(
+    rest.worldPos.clone(),
+    rest.worldQuat.clone(),
+    rest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+  );
+}
+
+function resolveCloudRigIkChains(tgt) {
+  return CLOUDRIG_IK_CHAINS.map(def => {
+    const resolved = { ...def };
+    for (const key of ['a', 'b', 'c', 'ik', 'pole']) {
+      const runtimeName = findBoneByOriginalExact(tgt, [def[key]]);
+      if (!runtimeName) return null;
+      resolved[key] = runtimeName;
+    }
+    const ownerName = findBoneByOriginalExact(tgt, [def.owner]);
+    resolved.owner = ownerName || '';
+    return resolved;
+  }).filter(Boolean);
+}
+
+function functionalIkParentName(tgt, chain, kind) {
+  // CloudRig's prepare_parent_switch() defaults every limb IK parent to
+  // the first candidate: Root. Leg poles additionally default
+  // ik_pole_follow=1, so their effective parent is the IK foot control.
+  if (kind === 'POLE' && chain.kind === 'LEG') return chain.ik;
+  return findBoneByOriginalExact(tgt, ['root']) || null;
+}
+
+function functionalParentPoseMatrix(tgt, chain, kind, ikDesiredWorldByName, out) {
+  const parentName = functionalIkParentName(tgt, chain, kind);
+  if (!parentName) return out.identity();
+
+  if (kind === 'POLE' && chain.kind === 'LEG') {
+    const desiredIk = ikDesiredWorldByName.get(chain.ik);
+    if (desiredIk) return out.copy(desiredIk);
+  }
+
+  const parentBone = tgt.bones.get(parentName);
+  if (!parentBone) return out.identity();
+  return out.copy(parentBone.matrixWorld);
+}
+
+function functionalParentRestMatrix(tgt, chain, kind, out) {
+  const parentName = functionalIkParentName(tgt, chain, kind);
+  if (!parentName) return out.identity();
+
+  const rest = tgt.rest.get(parentName);
+  if (!rest) return out.identity();
+
+  return out.compose(
+    rest.worldPos.clone(),
+    rest.worldQuat.clone(),
+    rest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+  );
+}
+
+function encodeOriginalRigControlLocal(
+  tgt,
+  controlName,
+  desiredWorld,
+  functionalParentPose,
+  functionalParentRest,
+  outMatrix
+) {
+  const control = tgt.bones.get(controlName);
+  const controlRest = tgt.rest.get(controlName);
+  if (!control || !controlRest) return null;
+
+  const controlRestWorld = new THREE.Matrix4().compose(
+    controlRest.worldPos.clone(),
+    controlRest.worldQuat.clone(),
+    controlRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+  );
+
+  // matrix_basis in the ORIGINAL rig:
+  // restRelative^-1 * desiredRelative.
+  const restRelative = functionalParentRest.clone()
+    .invert()
+    .multiply(controlRestWorld);
+  const desiredRelative = functionalParentPose.clone()
+    .invert()
+    .multiply(desiredWorld);
+  const basis = restRelative.clone()
+    .invert()
+    .multiply(desiredRelative);
+
+  // Our exact-FBX carrier expects tracks encoded as rawFBXRestLocal * basis,
+  // identical to the working FK export path.
+  const rawRestLocal = new THREE.Matrix4().compose(
+    controlRest.position.clone(),
+    controlRest.quaternion.clone(),
+    controlRest.scale.clone()
+  );
+
+  return outMatrix.copy(rawRestLocal).multiply(basis);
+}
+
+function chainPoseSnapshot(tgt, chain) {
+  const a = virtualFkPose(tgt, chain.a);
+  const b = virtualFkPose(tgt, chain.b);
+  const c = virtualFkPose(tgt, chain.c);
+  if (!a || !b || !c) return null;
+  return { a, b, c };
+}
+
+function rawPolePerpFromPos(pa, pb, pc) {
   const chain = pc.clone().sub(pa);
   if (chain.lengthSq() < 1e-10) return null;
 
@@ -1426,24 +1544,11 @@ function rawPolePerp(a, b, c) {
   const projected = lower.clone().projectOnVector(chain);
   const perp = projected.sub(lower);
 
-  return {
-    pa,
-    pb,
-    pc,
-    chain,
-    perp
-  };
+  return { pa, pb, pc, chain, perp };
 }
 
-function scanPoleAnchorLocal(tgt, mixer, clip, chain, times) {
-  // Same idea used by BlendCap: pick the most-bent frame, store the bend
-  // axis in the middle FK bone's LOCAL frame so global character turns do
-  // not flip the pole side.
-  const a = tgt.bones.get(chain.a);
-  const b = tgt.bones.get(chain.b);
-  const c = tgt.bones.get(chain.c);
-  if (!a || !b || !c) return null;
-
+function scanPoleAnchorLocal(tgt, mixer, chain, times) {
+  const runtime = tgt.rigRuntime;
   let bestLen = 0;
   let bestLocal = null;
   const step = Math.max(1, Math.floor(times.length / 60));
@@ -1453,21 +1558,22 @@ function scanPoleAnchorLocal(tgt, mixer, clip, chain, times) {
     mixer.setTime(Number(times[i]));
     updateSlotWorld(tgt);
 
-    const pa = a.getWorldPosition(new THREE.Vector3());
-    const pb = b.getWorldPosition(new THREE.Vector3());
-    const pc = c.getWorldPosition(new THREE.Vector3());
+    runtime?.update?.();
+    updateSlotWorld(tgt);
 
-    const upper = pb.clone().sub(pa);
-    const lower = pc.clone().sub(pb);
+    const snap = chainPoseSnapshot(tgt, chain);
+    if (!snap) continue;
+
+    const upper = snap.b.position.clone().sub(snap.a.position);
+    const lower = snap.c.position.clone().sub(snap.b.position);
     const bendAxisWorld = upper.clone().cross(lower);
     const len = bendAxisWorld.length();
 
     if (len <= bestLen || len < 1e-6) continue;
 
-    const midWorldQ = b.getWorldQuaternion(new THREE.Quaternion());
     const local = bendAxisWorld
       .clone()
-      .applyQuaternion(midWorldQ.clone().invert());
+      .applyQuaternion(snap.b.quaternion.clone().invert());
 
     if (local.lengthSq() < 1e-10) continue;
 
@@ -1479,23 +1585,23 @@ function scanPoleAnchorLocal(tgt, mixer, clip, chain, times) {
   return bestLocal;
 }
 
-function computeBlendCapPolePoint(a, b, c, anchorLocal) {
-  const raw = rawPolePerp(a, b, c);
-  if (!raw) {
-    return b.getWorldPosition(new THREE.Vector3());
-  }
+function computeBlendCapPolePointFromSnapshot(snap, anchorLocal) {
+  const raw = rawPolePerpFromPos(
+    snap.a.position,
+    snap.b.position,
+    snap.c.position
+  );
+
+  if (!raw) return snap.b.position.clone();
 
   const { pb, chain } = raw;
   let perp = raw.perp;
 
   if (perp.length() < 1e-4) {
-    // Straight-chain fallback: use the anchored bend plane if possible.
     if (anchorLocal) {
-      const midWorldQ = b.getWorldQuaternion(new THREE.Quaternion());
       const bendAxisWorld = anchorLocal
         .clone()
-        .applyQuaternion(midWorldQ);
-
+        .applyQuaternion(snap.b.quaternion);
       perp = chain.clone().cross(bendAxisWorld);
     }
 
@@ -1509,17 +1615,14 @@ function computeBlendCapPolePoint(a, b, c, anchorLocal) {
     }
   }
 
-  if (perp.lengthSq() < 1e-10) {
-    return pb.clone();
-  }
+  if (perp.lengthSq() < 1e-10) return pb.clone();
 
   perp.normalize();
 
   if (anchorLocal) {
-    const midWorldQ = b.getWorldQuaternion(new THREE.Quaternion());
     const bendAxisWorld = anchorLocal
       .clone()
-      .applyQuaternion(midWorldQ);
+      .applyQuaternion(snap.b.quaternion);
 
     const expectedPerp = chain.clone().cross(bendAxisWorld);
     if (expectedPerp.lengthSq() > 1e-10) {
@@ -1528,19 +1631,57 @@ function computeBlendCapPolePoint(a, b, c, anchorLocal) {
     }
   }
 
-  // BlendCap uses 0.4 * chain length from the bend joint.
+  // BlendCap constant.
   return pb.clone().addScaledVector(perp, chain.length() * 0.4);
+}
+
+function buildConvertedOutputClip(keepLimbFk) {
+  const fk = state.fkClip;
+  const ik = state.ikOnlyClip;
+  if (!fk || !ik) return fk || ik;
+
+  if (keepLimbFk) {
+    return mergeClips('Retargeted_FK_IK', [fk, ik]);
+  }
+
+  // "Convert" must NOT discard root/spine/head/fingers/toes.
+  // Only remove the FK rotations that the four IK chains replace.
+  const replaced = new Set([
+    'FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L',
+    'FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R',
+    'FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L',
+    'FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R'
+  ]);
+
+  const retained = fk.tracks.filter(track => {
+    const parsed = parseTrackTarget(track.name);
+    if (!parsed) return true;
+
+    const bone = state.target.bones.get(parsed.nodeName);
+    const original = originalObjectName(bone) || parsed.nodeName;
+
+    return !replaced.has(original);
+  }).map(track => track.clone());
+
+  const bodyClip = new THREE.AnimationClip(
+    'Retargeted_Body_Without_LimbFK',
+    fk.duration,
+    retained
+  );
+
+  return mergeClips('Retargeted_IK', [bodyClip, ik]);
 }
 
 function bakeIkFromFk() {
   if (!state.fkClip) throw new Error('Primero aplica el retargeting FK.');
 
   const tgt = state.target;
+  const runtime = tgt.rigRuntime;
 
-  // BlendCap converts FK->IK by sampling the TARGET FK result, never by
-  // re-reading the source rig. Use the raw FK clip because it is the actual
-  // target FK geometry before the portable-export basis rewrite.
-  const solveClip = state.fkRawClip || state.fkClip;
+  // The WORKING FK result is state.fkClip + WaltRig's virtual CloudRig
+  // hierarchy. BlendCap samples the evaluated target FK chain; therefore we
+  // must sample virtualFk, not the raw FBX FK branches.
+  const solveClip = state.fkClip;
 
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
   const frameCount = Math.max(2, Math.ceil(solveClip.duration * fps) + 1);
@@ -1549,25 +1690,11 @@ function bakeIkFromFk() {
     (_, i) => Math.min(solveClip.duration, i / fps)
   );
 
-  const chainDefs = [
-    { a: 'FK-UpperArm.L', b: 'FK-Forearm.L', c: 'FK-Hand.L', ik: 'IK-Hand.L', pole: 'POLE-Arm.L' },
-    { a: 'FK-UpperArm.R', b: 'FK-Forearm.R', c: 'FK-Hand.R', ik: 'IK-Hand.R', pole: 'POLE-Arm.R' },
-    { a: 'FK-Thigh.L', b: 'FK-Knee.L', c: 'FK-Foot.L', ik: 'IK-Foot.L', pole: 'POLE-Leg.L' },
-    { a: 'FK-Thigh.R', b: 'FK-Knee.R', c: 'FK-Foot.R', ik: 'IK-Foot.R', pole: 'POLE-Leg.R' }
-  ];
-
-  const chains = chainDefs.map(def => {
-    const resolved = {};
-    for (const key of ['a', 'b', 'c', 'ik', 'pole']) {
-      const runtimeName = findBoneByOriginalExact(tgt, [def[key]]);
-      if (!runtimeName) return null;
-      resolved[key] = runtimeName;
-    }
-    return resolved;
-  }).filter(Boolean);
-
-  if (!chains.length) {
-    throw new Error('No encontré cadenas FK/IK CloudRig compatibles en el Target.');
+  const chains = resolveCloudRigIkChains(tgt);
+  if (chains.length !== 4) {
+    throw new Error(
+      `FK→IK CloudRig incompleto: encontré ${chains.length}/4 cadenas IK.`
+    );
   }
 
   restoreRest(tgt);
@@ -1576,101 +1703,188 @@ function bakeIkFromFk() {
   const mixer = new THREE.AnimationMixer(tgt.root);
   const action = mixer.clipAction(solveClip).play();
 
-  // Pre-scan the most useful bend plane per limb before baking. This avoids
-  // pole flips on almost-straight frames and during 180/360-degree turns.
+  const previousRuntimeEnabled = runtime?.enabled;
+  if (runtime) runtime.enabled = true;
+
   const poleAnchors = new Map();
   for (const chain of chains) {
     poleAnchors.set(
       chain.pole,
-      scanPoleAnchorLocal(tgt, mixer, solveClip, chain, times)
+      scanPoleAnchorLocal(tgt, mixer, chain, times)
     );
   }
 
   const data = new Map();
   for (const chain of chains) {
     data.set(chain.ik, { p: [], q: [], s: [], lastQ: null });
-    data.set(chain.pole, { p: [], q: [], s: [] });
+    data.set(chain.pole, { p: [], q: [], s: [], lastQ: null });
   }
 
-  for (const time of times) {
-    restoreRest(tgt);
-    mixer.setTime(Number(time));
-    updateSlotWorld(tgt);
+  const fkPoseWorld = new THREE.Matrix4();
+  const fkRestWorld = new THREE.Matrix4();
+  const ikRestWorld = new THREE.Matrix4();
+  const desiredIkWorld = new THREE.Matrix4();
+  const desiredPoleWorld = new THREE.Matrix4();
 
-    for (const chain of chains) {
-      const a = tgt.bones.get(chain.a);
-      const b = tgt.bones.get(chain.b);
-      const c = tgt.bones.get(chain.c);
-      const ik = tgt.bones.get(chain.ik);
-      const pole = tgt.bones.get(chain.pole);
+  const parentPose = new THREE.Matrix4();
+  const parentRest = new THREE.Matrix4();
+  const encodedLocal = new THREE.Matrix4();
 
-      const desired = desiredControlTransformFromFk(c, ik);
-      if (!desired) continue;
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
 
-      ik.position.copy(desired.position);
-      ik.quaternion.copy(desired.quaternion);
-      ik.scale.copy(tgt.rest.get(ik.name).scale);
+  try {
+    for (const time of times) {
+      restoreRest(tgt);
+      mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      const poleWorld = computeBlendCapPolePoint(
-        a,
-        b,
-        c,
-        poleAnchors.get(chain.pole)
-      );
-
-      pole.position.copy(worldToLocalPoint(pole, poleWorld));
-      pole.quaternion.copy(tgt.rest.get(pole.name).quaternion);
-      pole.scale.copy(tgt.rest.get(pole.name).scale);
+      runtime?.update?.();
       updateSlotWorld(tgt);
 
-      const id = data.get(chain.ik);
-      const iq = ik.quaternion.clone().normalize();
-      if (id.lastQ && id.lastQ.dot(iq) < 0) {
-        iq.x *= -1; iq.y *= -1; iq.z *= -1; iq.w *= -1;
+      const ikDesiredWorldByName = new Map();
+
+      // End effectors first: BlendCap formula exactly:
+      // desiredIK = FK_pose * inverse(FK_rest) * IK_rest.
+      for (const chain of chains) {
+        const snap = chainPoseSnapshot(tgt, chain);
+        if (!snap) continue;
+
+        poseToMatrix(snap.c, fkPoseWorld);
+
+        if (!restWorldMatrix(tgt, chain.c, fkRestWorld)) continue;
+        if (!restWorldMatrix(tgt, chain.ik, ikRestWorld)) continue;
+
+        desiredIkWorld.copy(fkPoseWorld)
+          .multiply(fkRestWorld.clone().invert())
+          .multiply(ikRestWorld);
+
+        ikDesiredWorldByName.set(chain.ik, desiredIkWorld.clone());
+
+        functionalParentPoseMatrix(
+          tgt, chain, 'IK', ikDesiredWorldByName, parentPose
+        );
+        functionalParentRestMatrix(
+          tgt, chain, 'IK', parentRest
+        );
+
+        const encoded = encodeOriginalRigControlLocal(
+          tgt,
+          chain.ik,
+          desiredIkWorld,
+          parentPose,
+          parentRest,
+          encodedLocal
+        );
+        if (!encoded) continue;
+
+        encoded.decompose(p, q, s);
+        q.normalize();
+
+        const d = data.get(chain.ik);
+        if (d.lastQ && d.lastQ.dot(q) < 0) {
+          q.x *= -1; q.y *= -1; q.z *= -1; q.w *= -1;
+        }
+        d.lastQ = q.clone();
+
+        d.p.push(p.x, p.y, p.z);
+        d.q.push(q.x, q.y, q.z, q.w);
+        d.s.push(s.x, s.y, s.z);
       }
-      id.lastQ = iq.clone();
 
-      id.p.push(ik.position.x, ik.position.y, ik.position.z);
-      id.q.push(iq.x, iq.y, iq.z, iq.w);
-      id.s.push(ik.scale.x, ik.scale.y, ik.scale.z);
+      // Poles second so Leg poles can use the just-computed IK foot as their
+      // effective CloudRig parent (ik_pole_follow default = 1 for legs).
+      for (const chain of chains) {
+        const snap = chainPoseSnapshot(tgt, chain);
+        if (!snap) continue;
 
-      const pd = data.get(chain.pole);
-      pd.p.push(pole.position.x, pole.position.y, pole.position.z);
-      pd.q.push(
-        pole.quaternion.x,
-        pole.quaternion.y,
-        pole.quaternion.z,
-        pole.quaternion.w
-      );
-      pd.s.push(pole.scale.x, pole.scale.y, pole.scale.z);
+        const poleWorldPos = computeBlendCapPolePointFromSnapshot(
+          snap,
+          poleAnchors.get(chain.pole)
+        );
+
+        const poleRest = tgt.rest.get(chain.pole);
+        if (!poleRest) continue;
+
+        desiredPoleWorld.compose(
+          poleWorldPos,
+          poleRest.worldQuat.clone(),
+          poleRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+        );
+
+        functionalParentPoseMatrix(
+          tgt, chain, 'POLE', ikDesiredWorldByName, parentPose
+        );
+        functionalParentRestMatrix(
+          tgt, chain, 'POLE', parentRest
+        );
+
+        const encoded = encodeOriginalRigControlLocal(
+          tgt,
+          chain.pole,
+          desiredPoleWorld,
+          parentPose,
+          parentRest,
+          encodedLocal
+        );
+        if (!encoded) continue;
+
+        encoded.decompose(p, q, s);
+        q.normalize();
+
+        const d = data.get(chain.pole);
+        if (d.lastQ && d.lastQ.dot(q) < 0) {
+          q.x *= -1; q.y *= -1; q.z *= -1; q.w *= -1;
+        }
+        d.lastQ = q.clone();
+
+        d.p.push(p.x, p.y, p.z);
+        d.q.push(q.x, q.y, q.z, q.w);
+        d.s.push(s.x, s.y, s.z);
+      }
     }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    if (runtime) runtime.enabled = previousRuntimeEnabled;
+    restoreRest(tgt);
   }
-
-  action.stop();
-  mixer.stopAllAction();
-  restoreRest(tgt);
 
   const tracks = [];
   for (const [name, d] of data) {
-    tracks.push(
-      new THREE.VectorKeyframeTrack(`${name}.position`, times, d.p)
-    );
-    tracks.push(
-      new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q)
-    );
-    tracks.push(
-      new THREE.VectorKeyframeTrack(`${name}.scale`, times, d.s)
+    if (d.p.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(`${name}.position`, times, d.p)
+      );
+    }
+    if (d.q.length === times.length * 4) {
+      tracks.push(
+        new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q)
+      );
+    }
+    if (d.s.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(`${name}.scale`, times, d.s)
+      );
+    }
+  }
+
+  if (tracks.length < 24) {
+    log(
+      `FK→IK aviso: se generaron ${tracks.length}/24 curvas esperadas ` +
+      '(4 IK + 4 POLE × TRS).'
     );
   }
 
   log(
-    'FK→IK BlendCap profile: end-effectors = delta FK target → IK rest; ' +
-    'poles = target FK geometry + local bend-axis anchor.'
+    'FK→IK BlendCap/CloudRig: muestreo del FK virtual evaluado; ' +
+    'IK = FKpose·FKrest⁻¹·IKrest; poles con bend-axis local; ' +
+    'IK/POLE codificados en matrix_basis del CloudRig original.'
   );
 
   return new THREE.AnimationClip(
-    'Retargeted_IK',
+    'Retargeted_IK_Controls',
     solveClip.duration,
     tracks
   );
@@ -1679,21 +1893,34 @@ function bakeIkFromFk() {
 function convertFkToIk() {
   try {
     setStatus('Baking FK → IK…');
+
     state.ikOnlyClip = bakeIkFromFk();
-    state.exportClip = $('keepFk').checked
-      ? mergeClips('Retargeted_FK_IK', [state.fkClip, state.ikOnlyClip])
-      : state.ikOnlyClip;
+    state.exportClip = buildConvertedOutputClip($('keepFk').checked);
     state.exported = false;
-    state.targetPreviewClip = mergeClips('Preview_FK_IK', [state.fkClip, state.ikOnlyClip]);
+
+    // Preview always retains FK because the browser intentionally does not run
+    // CloudRig's Blender IK constraints. IK controls are baked/exported; the
+    // already-correct FK keeps the visible deformation identical while we
+    // validate the generated control curves.
+    state.targetPreviewClip = mergeClips(
+      'Preview_FK_IK',
+      [state.fkClip, state.ikOnlyClip]
+    );
+
     playTargetClip(state.targetPreviewClip);
     updateButtons();
     updateStats();
     setStatus('FK → IK listo', 'good');
-    log(`FK → IK generado: ${state.ikOnlyClip.tracks.length} curvas para manos/pies IK y poles.`);
+
+    log(
+      `FK → IK generado: ${state.ikOnlyClip.tracks.length} curvas. ` +
+      `Salida: ${state.exportClip.tracks.length} curvas; ` +
+      `Conservar FK=${$('keepFk').checked ? 'sí' : 'no (sólo FK de cuerpo/dedos/toes)'}. `
+    );
   } catch (err) {
     console.error(err);
     setStatus('Error FK → IK', 'bad');
-    log(`ERROR FK→IK: ${err.message}`);
+    log(`ERROR FK→IK: ${err?.stack || err?.message || err}`);
   }
 }
 
@@ -3081,9 +3308,7 @@ document.querySelectorAll('[data-go-workspace]').forEach(step => {
 
 $('keepFk').onchange = () => {
   if (!state.ikOnlyClip) return;
-  state.exportClip = $('keepFk').checked
-    ? mergeClips('Retargeted_FK_IK', [state.fkClip, state.ikOnlyClip])
-    : state.ikOnlyClip;
+  state.exportClip = buildConvertedOutputClip($('keepFk').checked);
   state.exported = false;
   updateStats();
   updateWorkflowUI();
