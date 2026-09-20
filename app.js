@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-poleroot1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-poleroot1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-poleroot1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-presets1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-presets1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-presets1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -91,10 +91,98 @@ const CLOUDRIG_PRESET = [
   { source: 'RightHandPinky3', target: 'FK-Finger_Pinky3.R', channels: 'ROT' }
 ];
 
+const BLENDCAP_PRESET_REGISTRY = {
+  mixamo_to_cloudrig: {
+    label: 'Mixamo → CloudRig / Sintel',
+    inline: CLOUDRIG_PRESET,
+    sourceFamily: 'mixamo',
+    targetFamily: 'cloudrig'
+  },
+  mixamo_to_rigify: {
+    label: 'Mixamo → Rigify',
+    path: './presets/mixamo_to_rigify.json',
+    sourceFamily: 'mixamo',
+    targetFamily: 'rigify'
+  },
+  mixamo_to_arp: {
+    label: 'Mixamo → Auto-Rig Pro',
+    path: './presets/mixamo_to_arp.json',
+    sourceFamily: 'mixamo',
+    targetFamily: 'arp'
+  },
+  mixamo_to_mixamo_ctrl: {
+    label: 'Mixamo → Mixamo Control Rig',
+    path: './presets/mixamo_to_mixamo_ctrl.json',
+    sourceFamily: 'mixamo',
+    targetFamily: 'mixamo-ctrl'
+  },
+  blendcap_to_cloudrig: {
+    label: 'BlendCap → CloudRig',
+    path: './presets/blendcap_to_cloudrig.json',
+    sourceFamily: 'blendcap',
+    targetFamily: 'cloudrig'
+  },
+  blendcap_to_rigify_new: {
+    label: 'BlendCap → Rigify (New)',
+    path: './presets/blendcap_to_rigify_new.json',
+    sourceFamily: 'blendcap',
+    targetFamily: 'rigify'
+  },
+  blendcap_to_rigify_old: {
+    label: 'BlendCap → Rigify (Old)',
+    path: './presets/blendcap_to_rigify_old.json',
+    sourceFamily: 'blendcap',
+    targetFamily: 'rigify'
+  },
+  blendcap_to_arp: {
+    label: 'BlendCap → Auto-Rig Pro',
+    path: './presets/blendcap_to_arp.json',
+    sourceFamily: 'blendcap',
+    targetFamily: 'arp'
+  },
+  blendcap_to_mixamo: {
+    label: 'BlendCap → Mixamo',
+    path: './presets/blendcap_to_mixamo.json',
+    sourceFamily: 'blendcap',
+    targetFamily: 'mixamo'
+  },
+  blendcap_to_mixamo_ctrl: {
+    label: 'BlendCap → Mixamo Control Rig',
+    path: './presets/blendcap_to_mixamo_ctrl.json',
+    sourceFamily: 'blendcap',
+    targetFamily: 'mixamo-ctrl'
+  }
+};
+
+function normalizeBlendCapAxes(axes) {
+  const value = String(axes || 'XYZ').toUpperCase();
+  if (value === 'Z') return 'VERTICAL';
+  if (value === 'XY') return 'HORIZONTAL';
+  return value || 'XYZ';
+}
+
+function targetLooksCloudRig() {
+  const tgt = state.target;
+  if (!tgt?.root) return false;
+  return !!(
+    findBoneByOriginalExact(tgt, ['FK-UpperArm.L']) &&
+    findBoneByOriginalExact(tgt, ['FK-Thigh.L']) &&
+    findBoneByOriginalExact(tgt, ['IK-Hand.L']) &&
+    findBoneByOriginalExact(tgt, ['IK-Foot.L']) &&
+    findBoneByOriginalExact(tgt, ['POLE-Leg.L'])
+  );
+}
+
+function usesCloudRigPipeline() {
+  return state.activePreset?.targetFamily === 'cloudrig' && targetLooksCloudRig();
+}
+
 const state = {
   source: makeSlot('source'),
   target: makeSlot('target'),
   boneMap: [],
+  activePresetId: 'mixamo_to_cloudrig',
+  activePreset: null,
   fkClip: null,
   fkRawClip: null,
   ikOnlyClip: null,
@@ -386,7 +474,9 @@ async function loadFbx(file, slot, view) {
   updateTimelineBounds();
   setStatus('LOCAL · sin subida', 'good');
 
-  if (state.source.root && state.target.root && $('preset').value === 'cloudrig-sintel') loadPreset();
+  if (state.source.root && state.target.root && $('preset').value !== 'none') {
+    void loadPreset();
+  }
 }
 
 function originalObjectName(object) {
@@ -472,36 +562,130 @@ function findSemanticBone(slot, semantic) {
   return null;
 }
 
-function loadPreset() {
+async function loadPreset() {
   if (!state.source.root || !state.target.root) {
     log('Preset pendiente: primero carga Source y Target.');
     return;
   }
-  if ($('preset').value !== 'cloudrig-sintel') return;
-  state.boneMap = CLOUDRIG_PRESET.map(entry => {
-    const targets = Array.isArray(entry.target) ? entry.target : [entry.target];
-    const target = targets
-      .map(name => findBoneByOriginalExact(state.target, [name]) || findSemanticBone(state.target, name))
-      .find(Boolean) || '';
 
-    return {
-      source: findSemanticBone(state.source, entry.source) || '',
-      target,
-      channels: entry.channels || 'ROT',
-      axes: entry.axes || 'XYZ',
-      profile: 'blendcap-cloudrig'
+  const id = $('preset').value;
+  if (id === 'none') {
+    state.activePresetId = 'none';
+    state.activePreset = null;
+    state.boneMap = [];
+    refreshMapUi();
+    updateButtons();
+    log('Preset desactivado.');
+    return;
+  }
+
+  const definition = BLENDCAP_PRESET_REGISTRY[id];
+  if (!definition) {
+    throw new Error(`Preset desconocido: ${id}`);
+  }
+
+  let presetData;
+  if (definition.inline) {
+    presetData = {
+      name: definition.label,
+      source_prefix: 'mixamorig:',
+      pairs: definition.inline
     };
-  }).filter(p => p.source || p.target);
+  } else {
+    const response = await fetch(
+      definition.path + '?v=20260920-presets1',
+      { cache: 'no-store' }
+    );
+    if (!response.ok) {
+      throw new Error(
+        `No pude cargar ${definition.label}: HTTP ${response.status}`
+      );
+    }
+    presetData = await response.json();
+  }
 
-  // BlendCap's tested CloudRig retarget does not solve feet with a second IK
-  // end-effector pass. Keep that optional, but default it OFF for this preset
-  // so the pair bake remains the source of truth.
+  state.activePresetId = id;
+  state.activePreset = {
+    id,
+    ...definition,
+    data: presetData
+  };
+
+  if (definition.sourceFamily === 'mixamo') {
+    $('sourcePrefix').value =
+      inferPrefix(state.source) ||
+      presetData.source_prefix ||
+      $('sourcePrefix').value ||
+      '';
+  }
+
+  if (definition.targetFamily === 'mixamo') {
+    $('targetPrefix').value =
+      inferPrefix(state.target) ||
+      $('targetPrefix').value ||
+      '';
+  }
+
+  const resolveTarget = (spec) => {
+    const candidates = Array.isArray(spec) ? [...spec] : [spec];
+
+    // Sintel/CloudRig variants may expose HIP-Spine or HTP-Spine.
+    if (definition.targetFamily === 'cloudrig') {
+      if (candidates.includes('HIP-Spine') && !candidates.includes('HTP-Spine')) {
+        candidates.push('HTP-Spine');
+      }
+      if (candidates.includes('HTP-Spine') && !candidates.includes('HIP-Spine')) {
+        candidates.push('HIP-Spine');
+      }
+    }
+
+    return candidates
+      .map(name =>
+        findBoneByOriginalExact(state.target, [name]) ||
+        findSemanticBone(state.target, name)
+      )
+      .find(Boolean) || '';
+  };
+
+  const pairs = presetData.pairs || [];
+  state.boneMap = pairs.map(entry => ({
+    source: findSemanticBone(state.source, entry.source) || '',
+    target: resolveTarget(entry.target),
+    sourceSpec: entry.source,
+    targetSpec: entry.target,
+    channels: entry.channels || 'ROT',
+    axes: normalizeBlendCapAxes(entry.axes),
+    locSpace: entry.loc_space || 'world',
+    influence: Number.isFinite(Number(entry.influence))
+      ? Number(entry.influence)
+      : 1,
+    profile: definition.targetFamily === 'cloudrig'
+      ? 'blendcap-cloudrig'
+      : `blendcap-${definition.targetFamily}`
+  })).filter(pair => pair.source || pair.target);
+
+  // Official BlendCap maps are the source of truth. Foot Contact Match is a
+  // separate experimental correction and must not modify preset results.
   if ($('footMatch')) $('footMatch').checked = false;
 
+  // CLEAN rewrites CloudRig's special missing-constraint hierarchy.
+  // Other rigs keep their original FBX hierarchy and receive an exact Action.
+  if ($('exportMode')) {
+    $('exportMode').value =
+      definition.targetFamily === 'cloudrig' ? 'clean' : 'exact';
+  }
+
   refreshMapUi();
+  updateButtons();
+  updateStats();
+
+  const resolved = state.boneMap.filter(isPairValid).length;
+  const headLocal = state.boneMap.filter(p => p.locSpace === 'head_local').length;
+
   log(
-    `Preset Mixamo → CloudRig (BlendCap profile): ${state.boneMap.length} pares. ` +
-    'Hips ROT→HIP/HTP-Spine, vertical→TORSO-Spine, horizontal→root; Foot Match OFF.'
+    `Preset ${definition.label}: ${resolved}/${pairs.length} pares resueltos` +
+    (headLocal ? ` · face head_local=${headLocal}` : '') +
+    ` · Target=${definition.targetFamily}.`
   );
 }
 
@@ -540,14 +724,66 @@ function autoMatch() {
 }
 
 function isPairValid(pair) {
-  return !!pair.source && !!pair.target && state.source.bones.has(pair.source) && state.target.bones.has(pair.target);
+  return !!pair.source &&
+    !!pair.target &&
+    state.source.bones.has(pair.source) &&
+    state.target.bones.has(pair.target);
+}
+
+function pairComponentKeys(pair) {
+  const keys = [];
+  const channels = String(pair.channels || 'ROT').toUpperCase();
+  const axes = normalizeBlendCapAxes(pair.axes);
+
+  if (channels.includes('ROT')) keys.push('ROT');
+
+  if (channels.includes('LOC')) {
+    if (axes === 'VERTICAL') {
+      keys.push('LOC_Y');
+    } else if (axes === 'HORIZONTAL') {
+      keys.push('LOC_X', 'LOC_Z');
+    } else {
+      if (axes.includes('X')) keys.push('LOC_X');
+      if (axes.includes('Y')) keys.push('LOC_Y');
+      if (axes.includes('Z')) keys.push('LOC_Z');
+    }
+  }
+
+  return keys.length ? keys : ['ROT'];
+}
+
+function conflictingPairIndexes() {
+  const seen = new Map();
+  const conflicts = new Set();
+
+  state.boneMap.forEach((pair, index) => {
+    if (!isPairValid(pair)) return;
+
+    for (const component of pairComponentKeys(pair)) {
+      const key = `${pair.target}::${component}`;
+      if (seen.has(key)) {
+        conflicts.add(index);
+        conflicts.add(seen.get(key));
+      } else {
+        seen.set(key, index);
+      }
+    }
+  });
+
+  return conflicts;
 }
 
 function validMap() {
-  const seenTarget = new Set();
-  return state.boneMap.filter(p => {
-    if (!isPairValid(p) || seenTarget.has(p.target)) return false;
-    seenTarget.add(p.target);
+  const occupied = new Set();
+
+  return state.boneMap.filter(pair => {
+    if (!isPairValid(pair)) return false;
+
+    const keys = pairComponentKeys(pair)
+      .map(component => `${pair.target}::${component}`);
+
+    if (keys.some(key => occupied.has(key))) return false;
+    keys.forEach(key => occupied.add(key));
     return true;
   });
 }
@@ -566,12 +802,11 @@ function refreshMapUi() {
   host.className = 'bone-map';
   host.innerHTML = '';
   const q = $('mapSearch').value.trim().toLowerCase();
-  const targetUseCount = new Map();
-  state.boneMap.forEach(p => targetUseCount.set(p.target, (targetUseCount.get(p.target) || 0) + 1));
+  const conflicts = conflictingPairIndexes();
 
   state.boneMap.forEach((pair, index) => {
     if (q && !`${pair.source} ${pair.target}`.toLowerCase().includes(q)) return;
-    const duplicate = pair.target && targetUseCount.get(pair.target) > 1;
+    const duplicate = conflicts.has(index);
     const row = document.createElement('div');
     row.className = `map-row ${(!isPairValid(pair) || duplicate) ? 'invalid' : ''}`;
 
@@ -583,7 +818,12 @@ function refreshMapUi() {
 
     const arrow = document.createElement('span');
     arrow.className = 'arrow';
-    arrow.textContent = '→';
+    const channels = pair.channels || 'ROT';
+    const axes = pair.axes && pair.axes !== 'XYZ' ? ` ${pair.axes}` : '';
+    arrow.textContent = `→ ${channels}${axes}`;
+    arrow.title = pair.locSpace === 'head_local'
+      ? 'BlendCap head_local'
+      : 'World/rest delta';
 
     const t = document.createElement('select');
     t.append(new Option('— Target —', ''));
@@ -1334,10 +1574,14 @@ function applyRetarget() {
     if (!map.length) throw new Error('No hay pares válidos en el Bone Map.');
 
     state.fkRawClip = bakeRetarget(map, 'Retargeted_FK_RAW');
-    // Convert the upper body to the pose-basis that the ORIGINAL CloudRig
-    // expects. Keep fkRawClip only for internal FK->IK geometry calculations.
-    // Preview/export use the portable basis clip.
-    state.fkClip = buildOriginalRigTransferClip(state.fkRawClip);
+
+    // CloudRig loses several parenting/hinge constraints in FBX, so its
+    // already-proven path needs the portable pose-basis rewrite. Rigify,
+    // ARP and Mixamo presets keep the generic baked target controls directly.
+    state.fkClip = usesCloudRigPipeline()
+      ? buildOriginalRigTransferClip(state.fkRawClip)
+      : state.fkRawClip.clone();
+
     state.fkClip.name = 'Retargeted_FK';
     state.ikOnlyClip = null;
     state.exportClip = state.fkClip;
@@ -2768,23 +3012,26 @@ function buildOriginalRigLowerFrameClip(sourceClip) {
 function buildOriginalRigControlOnlyClip(clip) {
   if (!clip) return null;
 
-  const allowedControl = /^(root|TORSO-Spine|HIP-Spine|HTP-Spine|FK-|IK-|POLE-)/i;
+  // The official preset itself defines which Target controls belong in the
+  // Action. This is rig-agnostic: Rigify/ARP/Mixamo names no longer get
+  // discarded by CloudRig-specific regexes.
+  const allowedRuntimeNames = new Set(
+    state.boneMap
+      .filter(isPairValid)
+      .map(pair => pair.target)
+  );
+
+  // FK→IK currently exists only for CloudRig. Include its generated controls
+  // even though they were not original FK mapping rows.
+  for (const track of state.ikOnlyClip?.tracks || []) {
+    const parsed = parseTrackTarget(track.name);
+    if (parsed) allowedRuntimeNames.add(parsed.nodeName);
+  }
+
   const tracks = clip.tracks
     .filter(track => {
       const parsed = parseTrackTarget(track.name);
-      if (!parsed) return false;
-
-      const bone = state.target.bones.get(parsed.nodeName);
-      const original = originalObjectName(bone) || parsed.nodeName;
-
-      // Critical separation:
-      // the Action copied back to the ORIGINAL CloudRig must never contain
-      // DEF/STR/P-STR/helper channels. Those are evaluated by the rig itself.
-      if (/^(DEF-|STR-|P-STR-|P-IK-|P-POLE-|IK-M-|SCALE-|ROOT-Thigh)/i.test(original)) {
-        return false;
-      }
-
-      return allowedControl.test(original);
+      return !!parsed && allowedRuntimeNames.has(parsed.nodeName);
     })
     .map(track => track.clone());
 
@@ -2885,7 +3132,7 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
 
   const controlClip = buildOriginalRigControlOnlyClip(state.exportClip);
   if (!controlClip || !controlClip.tracks.length) {
-    throw new Error('No pude construir la Action de controles del CloudRig original.');
+    throw new Error('No pude construir la Action de controles del rig original.');
   }
 
   const originalRigAction = createOriginalNameExportClip(
@@ -2893,27 +3140,16 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
     state.target
   );
 
-  const forbidden = originalRigAction.tracks.filter(track => {
-    const parsed = parseTrackTarget(track.name);
-    return parsed && /^(DEF-|STR-|P-STR-|P-IK-|P-POLE-|IK-M-|SCALE-|ROOT-Thigh)/i.test(parsed.nodeName);
-  });
-
-  if (forbidden.length) {
-    throw new Error(
-      `La Action para rig original contiene ${forbidden.length} tracks helper/DEF; export cancelado.`
-    );
-  }
-
   const result = injectAnimationsIntoOriginalFBX(
     state.target.originalBuffer,
     [{
       clip: originalRigAction,
-      actionName: 'Retargeted_OriginalRig_FK'
+      actionName: 'Retargeted_OriginalRig_FK',
+      includeControlPositions: true
     }],
     {
       rotationMode,
       currentActionName: 'Retargeted_OriginalRig_FK'
-      // No hierarchyRewrite: este carrier conserva el FBX original.
     }
   );
 
@@ -2940,7 +3176,8 @@ async function exportOriginalRigActionFbx() {
 
     setStatus('Action FBX para rig original exportada', 'good');
     log(
-      `OriginalRig Action FBX: 1 stack · ${pkg.action.tracks.length} tracks · helpers/DEF=0 · BlendCap CloudRig profile. ` +
+      `OriginalRig Action FBX: 1 stack · ${pkg.action.tracks.length} tracks · ` +
+      `preset=${state.activePreset?.label || 'manual'}. ` +
       'Importa este FBX sólo para extraer Retargeted_OriginalRig_FK.'
     );
   } catch (err) {
@@ -2957,8 +3194,14 @@ async function exportTargetFbx() {
     setStatus('Exportando FBX…');
 
     const exportClip = createOriginalNameExportClip(state.exportClip, state.target);
-    const exportMode = $('exportMode')?.value || 'exact';
+    let exportMode = $('exportMode')?.value || 'exact';
     const rotationMode = $('rotationMode')?.value || 'xyz';
+
+    if (exportMode === 'clean' && !usesCloudRigPipeline()) {
+      exportMode = 'exact';
+      if ($('exportMode')) $('exportMode').value = 'exact';
+      log('FBX CLEAN es específico de CloudRig; este preset se exportará como FBX EXACTO.');
+    }
 
     let bytes;
     let report = null;
@@ -3018,13 +3261,14 @@ async function exportTargetFbx() {
       const exactActions = [
         {
           clip: exportClip,
-          actionName: exportClip.name || 'Retargeted_FK'
+          actionName: exportClip.name || 'Retargeted_FK',
+          includeControlPositions: true
         }
       ];
 
       let currentActionName = exportClip.name || 'Retargeted_FK';
 
-      if ($('includeDefPreview')?.checked) {
+      if (usesCloudRigPipeline() && $('includeDefPreview')?.checked) {
         const defPreview = bakeDeformPreviewClip();
 
         if (defPreview) {
@@ -3350,7 +3594,7 @@ function updateWorkflowUI() {
 function updateButtons() {
   const ready = !!state.source.root && !!state.target.root && !!state.source.activeClip && validMap().length > 0;
   $('applyRetarget').disabled = !ready;
-  $('convertIk').disabled = !state.fkClip;
+  $('convertIk').disabled = !state.fkClip || !usesCloudRigPipeline();
   $('exportFbx').disabled = !state.exportClip;
   if ($('exportWorkspaceButton')) $('exportWorkspaceButton').disabled = !state.exportClip;
   if ($('exportBlenderAction')) $('exportBlenderAction').disabled = !state.exportClip;
@@ -3444,7 +3688,17 @@ $('targetButton').onclick = () => $('targetFile').click();
 $('fitSource').onclick = () => fitView(sourceView, state.source.displayRoot || state.source.root);
 $('fitTarget').onclick = () => fitView(targetView, state.target.displayRoot || state.target.root);
 $('sourceClip').onchange = () => setSourceClip(Number($('sourceClip').value));
-$('loadPreset').onclick = loadPreset;
+$('loadPreset').onclick = () => void loadPreset();
+$('preset').onchange = () => {
+  state.activePresetId = $('preset').value;
+  if (state.source.root && state.target.root && $('preset').value !== 'none') {
+    void loadPreset();
+  } else if ($('preset').value === 'none') {
+    state.activePreset = null;
+    state.boneMap = [];
+    refreshMapUi();
+  }
+};
 $('autoMatch').onclick = autoMatch;
 $('addPair').onclick = () => {
   state.boneMap.push({ source: '', target: '' });
@@ -3455,8 +3709,12 @@ $('clearMap').onclick = () => {
   refreshMapUi();
 };
 $('mapSearch').oninput = refreshMapUi;
-$('sourcePrefix').onchange = () => $('preset').value === 'cloudrig-sintel' && loadPreset();
-$('targetPrefix').onchange = () => $('preset').value === 'cloudrig-sintel' && loadPreset();
+$('sourcePrefix').onchange = () => {
+  if ($('preset').value !== 'none' && state.source.root && state.target.root) void loadPreset();
+};
+$('targetPrefix').onchange = () => {
+  if ($('preset').value !== 'none' && state.source.root && state.target.root) void loadPreset();
+};
 $('applyRetarget').onclick = applyRetarget;
 $('convertIk').onclick = convertFkToIk;
 $('exportFbx').onclick = exportTargetFbx;
