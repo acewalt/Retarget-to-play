@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt2';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt3';
 import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-original2';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-original3';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1074,7 +1074,12 @@ function applyRetarget() {
     const map = validMap();
     if (!map.length) throw new Error('No hay pares válidos en el Bone Map.');
 
-    state.fkClip = bakeRetarget(map, 'Retargeted_FK');
+    const viewportClip = bakeRetarget(map, 'Retargeted_FK_RAW');
+    // Convert the upper body to the pose-basis that the ORIGINAL CloudRig
+    // expects. The browser runtime reconstructs the same virtual constrained
+    // parent frames, so preview and exported Action now use one representation.
+    state.fkClip = buildOriginalRigTransferClip(viewportClip);
+    state.fkClip.name = 'Retargeted_FK';
     state.ikOnlyClip = null;
     state.exportClip = state.fkClip;
     state.exported = false;
@@ -1294,13 +1299,25 @@ function temporarilyRestoreOriginalNames(root) {
 }
 
 
+// Parent frame that the ORIGINAL CloudRig evaluates through constraints.
+ // This is deliberately different from the raw FBX hierarchy: in the FBX,
+ // Neck/Head/UpperArm live below static FK-HNG branches and Shoulder lives
+ // below the raw Chest branch. The Action we export must contain pose-basis
+ // deltas for the original constrained rig, not raw-FBX local rotations.
 const ORIGINAL_RIG_LOGICAL_PARENT = {
   'FK-Shoulder.L': 'FK-Chest',
   'FK-Shoulder.R': 'FK-Chest',
+
   'FK-Neck': 'FK-Chest',
   'FK-Head': 'FK-Neck',
+
   'FK-UpperArm.L': 'FK-Shoulder.L',
-  'FK-UpperArm.R': 'FK-Shoulder.R'
+  'FK-Forearm.L': 'FK-UpperArm.L',
+  'FK-Hand.L': 'FK-Forearm.L',
+
+  'FK-UpperArm.R': 'FK-Shoulder.R',
+  'FK-Forearm.R': 'FK-UpperArm.R',
+  'FK-Hand.R': 'FK-Forearm.R'
 };
 
 function buildOriginalRigTransferClip(clip) {
