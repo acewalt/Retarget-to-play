@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik3';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik3';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik3';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik4';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik4';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik4';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -616,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyik3',
+      definition.path + '?v=20260920-rigifyik4',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -2487,60 +2487,17 @@ function encodeRigifyControlLocal(
   basisFull.decompose(ignored, basisQ, basisScale);
   basisQ.normalize();
 
-  // BlendCap has a dedicated Rigify path for controls whose Blender bone
-  // has use_local_location=False. Their location channels are expressed in
-  // the parent pose/rest frame, NOT the bone's own rest orientation. A
-  // normal Matrix4.decompose() rotates that translation again and produces
-  // the huge hand/foot offsets seen in Blender.
+  // Stock Rigify generates IK controls with IK Local Location = ON
+  // (params.ik_local_location default=True). For that mode Blender expects
+  // the normal LOCAL basis translation obtained from the full inverse pose
+  // matrix. The previous build forced the use_local_location=False branch
+  // for every hand/foot/pole, which rotated the translation into the wrong
+  // frame and visibly sent pole targets toward the feet.
   //
-  // The generated Rigify IK/pole controls are the problematic family, so
-  // use the authoritative BlendCap back-solve for these names.
-  const original = originalObjectName(control) || controlName;
-  const noLocalLocation =
-    /^(hand_ik|foot_ik|upper_arm_ik_target|thigh_ik_target)\.[LR]$/i
-      .test(original);
-
-  let basisT;
-  if (noLocalLocation) {
-    const restOffset = new THREE.Vector3();
-    const dummyQ = new THREE.Quaternion();
-    const dummyS = new THREE.Vector3();
-    ctrlRelRest.decompose(restOffset, dummyQ, dummyS);
-
-    const restHeadAtPose = restOffset.clone()
-      .applyMatrix4(parentPose);
-
-    const desiredT = new THREE.Vector3();
-    desiredWorld.decompose(
-      desiredT,
-      new THREE.Quaternion(),
-      new THREE.Vector3()
-    );
-
-    const deltaArm = desiredT.sub(restHeadAtPose);
-
-    const parentPoseQ = new THREE.Quaternion();
-    const parentPoseS = new THREE.Vector3();
-    const parentPoseT = new THREE.Vector3();
-    parentPose.decompose(parentPoseT, parentPoseQ, parentPoseS);
-    parentPoseQ.normalize();
-
-    const parentRestQ = new THREE.Quaternion();
-    parentRest.decompose(
-      new THREE.Vector3(),
-      parentRestQ,
-      new THREE.Vector3()
-    );
-    parentRestQ.normalize();
-
-    const frameQ = parentPoseQ.clone()
-      .multiply(parentRestQ.clone().invert())
-      .normalize();
-
-    basisT = deltaArm.applyQuaternion(frameQ.invert());
-  } else {
-    basisT = ignored.clone();
-  }
+  // NOTE: if a custom metarig explicitly disables IK Local Location this
+  // branch would need the alternate BlendCap back-solve. The official
+  // Mixamo -> Rigify preset now targets Rigify's standard generated mode.
+  const basisT = ignored.clone();
 
   const basisMatrix = new THREE.Matrix4().compose(
     basisT,
@@ -2730,8 +2687,8 @@ function bakeRigifyIkFromFk() {
 
   log(
     'FK→IK Rigify: IK=FKpose·FKrest⁻¹·IKrest; ' +
-    'IK_parent=root; POLE parent compensado por MCH-*.parent; ' +
-    'pole_vector debe estar ON en el Rigify original.'
+    'IK_parent=root; IK Local Location=ON; ' +
+    'POLE compensado por MCH-*.parent; pole_vector=ON.'
   );
 
   return new THREE.AnimationClip(
