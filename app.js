@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-legturn1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-legsrollback1';
 import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-legturn1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-legsrollback1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -836,6 +836,13 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     ordered.find(p => /hips$/i.test(originalObjectName(src.bones.get(p.source)) || p.source))?.source ||
     findSemanticBone(src, 'Hips');
 
+  // CloudRig section controls:
+  // - FK-Spine governs the torso/upper section.
+  // - HIP-Spine governs the hips/legs section.
+  // - TORSO-Spine is their common global carrier.
+  // Keep global translation/yaw on TORSO-Spine; do NOT remap the leg FK chain
+  // through FK-Hips/HIP-Spine here, because Foot Contact Match already solved
+  // the lower-body pose correctly before the portable-leg experiment.
   const motionCarrierName =
     findBoneByOriginalExact(tgt, ['TORSO-Spine']) ||
     findBoneByOriginalExact(tgt, ['root']) ||
