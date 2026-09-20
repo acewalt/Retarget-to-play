@@ -1311,6 +1311,7 @@ function exportBlenderXYZAction() {
 
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
   const rotationMode = $('rotationMode')?.value === 'quaternion' ? 'quaternion' : 'xyz';
+  const resumeTime = state.playTime;
   const script = buildBlenderActionScript(
     state.exportClip,
     state.target,
@@ -1319,12 +1320,15 @@ function exportBlenderXYZAction() {
     rotationMode
   );
 
+  playTargetClip(state.targetPreviewClip);
+  seek(resumeTime);
+
   const base = (state.target.fileName || 'target.fbx').replace(/\.fbx$/i, '');
   const suffix = rotationMode === 'quaternion' ? 'Quaternion' : 'XYZ';
   downloadTextFile(script, base + '_Retargeted_' + suffix + '_Blender.py', 'text/x-python');
 
   setStatus('Action para Blender exportada', 'good');
-  log(`Blender Action: ${suffix} generado en matrix_basis para aplicarlo directamente al rig original.`);
+  log(`Blender Action: ${suffix} generado desde deltas WORLD del viewport para el rig original.`);
 }
 
 async function exportTargetFbx() {
@@ -1382,8 +1386,8 @@ async function exportTargetFbx() {
       const clipNames = report.clips.map(c => c.name).join(', ');
       log(
         `FBX EXACTO: Target original + Actions [${clipNames}]. ` +
-        `Stacks=${report.stacks}, CurveNodes=${report.curveNodes}, ` +
-        `Curves=${report.curves}, rotación=${rotationMode === 'xyz' ? 'XYZ Euler' : 'Quaternion/FBX order'}.`
+        `Stacks=${report.stacks}, CurveNodes=${report.curveNodes}, Curves=${report.curves}. ` +
+        'Lcl Rotation preserva RotationOrder y revierte Pre/PostRotation del FBX original.'
       );
     } else {
       state.target.mixer?.stopAllAction();
@@ -1456,6 +1460,38 @@ async function exportTargetFbx() {
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 
+    if (exportMode === 'exact' && $('downloadOriginalRigAction')?.checked) {
+      const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
+      const originalRigRotationMode =
+        $('rotationMode')?.value === 'quaternion' ? 'quaternion' : 'xyz';
+      const resumeTime = state.playTime;
+
+      const script = buildBlenderActionScript(
+        state.exportClip,
+        state.target,
+        fps,
+        originalObjectName,
+        originalRigRotationMode
+      );
+
+      const suffix =
+        originalRigRotationMode === 'quaternion' ? 'Quaternion' : 'XYZ';
+
+      downloadTextFile(
+        script,
+        `${base}_OriginalRig_${suffix}.py`,
+        'text/x-python'
+      );
+
+      playTargetClip(state.targetPreviewClip);
+      seek(resumeTime);
+
+      log(
+        `Action para el rig original descargada en ${suffix}. ` +
+        'No reutilices en el CloudRig original la Action creada al importar el FBX.'
+      );
+    }
+
     playTargetClip(state.targetPreviewClip);
     state.exported = true;
     updateWorkflowUI();
@@ -1497,9 +1533,9 @@ function updateStats() {
   }).length;
 
   const modeLabel = $('exportMode')?.value === 'legacy' ? 'Legacy reconstruido' : 'Exacto · FBX original';
-  const rotationLabel = $('rotationMode')?.value === 'quaternion' ? 'Quaternion / FBX order' : 'XYZ Euler';
+  const rotationLabel = $('rotationMode')?.value === 'quaternion' ? 'Quaternion WXYZ' : 'XYZ Euler';
   const defPreviewLabel = $('includeDefPreview')?.checked ? 'Sí · Action separada' : 'No';
-  const summary = `Action: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nFK: ${fkBones}\nIK/POLE: ${ikBones}\nDEF en Action principal: ${defTracks}\nExport: ${modeLabel}\nRotación: ${rotationLabel}\nDEF Preview: ${defPreviewLabel}`;
+  const summary = `Action: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nFK: ${fkBones}\nIK/POLE: ${ikBones}\nDEF en Action principal: ${defTracks}\nExport: ${modeLabel}\nRig original: ${rotationLabel}\nDEF Preview: ${defPreviewLabel}`;
   $('stats').textContent = summary;
   if (sticky) sticky.textContent = `${state.exportClip.name} · ${state.exportClip.duration.toFixed(2)} s`;
   if (workbench) workbench.textContent = summary;
