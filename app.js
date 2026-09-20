@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-legsrollback2';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-footlock1';
 import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-legsrollback1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-footlock1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -664,7 +664,199 @@ function virtualFkChildPosition(slot, parentName, childName, parentVirtualPositi
   return parentVirtualPosition.clone().add(offset);
 }
 
-function applyFootContactCorrection(src, tgt, side, motionScale) {
+function averageQuaternionSamples(quaternions, start, end) {
+  if (end < start || !quaternions[start]) return new THREE.Quaternion();
+
+  const reference = quaternions[start];
+  let x = 0, y = 0, z = 0, w = 0;
+
+  for (let i = start; i <= end; i++) {
+    const q = quaternions[i];
+    if (!q) continue;
+
+    const sign = reference.dot(q) < 0 ? -1 : 1;
+    x += q.x * sign;
+    y += q.y * sign;
+    z += q.z * sign;
+    w += q.w * sign;
+  }
+
+  const out = new THREE.Quaternion(x, y, z, w);
+  return out.lengthSq() > 1e-12 ? out.normalize() : reference.clone();
+}
+
+function cleanContactFlags(flags, maxGap = 2, minRun = 2) {
+  const out = [...flags];
+
+  // Close tiny one/two-frame gaps. Those are the main source of foot chatter.
+  let i = 0;
+  while (i < out.length) {
+    if (out[i]) { i++; continue; }
+
+    const start = i;
+    while (i < out.length && !out[i]) i++;
+    const end = i - 1;
+    const length = end - start + 1;
+
+    if (
+      length <= maxGap &&
+      start > 0 &&
+      i < out.length &&
+      out[start - 1] &&
+      out[i]
+    ) {
+      for (let j = start; j <= end; j++) out[j] = true;
+    }
+  }
+
+  // Remove isolated false-positive contacts.
+  i = 0;
+  while (i < out.length) {
+    if (!out[i]) { i++; continue; }
+
+    const start = i;
+    while (i < out.length && out[i]) i++;
+    const end = i - 1;
+
+    if (end - start + 1 < minRun) {
+      for (let j = start; j <= end; j++) out[j] = false;
+    }
+  }
+
+  return out;
+}
+
+function buildFootContactPlan(src, side, times) {
+  const semantic = side === 'L' ? 'LeftFoot' : 'RightFoot';
+  const footName = findSemanticBone(src, semantic);
+  const foot = footName ? src.bones.get(footName) : null;
+  const footRest = footName ? src.rest.get(footName) : null;
+
+  const hipsName =
+    findBoneByOriginalExact(src, ['mixamorig1:Hips', 'mixamorig:Hips', 'Hips']) ||
+    findSemanticBone(src, 'Hips');
+  const hipsRest = hipsName ? src.rest.get(hipsName) : null;
+
+  if (!foot || !footRest || !hipsRest || !src.mixer || !times.length) return null;
+
+  const positions = [];
+  const rotations = [];
+
+  for (const time of times) {
+    restoreRest(src);
+    src.mixer.setTime(Number(time));
+    updateSlotWorld(src);
+
+    positions.push(foot.getWorldPosition(new THREE.Vector3()));
+    rotations.push(foot.getWorldQuaternion(new THREE.Quaternion()));
+  }
+
+  restoreRest(src);
+
+  const legLength = Math.max(
+    0.1,
+    hipsRest.worldPos.distanceTo(footRest.worldPos)
+  );
+
+  const floorY = Math.min(...positions.map(p => p.y));
+  const enterHeight = Math.max(0.018, legLength * 0.035);
+  const exitHeight = Math.max(0.032, legLength * 0.065);
+  const enterSpeed = Math.max(0.045, legLength * 0.11);
+  const exitSpeed = Math.max(0.10, legLength * 0.24);
+
+  const speeds = positions.map((p, i) => {
+    if (positions.length < 2) return 0;
+
+    const i0 = Math.max(0, i - 1);
+    const i1 = Math.min(positions.length - 1, i + 1);
+    const dt = Math.max(1e-6, Number(times[i1]) - Number(times[i0]));
+    return positions[i1].distanceTo(positions[i0]) / dt;
+  });
+
+  const raw = [];
+  let planted = false;
+  let enterCount = 0;
+  let exitCount = 0;
+
+  for (let i = 0; i < positions.length; i++) {
+    const height = positions[i].y - floorY;
+    const enter = height <= enterHeight && speeds[i] <= enterSpeed;
+    const stay = height <= exitHeight && speeds[i] <= exitSpeed;
+
+    if (!planted) {
+      enterCount = enter ? enterCount + 1 : 0;
+      if (enterCount >= 2) {
+        planted = true;
+        exitCount = 0;
+      }
+    } else {
+      exitCount = stay ? 0 : exitCount + 1;
+      if (exitCount >= 2) {
+        planted = false;
+        enterCount = 0;
+      }
+    }
+
+    raw.push(planted);
+  }
+
+  const contacts = cleanContactFlags(raw, 2, 2);
+  const weights = new Array(times.length).fill(0);
+  const segmentIds = new Array(times.length).fill(-1);
+  const anchors = new Array(times.length).fill(null);
+
+  let segmentId = 0;
+  let i = 0;
+
+  while (i < contacts.length) {
+    if (!contacts[i]) { i++; continue; }
+
+    const start = i;
+    while (i < contacts.length && contacts[i]) i++;
+    const end = i - 1;
+
+    const anchor = new THREE.Vector3();
+    for (let j = start; j <= end; j++) anchor.add(positions[j]);
+    anchor.multiplyScalar(1 / Math.max(1, end - start + 1));
+
+    const ramp = Math.min(3, Math.floor((end - start + 1) / 2));
+
+    for (let j = start; j <= end; j++) {
+      const inWeight = ramp > 0
+        ? THREE.MathUtils.clamp((j - start + 1) / ramp, 0, 1)
+        : 1;
+      const outWeight = ramp > 0
+        ? THREE.MathUtils.clamp((end - j + 1) / ramp, 0, 1)
+        : 1;
+
+      weights[j] = Math.min(inWeight, outWeight);
+      segmentIds[j] = segmentId;
+      anchors[j] = anchor;
+    }
+
+    segmentId++;
+  }
+
+  return {
+    positions,
+    rotations,
+    weights,
+    segmentIds,
+    anchors,
+    contactFrames: contacts.filter(Boolean).length,
+    totalFrames: contacts.length
+  };
+}
+
+function applyFootContactCorrection(
+  src,
+  tgt,
+  side,
+  motionScale,
+  contactPlan = null,
+  frameIndex = 0,
+  lockState = null
+) {
   if (!$('footMatch')?.checked) return false;
 
   const suffix = side === 'L' ? '.L' : '.R';
@@ -678,6 +870,7 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
   const thighName = findBoneByOriginalExact(tgt, [`FK-Thigh${suffix}`]);
   const kneeName = findBoneByOriginalExact(tgt, [`FK-Knee${suffix}`]);
   const footName = findBoneByOriginalExact(tgt, [`FK-Foot${suffix}`]);
+  const toeName = findBoneByOriginalExact(tgt, [`FK-Toes${suffix}`]);
 
   if (!sourceFoot || !sourceFootRest || !hipName || !thighName || !kneeName || !footName) {
     return false;
@@ -687,6 +880,7 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
   const thigh = tgt.bones.get(thighName);
   const knee = tgt.bones.get(kneeName);
   const foot = tgt.bones.get(footName);
+  const toe = toeName ? tgt.bones.get(toeName) : null;
 
   const thighRest = tgt.rest.get(thighName);
   const kneeRest = tgt.rest.get(kneeName);
@@ -698,15 +892,61 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
 
   // Desired end-effector trajectory: reproduce the Source foot displacement
   // relative to its own rest pose, scaled onto the Target rest foot.
-  const sourceFootWorld = sourceFoot.getWorldPosition(new THREE.Vector3());
+  const sourceFootWorld =
+    contactPlan?.positions?.[frameIndex]?.clone() ||
+    sourceFoot.getWorldPosition(new THREE.Vector3());
+
   const desiredFoot = footRest.worldPos.clone().add(
     sourceFootWorld.clone()
       .sub(sourceFootRest.worldPos)
       .multiplyScalar(motionScale)
   );
 
-  // Preserve the retargeted foot orientation while solving thigh/knee.
+  const contactWeight = THREE.MathUtils.clamp(
+    Number(contactPlan?.weights?.[frameIndex] || 0),
+    0,
+    1
+  );
+  const segmentId = Number(contactPlan?.segmentIds?.[frameIndex] ?? -1);
+  const sourceAnchor = contactPlan?.anchors?.[frameIndex];
+
+  if (sourceAnchor && contactWeight > 0) {
+    const lockedFoot = footRest.worldPos.clone().add(
+      sourceAnchor.clone()
+        .sub(sourceFootRest.worldPos)
+        .multiplyScalar(motionScale)
+    );
+
+    desiredFoot.lerp(lockedFoot, contactWeight);
+  }
+
+  // Preserve/lock orientation while the source foot is actually planted.
+  // This removes the tiny frame-to-frame wobble visible in seated clips.
   const desiredFootWorldQ = foot.getWorldQuaternion(new THREE.Quaternion());
+  const toeWorldQ = toe
+    ? toe.getWorldQuaternion(new THREE.Quaternion())
+    : null;
+  const toeRelativeQ = toeWorldQ
+    ? desiredFootWorldQ.clone().invert().multiply(toeWorldQ).normalize()
+    : null;
+
+  if (lockState) {
+    if (segmentId >= 0 && lockState.segmentId !== segmentId) {
+      lockState.segmentId = segmentId;
+      lockState.footQuaternion = desiredFootWorldQ.clone();
+      lockState.toeRelativeQuaternion = toeRelativeQ?.clone() || null;
+      lockState.bendDirection = null;
+    } else if (segmentId < 0) {
+      lockState.segmentId = -1;
+      lockState.footQuaternion = null;
+      lockState.toeRelativeQuaternion = null;
+      lockState.bendDirection = null;
+    }
+
+    if (contactWeight > 0 && lockState.footQuaternion) {
+      desiredFootWorldQ.slerp(lockState.footQuaternion, contactWeight);
+    }
+  }
 
   const hipVirtual = hip.getWorldPosition(new THREE.Vector3());
   const A = virtualFkChildPosition(tgt, hipName, thighName, hipVirtual);
@@ -752,6 +992,18 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
     bendDir.negate();
   }
 
+  if (lockState && contactWeight > 0) {
+    if (!lockState.bendDirection) {
+      lockState.bendDirection = bendDir.clone();
+    } else {
+      if (lockState.bendDirection.dot(bendDir) < 0) bendDir.negate();
+      bendDir.lerp(
+        lockState.bendDirection,
+        THREE.MathUtils.clamp(contactWeight * 0.9, 0, 0.9)
+      ).normalize();
+    }
+  }
+
   const x = (l1 * l1 - l2 * l2 + distance * distance) / (2 * distance);
   const h = Math.sqrt(Math.max(0, l1 * l1 - x * x));
 
@@ -792,6 +1044,32 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
   // Keep the foot orientation from the source retarget instead of inheriting
   // the correction rotations of thigh/knee.
   setBoneWorldQuaternion(tgt, foot, desiredFootWorldQ);
+
+  // FK-Toes is a separate control in CloudRig. If the foot correction moves
+  // the leg without rebuilding the toe relative to the corrected foot, the
+  // toe can appear to twist (especially FK-Toes.R in turning/dance clips).
+  if (toe && toeRelativeQ) {
+    let stabilizedToeRelative = toeRelativeQ.clone();
+
+    if (
+      lockState &&
+      contactWeight > 0 &&
+      lockState.toeRelativeQuaternion
+    ) {
+      stabilizedToeRelative.slerp(
+        lockState.toeRelativeQuaternion,
+        contactWeight
+      );
+    }
+
+    const finalFootWorldQ = foot.getWorldQuaternion(new THREE.Quaternion());
+    const finalToeWorldQ = finalFootWorldQ
+      .clone()
+      .multiply(stabilizedToeRelative)
+      .normalize();
+
+    setBoneWorldQuaternion(tgt, toe, finalToeWorldQ);
+  }
 
   return true;
 }
@@ -877,7 +1155,27 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     src.action = src.mixer.clipAction(clip).play();
   }
 
-  for (const time of times) {
+  const footContactPlans = {
+    L: buildFootContactPlan(src, 'L', times),
+    R: buildFootContactPlan(src, 'R', times)
+  };
+
+  const footLockState = {
+    L: { segmentId: -1, footQuaternion: null, toeRelativeQuaternion: null, bendDirection: null },
+    R: { segmentId: -1, footQuaternion: null, toeRelativeQuaternion: null, bendDirection: null }
+  };
+
+  for (const side of ['L', 'R']) {
+    const plan = footContactPlans[side];
+    if (plan) {
+      log(
+        `Foot lock ${side}: ${plan.contactFrames}/${plan.totalFrames} frames detectados como apoyo.`
+      );
+    }
+  }
+
+  for (let frameIndex = 0; frameIndex < times.length; frameIndex++) {
+    const time = times[frameIndex];
     restoreRest(src);
     src.mixer.setTime(time);
     updateSlotWorld(src);
@@ -992,8 +1290,24 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
     // End-effector correction for feet. This pass keeps the source foot
     // trajectory/contact while preserving FK controls as the actual output.
-    applyFootContactCorrection(src, tgt, 'L', motionScale);
-    applyFootContactCorrection(src, tgt, 'R', motionScale);
+    applyFootContactCorrection(
+      src,
+      tgt,
+      'L',
+      motionScale,
+      footContactPlans.L,
+      frameIndex,
+      footLockState.L
+    );
+    applyFootContactCorrection(
+      src,
+      tgt,
+      'R',
+      motionScale,
+      footContactPlans.R,
+      frameIndex,
+      footLockState.R
+    );
 
     for (const pair of ordered) {
       const bone = tgt.bones.get(pair.target);
