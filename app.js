@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt2';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-action3';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-upper4';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-original1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1293,6 +1293,153 @@ function temporarilyRestoreOriginalNames(root) {
   };
 }
 
+
+const ORIGINAL_RIG_LOGICAL_PARENT = {
+  'FK-Shoulder.L': 'FK-Chest',
+  'FK-Shoulder.R': 'FK-Chest',
+  'FK-Neck': 'FK-Chest',
+  'FK-Head': 'FK-Neck',
+  'FK-UpperArm.L': 'FK-Shoulder.L',
+  'FK-UpperArm.R': 'FK-Shoulder.R'
+};
+
+function buildOriginalRigTransferClip(clip) {
+  const tgt = state.target;
+  if (!clip || !tgt.root) return clip;
+
+  const runtimePairs = new Map();
+
+  for (const [childOriginal, parentOriginal] of Object.entries(ORIGINAL_RIG_LOGICAL_PARENT)) {
+    const childName = findBoneByOriginalExact(tgt, [childOriginal]);
+    const parentName = findBoneByOriginalExact(tgt, [parentOriginal]);
+
+    if (childName && parentName) {
+      runtimePairs.set(childName, {
+        childOriginal,
+        parentOriginal,
+        parentName
+      });
+    }
+  }
+
+  if (!runtimePairs.size) return clip.clone();
+
+  const sourceTracks = clip.tracks.map(track => track.clone());
+  const specialTracks = sourceTracks.filter(track => {
+    const parsed = parseTrackTarget(track.name);
+    return parsed?.property === 'quaternion' && runtimePairs.has(parsed.nodeName);
+  });
+
+  if (!specialTracks.length) return clip.clone();
+
+  restoreRest(tgt);
+  tgt.mixer?.stopAllAction();
+
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(clip).play();
+
+  const replacement = new Map();
+
+  try {
+    for (const track of specialTracks) {
+      const parsed = parseTrackTarget(track.name);
+      const childName = parsed.nodeName;
+      const pair = runtimePairs.get(childName);
+
+      const child = tgt.bones.get(childName);
+      const parent = tgt.bones.get(pair.parentName);
+      const childRest = tgt.rest.get(childName);
+      const parentRest = tgt.rest.get(pair.parentName);
+
+      if (!child || !parent || !childRest || !parentRest) continue;
+
+      const restRelative = parentRest.worldQuat.clone()
+        .invert()
+        .multiply(childRest.worldQuat)
+        .normalize();
+
+      const restRelativeInv = restRelative.clone().invert();
+      const values = [];
+
+      const childWorld = new THREE.Quaternion();
+      const parentWorld = new THREE.Quaternion();
+      const poseRelative = new THREE.Quaternion();
+      const basisDelta = new THREE.Quaternion();
+      const exportLocal = new THREE.Quaternion();
+
+      let previous = null;
+
+      for (const time of track.times) {
+        restoreRest(tgt);
+        mixer.setTime(Number(time));
+        updateSlotWorld(tgt);
+
+        child.getWorldQuaternion(childWorld);
+        parent.getWorldQuaternion(parentWorld);
+
+        poseRelative.copy(parentWorld)
+          .invert()
+          .multiply(childWorld)
+          .normalize();
+
+        // logicalPose = logicalRest * matrixBasis
+        // => matrixBasis = inverse(logicalRest) * logicalPose
+        basisDelta.copy(restRelativeInv)
+          .multiply(poseRelative)
+          .normalize();
+
+        // The FBX control itself still lives below its static HNG branch.
+        // Write restLocal * matrixBasis so Blender's FBX importer recovers
+        // the same pose-channel delta when this Action is assigned to the
+        // ORIGINAL rig, where the HNG/constraints move with Chest/Shoulder.
+        exportLocal.copy(childRest.quaternion)
+          .multiply(basisDelta)
+          .normalize();
+
+        if (previous && previous.dot(exportLocal) < 0) {
+          exportLocal.x *= -1;
+          exportLocal.y *= -1;
+          exportLocal.z *= -1;
+          exportLocal.w *= -1;
+        }
+
+        values.push(
+          exportLocal.x,
+          exportLocal.y,
+          exportLocal.z,
+          exportLocal.w
+        );
+
+        previous = exportLocal.clone();
+      }
+
+      replacement.set(
+        track.name,
+        new THREE.QuaternionKeyframeTrack(
+          track.name,
+          Array.from(track.times),
+          values
+        )
+      );
+
+      log(
+        `OriginalRig basis: ${pair.childOriginal} relativo a ${pair.parentOriginal}.`
+      );
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    restoreRest(tgt);
+  }
+
+  const tracks = sourceTracks.map(track => replacement.get(track.name) || track);
+
+  return new THREE.AnimationClip(
+    clip.name || 'Retargeted_FK',
+    clip.duration,
+    tracks
+  );
+}
 
 function downloadTextFile(text, fileName, mime = 'text/plain') {
   const blob = new Blob([text], { type: mime });
