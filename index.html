@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-presets2" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-rigifyik1" />
   <script type="importmap">
   {
     "imports": {
@@ -270,7 +270,7 @@
               <input id="keepFk" class="switch" type="checkbox" checked />
             </label>
             <button id="convertIk" class="wide-button" type="button" disabled>Convertir FK → IK</button>
-            <p class="hint">Usa el mismo principio de BlendCap: muestrea el FK evaluado del Target, calcula IK = FK pose × FK rest⁻¹ × IK rest y genera POLE desde la geometría de la cadena. En CloudRig las curvas se codifican contra sus parents funcionales.</p>
+            <p class="hint">Usa el mismo principio de BlendCap: muestrea el FK evaluado del Target, calcula IK = FK pose × FK rest⁻¹ × IK rest y genera POLE desde la geometría de la cadena. CloudRig y Rigify codifican las curvas contra sus parents funcionales reales.</p>
           </section>
 
           <section class="settings-section">
@@ -294,7 +294,7 @@
               <option value="quaternion" selected>Quaternion · WXYZ · recomendado</option>
             </select>
 
-            <p class="hint">Para probar POLE-Leg como POLE-Arm en el CloudRig original, deja <b>IK Pole Follow = 0</b> en ambas piernas. El .py generado lo configura automáticamente; si sólo copias la Action desde el FBX, pon esos dos sliders en 0 antes de comparar.</p>
+            <p class="hint">CloudRig: deja <b>IK Pole Follow = 0</b> en las piernas. Rigify: para una Action IK copiada desde el FBX, pon <b>IK_FK = 1</b> y <b>pole_vector = ON</b> en upper_arm_parent.L/R y thigh_parent.L/R. El .py generado configura estos switches automáticamente.</p>
             <button id="exportBlenderAction" class="wide-button" type="button" disabled>Exportar Action .py para rig original</button>
             <button id="exportOriginalRigFbxAction" class="wide-button" type="button" disabled>Exportar FBX Action para rig original</button>
 
@@ -331,6 +331,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-presets2"></script>
+  <script type="module" src="./app.js?v=20260920-rigifyik1"></script>
 </body>
 </html>
