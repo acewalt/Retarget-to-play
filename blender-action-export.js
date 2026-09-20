@@ -85,6 +85,17 @@ function threeVectorToBlender(v) {
   return v.clone().applyQuaternion(THREE_TO_BLENDER_Q);
 }
 
+const LOCAL_BASIS_CONTROLS = new Set([
+  'FK-Shoulder.L',
+  'FK-Shoulder.R',
+  'FK-Neck',
+  'FK-Head'
+]);
+
+function controlUsesLocalBasis(name) {
+  return LOCAL_BASIS_CONTROLS.has(String(name || ''));
+}
+
 /**
  * Samples the exact pose that is visible in the web viewport and stores it as
  * WORLD/armature-space deltas relative to each control's rest pose.
@@ -112,11 +123,13 @@ export function buildBlenderWorldDeltaActionData(
   const records = new Map();
   for (const entry of active) {
     const bone = slot.bones.get(entry.nodeName);
+    const boneName = originalName(bone) || entry.nodeName;
     records.set(entry.nodeName, {
       runtimeName: entry.nodeName,
-      bone: originalName(bone) || entry.nodeName,
+      bone: boneName,
       rotation: entry.rotation,
       position: entry.position,
+      rotationSpace: controlUsesLocalBasis(boneName) ? 'basis' : 'world',
       rotationDeltas: [],
       positionDeltas: []
     });
@@ -140,10 +153,23 @@ export function buildBlenderWorldDeltaActionData(
         if (!bone || !rest || !out) continue;
 
         if (entry.rotation) {
-          const currentWorld = bone.getWorldQuaternion(new THREE.Quaternion());
-          const deltaThree = currentWorld
-            .multiply(rest.worldQuat.clone().invert())
-            .normalize();
+          let deltaThree;
+
+          if (out.rotationSpace === 'basis') {
+            // Shoulder/Neck/Head are control bones. Their original Blender rig
+            // already has the correct parent/hinge/constraint context.
+            // Export only the local pose-basis delta so Chest/hinges are not
+            // applied a second time when the Action is used on RIG-Sintel.
+            deltaThree = rest.quaternion.clone()
+              .invert()
+              .multiply(bone.quaternion)
+              .normalize();
+          } else {
+            const currentWorld = bone.getWorldQuaternion(new THREE.Quaternion());
+            deltaThree = currentWorld
+              .multiply(rest.worldQuat.clone().invert())
+              .normalize();
+          }
 
           const deltaBlender = threeDeltaQuaternionToBlender(deltaThree);
 
@@ -273,22 +299,32 @@ export function buildBlenderActionScript(
     "        if item.get('rotation') and sample_index < len(item.get('rotationDeltas', [])):",
     "            w, x, y, z = item['rotationDeltas'][sample_index]",
     '            delta = Quaternion((w, x, y, z))',
-    '            rest_q = pb.bone.matrix_local.to_quaternion()',
-    '            desired_q = delta @ rest_q',
+    "            rotation_space = item.get('rotationSpace', 'world')",
     '',
-    '            # Keep the head where the ORIGINAL rig currently places it',
-    '            # (parents/hinges/constraints), but force the visual orientation',
-    '            # to the exact web-space delta applied to the original rest bone.',
-    '            desired = desired_q.to_matrix().to_4x4()',
-    '            desired.translation = pb.matrix.translation.copy()',
-    '',
-    "            if rotation_mode == 'quaternion':",
-    "                pb.rotation_mode = 'QUATERNION'",
+    "            if rotation_space == 'basis':",
+    '                # FK-Shoulder.L/R, FK-Neck and FK-Head:',
+    '                # let the ORIGINAL rig supply Chest/hinge inheritance and',
+    '                # key only the control basis rotation.',
+    "                if rotation_mode == 'quaternion':",
+    "                    pb.rotation_mode = 'QUATERNION'",
+    '                    pb.rotation_quaternion = delta',
+    '                else:',
+    "                    pb.rotation_mode = 'XYZ'",
+    "                    pb.rotation_euler = delta.to_euler('XYZ')",
+    '                view_layer.update()',
     '            else:',
-    "                pb.rotation_mode = 'XYZ'",
+    '                rest_q = pb.bone.matrix_local.to_quaternion()',
+    '                desired_q = delta @ rest_q',
+    '                desired = desired_q.to_matrix().to_4x4()',
+    '                desired.translation = pb.matrix.translation.copy()',
     '',
-    '            pb.matrix = desired',
-    '            view_layer.update()',
+    "                if rotation_mode == 'quaternion':",
+    "                    pb.rotation_mode = 'QUATERNION'",
+    '                else:',
+    "                    pb.rotation_mode = 'XYZ'",
+    '',
+    '                pb.matrix = desired',
+    '                view_layer.update()',
     '',
     "            if rotation_mode == 'quaternion':",
     "                pb.keyframe_insert(data_path='rotation_quaternion', frame=frame, group=item['bone'])",
@@ -315,6 +351,7 @@ export function buildBlenderActionScript(
     '',
     'scene.frame_set(0)',
     "print('[Retarget-to-play] Original rig Action ready:', action.name)",
+    "print('[Retarget-to-play] Local-basis upper controls: FK-Shoulder.L, FK-Shoulder.R, FK-Neck, FK-Head)",
     ''
   ].join('\\n');
 }
