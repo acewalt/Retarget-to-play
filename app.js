@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt4';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-legturn1';
 import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-original4';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-legturn1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1417,7 +1417,20 @@ const ORIGINAL_RIG_LOGICAL_PARENT = {
 
   'FK-UpperArm.R': 'FK-Shoulder.R',
   'FK-Forearm.R': 'FK-UpperArm.R',
-  'FK-Hand.R': 'FK-Forearm.R'
+  'FK-Hand.R': 'FK-Forearm.R',
+
+  // CloudRig legs are the same kind of special case as the arms:
+  // FK-Thigh lives below a separate FK-HNG-Thigh branch in the raw FBX,
+  // while the ORIGINAL rig evaluates it from the hips through constraints.
+  'FK-Thigh.L': 'FK-Hips',
+  'FK-Knee.L': 'FK-Thigh.L',
+  'FK-Foot.L': 'FK-Knee.L',
+  'FK-Toes.L': 'FK-Foot.L',
+
+  'FK-Thigh.R': 'FK-Hips',
+  'FK-Knee.R': 'FK-Thigh.R',
+  'FK-Foot.R': 'FK-Knee.R',
+  'FK-Toes.R': 'FK-Foot.R'
 };
 
 function buildOriginalRigTransferClip(clip) {
