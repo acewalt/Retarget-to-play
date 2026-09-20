@@ -1425,19 +1425,6 @@ const ORIGINAL_RIG_LOGICAL_PARENT = {
   'FK-UpperArm.R': 'FK-Shoulder.R',
   'FK-Forearm.R': 'FK-UpperArm.R',
   'FK-Hand.R': 'FK-Forearm.R',
-
-  // CloudRig legs are the same kind of special case as the arms:
-  // FK-Thigh lives below a separate FK-HNG-Thigh branch in the raw FBX,
-  // while the ORIGINAL rig evaluates it from the hips through constraints.
-  'FK-Thigh.L': 'FK-Hips',
-  'FK-Knee.L': 'FK-Thigh.L',
-  'FK-Foot.L': 'FK-Knee.L',
-  'FK-Toes.L': 'FK-Foot.L',
-
-  'FK-Thigh.R': 'FK-Hips',
-  'FK-Knee.R': 'FK-Thigh.R',
-  'FK-Foot.R': 'FK-Knee.R',
-  'FK-Toes.R': 'FK-Foot.R'
 };
 
 function buildOriginalRigTransferClip(clip) {
