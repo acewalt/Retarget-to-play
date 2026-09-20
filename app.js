@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rootsplit1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-splitactions1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-splitactions1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-splitfiles1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-splitfiles1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1954,6 +1954,75 @@ function exportBlenderXYZAction() {
   log(`Blender Action: ${suffix} generado desde deltas WORLD del viewport para el rig original.`);
 }
 
+async function exportOriginalRigActionFbx() {
+  if (!state.target.root || !state.exportClip || !state.target.originalBuffer) return;
+
+  try {
+    setStatus('Exportando Action FBX para rig original…');
+
+    const rotationMode = $('rotationMode')?.value || 'xyz';
+    const controlClip = buildOriginalRigControlOnlyClip(state.exportClip);
+
+    if (!controlClip || !controlClip.tracks.length) {
+      throw new Error('No pude construir la Action de controles del CloudRig original.');
+    }
+
+    const originalRigAction = createOriginalNameExportClip(
+      controlClip,
+      state.target
+    );
+
+    const defTracks = originalRigAction.tracks.filter(track => {
+      const parsed = parseTrackTarget(track.name);
+      return parsed && /^DEF-/i.test(parsed.nodeName);
+    });
+
+    if (defTracks.length) {
+      throw new Error(
+        `La Action para rig original contiene ${defTracks.length} tracks DEF; export cancelado.`
+      );
+    }
+
+    const result = injectAnimationsIntoOriginalFBX(
+      state.target.originalBuffer,
+      [{
+        clip: originalRigAction,
+        actionName: 'Retargeted_OriginalRig_FK'
+      }],
+      {
+        rotationMode,
+        currentActionName: 'Retargeted_OriginalRig_FK'
+        // IMPORTANT: no hierarchyRewrite here.
+        // This carrier preserves the original FBX hierarchy/rest so Blender
+        // imports the Action against the same control basis expected by the
+        // original RIG-Sintel.
+      }
+    );
+
+    const blob = new Blob([result.bytes], { type: 'application/octet-stream' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    const base = (state.target.fileName || 'target.fbx').replace(/\.fbx$/i, '');
+
+    a.href = url;
+    a.download = `${base}_OriginalRig_Action.fbx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+
+    setStatus('Action FBX para rig original exportada', 'good');
+    log(
+      `OriginalRig Action FBX: 1 stack · ${originalRigAction.tracks.length} tracks · DEF=0. ` +
+      'Importa este FBX sólo para extraer Retargeted_OriginalRig_FK.'
+    );
+  } catch (err) {
+    console.error(err);
+    setStatus('Error exportando Action FBX', 'bad');
+    log(`ERROR OriginalRig FBX: ${err?.stack || err?.message || err}`);
+  }
+}
+
 async function exportTargetFbx() {
   if (!state.target.root || !state.exportClip) return;
 
@@ -1997,21 +2066,14 @@ async function exportTargetFbx() {
 
       const result = injectAnimationsIntoOriginalFBX(
         state.target.originalBuffer,
-        [
-          {
-            clip: originalRigAction,
-            actionName: 'Retargeted_OriginalRig_FK'
-          },
-          {
-            clip: originalStandalone,
-            actionName: 'Retargeted_Standalone',
-            includeDeformPositions: true,
-            includeControlPositions: true
-          }
-        ],
+        [{
+          clip: originalStandalone,
+          actionName: 'Retargeted_Standalone',
+          includeDeformPositions: true,
+          includeControlPositions: true
+        }],
         {
           rotationMode,
-          // Open/import the FBX using the self-contained preview Action.
           currentActionName: 'Retargeted_Standalone',
           hierarchyRewrite: clean.hierarchy
         }
@@ -2020,17 +2082,10 @@ async function exportTargetFbx() {
       bytes = result.bytes;
       report = result.report;
 
-      const originalRigDefTracks = originalRigAction.tracks.filter(track => {
-        const parsed = parseTrackTarget(track.name);
-        return parsed && /^DEF-/i.test(parsed.nodeName);
-      }).length;
-
       log(
         `FBX CLEAN: jerarquía FK reescrita=${report.hierarchy?.rewired || 0}; ` +
-        `Standalone=${clean.controlTracks + clean.defTracks} tracks ` +
-        `(DEF baked=${clean.defTracks}); OriginalRig_FK=${originalRigAction.tracks.length} tracks, ` +
-        `DEF en OriginalRig_FK=${originalRigDefTracks}. ` +
-        'Para el .blend original usa Retargeted_OriginalRig_FK, NO Retargeted_Standalone.'
+        `Retargeted_Standalone=${clean.controlTracks + clean.defTracks} tracks ` +
+        `(DEF baked=${clean.defTracks}). Este FBX contiene UNA Action standalone por diseño.`
       );
     } else if (exportMode === 'exact') {
       const exactActions = [
@@ -2360,6 +2415,7 @@ function updateButtons() {
   $('exportFbx').disabled = !state.exportClip;
   if ($('exportWorkspaceButton')) $('exportWorkspaceButton').disabled = !state.exportClip;
   if ($('exportBlenderAction')) $('exportBlenderAction').disabled = !state.exportClip;
+  if ($('exportOriginalRigFbxAction')) $('exportOriginalRigFbxAction').disabled = !state.exportClip;
   updateWorkflowUI();
 }
 
@@ -2467,6 +2523,7 @@ $('convertIk').onclick = convertFkToIk;
 $('exportFbx').onclick = exportTargetFbx;
 $('exportWorkspaceButton').onclick = exportTargetFbx;
 $('exportBlenderAction').onclick = exportBlenderXYZAction;
+$('exportOriginalRigFbxAction').onclick = exportOriginalRigActionFbx;
 
 $('exportMode')?.addEventListener('change', updateStats);
 $('rotationMode')?.addEventListener('change', updateStats);
