@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-splitfiles1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-twodownloads1" />
   <script type="importmap">
   {
     "imports": {
@@ -296,7 +296,7 @@
               <input id="includeDefPreview" class="switch" type="checkbox" checked />
             </label>
 
-            <p class="hint">FBX CLEAN contiene sólo Retargeted_Standalone y mueve su propia malla con DEF baked. Para el RIG-Sintel original usa “Exportar FBX Action para rig original”: genera otro FBX con una sola Action, Retargeted_OriginalRig_FK, y DEF=0.</p>
+            <p class="hint">FBX CLEAN descarga dos archivos automáticamente: *_retarget_clean.fbx con Retargeted_Standalone para comprobar malla/animación, y *_OriginalRig_Action.fbx con una sola Action Retargeted_OriginalRig_FK, sin DEF ni helpers, para copiar al RIG-Sintel original.</p>
           </section>
 
           <details class="diagnostics">
@@ -310,13 +310,13 @@
             <span class="eyebrow">READY TO EXPORT</span>
             <strong id="exportStickyStatus">Sin retarget generado</strong>
           </div>
-          <button id="exportFbx" class="export-button" type="button" disabled><span>⇩</span> Exportar Target FBX + Action</button>
+          <button id="exportFbx" class="export-button" type="button" disabled><span>⇩</span> Exportar FBX CLEAN + Action Original</button>
           <div class="stats" id="stats">Sin retarget generado.</div>
         </div>
       </aside>
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-splitfiles1"></script>
+  <script type="module" src="./app.js?v=20260920-twodownloads1"></script>
 </body>
 </html>
