@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt3';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rt4';
 import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-original3';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-original4';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1100,8 +1100,13 @@ function applyRetarget() {
     log(`Retarget FK: ${map.length} controles FK, ${state.fkClip.tracks.length} curvas TRS, ${Number($('fps').value) || 30} FPS. Action DEF=0. WaltRig Runtime FK→DEF=${rt ? `${rt.bindings}/${rt.requestedBindings}` : 'n/a'}.`);
   } catch (err) {
     console.error(err);
+    state.fkClip = null;
+    state.exportClip = null;
+    state.targetPreviewClip = null;
+    updateButtons();
+    updateWorkflowUI();
     setStatus('Error de retarget', 'bad');
-    log(`ERROR Retarget: ${err.message}`);
+    log(`ERROR Retarget: ${err?.stack || err?.message || err}`);
   }
 }
 
@@ -1306,6 +1311,15 @@ function temporarilyRestoreOriginalNames(root) {
  // Neck/Head/UpperArm live below static FK-HNG branches and Shoulder lives
  // below the raw Chest branch. The Action we export must contain pose-basis
  // deltas for the original constrained rig, not raw-FBX local rotations.
+function parseTrackTarget(trackName) {
+  const dot = String(trackName || '').lastIndexOf('.');
+  if (dot <= 0) return null;
+  return {
+    nodeName: trackName.slice(0, dot),
+    property: trackName.slice(dot + 1)
+  };
+}
+
 const ORIGINAL_RIG_LOGICAL_PARENT = {
   'FK-Shoulder.L': 'FK-Chest',
   'FK-Shoulder.R': 'FK-Chest',
