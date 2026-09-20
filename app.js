@@ -2165,7 +2165,12 @@ function updateStats() {
     return /^DEF-/i.test(original);
   }).length;
 
-  const modeLabel = $('exportMode')?.value === 'legacy' ? 'Legacy reconstruido' : 'Exacto · FBX original';
+  const exportModeValue = $('exportMode')?.value || 'clean';
+  const modeLabel = exportModeValue === 'clean'
+    ? 'Clean · FK rejerarquizado + DEF baked'
+    : exportModeValue === 'legacy'
+      ? 'Legacy reconstruido'
+      : 'Exacto · FBX original';
   const rotationLabel = $('rotationMode')?.value === 'quaternion' ? 'Quaternion WXYZ' : 'XYZ Euler';
   const defPreviewLabel = $('includeDefPreview')?.checked ? 'Sí · Action separada' : 'No';
   const summary = `Action: ${state.exportClip.name}\nDuración: ${state.exportClip.duration.toFixed(3)} s\nCurvas: ${state.exportClip.tracks.length}\nFK: ${fkBones}\nIK/POLE: ${ikBones}\nDEF en Action principal: ${defTracks}\nExport: ${modeLabel}\nRig original: ${rotationLabel}\nDEF Preview: ${defPreviewLabel}`;
