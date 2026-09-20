@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rootsplit1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-twodownloads1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-twodownloads1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-originalhip1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-originalhip1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -1853,10 +1853,198 @@ function bakeCleanHierarchyControlClip(sourceClip, rewritePlan) {
   );
 }
 
+function buildOriginalRigLowerFrameClip(sourceClip) {
+  const tgt = state.target;
+  const runtime = tgt.rigRuntime;
+
+  if (!tgt.root || !sourceClip) return sourceClip;
+
+  const lowerName =
+    findBoneByOriginalExact(tgt, ['HIP-Spine', 'HTP-Spine']);
+  const hipsName = findBoneByOriginalExact(tgt, ['FK-Hips']);
+
+  if (!lowerName || !hipsName) {
+    log('OriginalRig lower frame: HIP/HTP-Spine o FK-Hips no encontrado; se conserva la Action anterior.');
+    return sourceClip.clone();
+  }
+
+  const lower = tgt.bones.get(lowerName);
+  const hips = tgt.bones.get(hipsName);
+  const hipsRest = tgt.rest.get(hipsName);
+
+  if (!lower || !hips || !hipsRest) return sourceClip.clone();
+
+  const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
+  const frameCount = Math.max(2, Math.ceil(sourceClip.duration * fps) + 1);
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(sourceClip.duration, i / fps)
+  );
+
+  restoreRest(tgt);
+  updateSlotWorld(tgt);
+
+  const lowerRestWorld = lower.matrixWorld.clone();
+  const hipsRestWorld = hips.matrixWorld.clone();
+  const hipsRestRelative = lowerRestWorld.clone()
+    .invert()
+    .multiply(hipsRestWorld);
+  const hipsRestRelativeInv = hipsRestRelative.clone().invert();
+
+  const lowerP = [];
+  const lowerQ = [];
+  const lowerS = [];
+  const neutralHipsQ = [];
+  let previousLowerQ = null;
+
+  const tracks = sourceClip.tracks
+    .filter(track => {
+      const parsed = parseTrackTarget(track.name);
+      if (!parsed) return true;
+
+      if (parsed.nodeName === lowerName &&
+          ['position', 'quaternion', 'scale'].includes(parsed.property)) {
+        return false;
+      }
+
+      if (parsed.nodeName === hipsName &&
+          parsed.property === 'quaternion') {
+        return false;
+      }
+
+      return true;
+    })
+    .map(track => track.clone());
+
+  tgt.mixer?.stopAllAction();
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(sourceClip).play();
+
+  const previousRuntimeEnabled = runtime?.enabled;
+  if (runtime) runtime.enabled = true;
+
+  const desiredHipsWorld = new THREE.Matrix4();
+  const desiredLowerWorld = new THREE.Matrix4();
+  const desiredLowerLocal = new THREE.Matrix4();
+
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+
+  try {
+    for (const time of times) {
+      restoreRest(tgt);
+      mixer.setTime(Number(time));
+      updateSlotWorld(tgt);
+
+      runtime?.update?.();
+      updateSlotWorld(tgt);
+
+      if (!poseMatrixForCleanHierarchy(
+        tgt,
+        runtime,
+        hipsName,
+        desiredHipsWorld
+      )) {
+        continue;
+      }
+
+      desiredLowerWorld.copy(desiredHipsWorld)
+        .multiply(hipsRestRelativeInv);
+
+      if (lower.parent) {
+        desiredLowerLocal.copy(lower.parent.matrixWorld)
+          .invert()
+          .multiply(desiredLowerWorld);
+      } else {
+        desiredLowerLocal.copy(desiredLowerWorld);
+      }
+
+      desiredLowerLocal.decompose(p, q, s);
+      q.normalize();
+
+      if (previousLowerQ && previousLowerQ.dot(q) < 0) {
+        q.x *= -1;
+        q.y *= -1;
+        q.z *= -1;
+        q.w *= -1;
+      }
+      previousLowerQ = q.clone();
+
+      lowerP.push(p.x, p.y, p.z);
+      lowerQ.push(q.x, q.y, q.z, q.w);
+      lowerS.push(s.x, s.y, s.z);
+
+      neutralHipsQ.push(
+        hipsRest.quaternion.x,
+        hipsRest.quaternion.y,
+        hipsRest.quaternion.z,
+        hipsRest.quaternion.w
+      );
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    if (runtime) runtime.enabled = previousRuntimeEnabled;
+    restoreRest(tgt);
+  }
+
+  if (lowerP.length === times.length * 3) {
+    tracks.push(
+      new THREE.VectorKeyframeTrack(
+        `${lowerName}.position`,
+        times,
+        lowerP
+      )
+    );
+  }
+
+  if (lowerQ.length === times.length * 4) {
+    tracks.push(
+      new THREE.QuaternionKeyframeTrack(
+        `${lowerName}.quaternion`,
+        times,
+        lowerQ
+      )
+    );
+  }
+
+  if (lowerS.length === times.length * 3) {
+    tracks.push(
+      new THREE.VectorKeyframeTrack(
+        `${lowerName}.scale`,
+        times,
+        lowerS
+      )
+    );
+  }
+
+  if (neutralHipsQ.length === times.length * 4) {
+    tracks.push(
+      new THREE.QuaternionKeyframeTrack(
+        `${hipsName}.quaternion`,
+        times,
+        neutralHipsQ
+      )
+    );
+  }
+
+  log(
+    `OriginalRig lower frame: ${originalObjectName(lower) || lowerName} recibe la pose WORLD de FK-Hips; ` +
+    'FK-Hips queda neutral para evitar doble pelvis. Las piernas/HNG siguen el frame inferior real.'
+  );
+
+  return new THREE.AnimationClip(
+    'Retargeted_OriginalRig_FrameSplit',
+    sourceClip.duration,
+    tracks
+  );
+}
+
 function buildOriginalRigControlOnlyClip(clip) {
   if (!clip) return null;
 
-  const allowedControl = /^(root|TORSO-Spine|FK-|IK-|POLE-)/i;
+  const allowedControl = /^(root|TORSO-Spine|HIP-Spine|HTP-Spine|FK-|IK-|POLE-)/i;
   const tracks = clip.tracks
     .filter(track => {
       const parsed = parseTrackTarget(track.name);
@@ -1971,7 +2159,11 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
     throw new Error('Falta Target, retarget o FBX original.');
   }
 
-  const controlClip = buildOriginalRigControlOnlyClip(state.exportClip);
+  const lowerFrameClip = buildOriginalRigLowerFrameClip(
+    state.targetPreviewClip || state.exportClip
+  );
+
+  const controlClip = buildOriginalRigControlOnlyClip(lowerFrameClip);
   if (!controlClip || !controlClip.tracks.length) {
     throw new Error('No pude construir la Action de controles del CloudRig original.');
   }
@@ -2028,7 +2220,7 @@ async function exportOriginalRigActionFbx() {
 
     setStatus('Action FBX para rig original exportada', 'good');
     log(
-      `OriginalRig Action FBX: 1 stack · ${pkg.action.tracks.length} tracks · helpers/DEF=0. ` +
+      `OriginalRig Action FBX: 1 stack · ${pkg.action.tracks.length} tracks · helpers/DEF=0 · lower frame HIP/HTP activo. ` +
       'Importa este FBX sólo para extraer Retargeted_OriginalRig_FK.'
     );
   } catch (err) {
