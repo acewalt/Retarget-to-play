@@ -16,7 +16,7 @@ function unwrapEulerRadians(prev, current) {
   return current;
 }
 
-export function buildBlenderBasisActionData(clip, slot, fps, originalName) {
+export function buildBlenderBasisActionData(clip, slot, fps, originalName, rotationMode = 'xyz') {
   const rotations = [];
   const locations = [];
   let maxTime = 0;
@@ -41,15 +41,23 @@ export function buildBlenderBasisActionData(clip, slot, fps, originalName) {
       const e = new THREE.Euler(0, 0, 0, 'XYZ');
       const values = [];
       let previous = null;
+
       for (let i = 0; i < track.times.length; i++) {
         q.fromArray(track.values, i * 4).normalize();
         basis.copy(restInv).multiply(q).normalize();
-        e.setFromQuaternion(basis, 'XYZ');
-        const triple = unwrapEulerRadians(previous, [e.x, e.y, e.z]);
-        values.push(triple);
-        previous = triple;
+
+        if (rotationMode === 'quaternion') {
+          // Blender expects quaternion as W, X, Y, Z.
+          values.push([basis.w, basis.x, basis.y, basis.z]);
+        } else {
+          e.setFromQuaternion(basis, 'XYZ');
+          const triple = unwrapEulerRadians(previous, [e.x, e.y, e.z]);
+          values.push(triple);
+          previous = triple;
+        }
       }
-      rotations.push({ bone: boneName, frames, values });
+
+      rotations.push({ bone: boneName, frames, values, mode: rotationMode });
       continue;
     }
 
@@ -69,7 +77,8 @@ export function buildBlenderBasisActionData(clip, slot, fps, originalName) {
   }
 
   return {
-    name: (clip.name || 'Retargeted_FK') + '_XYZ',
+    name: (clip.name || 'Retargeted_FK') + (rotationMode === 'quaternion' ? '_Quaternion' : '_XYZ'),
+    rotationMode,
     fps,
     frameEnd: Math.round(maxTime * fps),
     rotations,
@@ -77,11 +86,24 @@ export function buildBlenderBasisActionData(clip, slot, fps, originalName) {
   };
 }
 
-export function buildBlenderXYZActionScript(clip, slot, fps, originalName) {
-  const payload = buildBlenderBasisActionData(clip, slot, fps, originalName);
+export function buildBlenderActionScript(
+  clip,
+  slot,
+  fps,
+  originalName,
+  rotationMode = 'xyz'
+) {
+  const payload = buildBlenderBasisActionData(
+    clip,
+    slot,
+    fps,
+    originalName,
+    rotationMode
+  );
   const jsonLiteral = JSON.stringify(JSON.stringify(payload));
+
   return [
-    '# Retarget-to-play Blender XYZ Euler Action',
+    '# Retarget-to-play Blender Action',
     '# Select the ORIGINAL CloudRig armature and run this file in Blender.',
     '',
     'import bpy',
@@ -97,7 +119,7 @@ export function buildBlenderXYZActionScript(clip, slot, fps, originalName) {
     "    raise RuntimeError('Select the original RIG-Sintel armature before running this script.')",
     '',
     'rig.animation_data_create()',
-    "name = DATA.get('name') or 'Retargeted_FK_XYZ'",
+    "name = DATA.get('name') or 'Retargeted_FK'",
     'old = bpy.data.actions.get(name)',
     'if old is not None:',
     '    bpy.data.actions.remove(old)',
@@ -110,15 +132,23 @@ export function buildBlenderXYZActionScript(clip, slot, fps, originalName) {
     'scene.frame_start = 0',
     "scene.frame_end = int(DATA.get('frameEnd', 0))",
     '',
+    "rotation_mode = DATA.get('rotationMode', 'xyz')",
+    '',
     "for item in DATA.get('rotations', []):",
     "    pb = rig.pose.bones.get(item['bone'])",
     '    if pb is None:',
     "        print('[Retarget-to-play] Bone missing:', item['bone'])",
     '        continue',
-    "    pb.rotation_mode = 'XYZ'",
-    "    for frame, value in zip(item['frames'], item['values']):",
-    '        pb.rotation_euler = value',
-    "        pb.keyframe_insert(data_path='rotation_euler', frame=frame, group=item['bone'])",
+    "    if rotation_mode == 'quaternion':",
+    "        pb.rotation_mode = 'QUATERNION'",
+    "        for frame, value in zip(item['frames'], item['values']):",
+    "            pb.rotation_quaternion = value",
+    "            pb.keyframe_insert(data_path='rotation_quaternion', frame=frame, group=item['bone'])",
+    '    else:',
+    "        pb.rotation_mode = 'XYZ'",
+    "        for frame, value in zip(item['frames'], item['values']):",
+    "            pb.rotation_euler = value",
+    "            pb.keyframe_insert(data_path='rotation_euler', frame=frame, group=item['bone'])",
     '',
     "for item in DATA.get('locations', []):",
     "    pb = rig.pose.bones.get(item['bone'])",
@@ -140,4 +170,8 @@ export function buildBlenderXYZActionScript(clip, slot, fps, originalName) {
     "print('[Retarget-to-play] Action ready:', action.name)",
     ''
   ].join('\\n');
+}
+
+export function buildBlenderXYZActionScript(clip, slot, fps, originalName) {
+  return buildBlenderActionScript(clip, slot, fps, originalName, 'xyz');
 }
