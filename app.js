@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-lowerframe1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rootsplit1';
 import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-lowerframe1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rootsplit1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -674,22 +674,10 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
   const sourceFoot = sourceFootName ? src.bones.get(sourceFootName) : null;
   const sourceFootRest = sourceFootName ? src.rest.get(sourceFootName) : null;
 
-  const sourceToeSemantic = side === 'L' ? 'LeftToeBase' : 'RightToeBase';
-  const sourceToeName = findSemanticBone(src, sourceToeSemantic);
-  const sourceToe = sourceToeName ? src.bones.get(sourceToeName) : null;
-  const sourceToeRest = sourceToeName ? src.rest.get(sourceToeName) : null;
-
-  const sourceHipsName =
-    findBoneByOriginalExact(src, ['mixamorig1:Hips', 'mixamorig:Hips', 'Hips']) ||
-    findSemanticBone(src, 'Hips');
-  const sourceHips = sourceHipsName ? src.bones.get(sourceHipsName) : null;
-  const sourceHipsRest = sourceHipsName ? src.rest.get(sourceHipsName) : null;
-
   const hipName = findBoneByOriginalExact(tgt, ['FK-Hips']);
   const thighName = findBoneByOriginalExact(tgt, [`FK-Thigh${suffix}`]);
   const kneeName = findBoneByOriginalExact(tgt, [`FK-Knee${suffix}`]);
   const footName = findBoneByOriginalExact(tgt, [`FK-Foot${suffix}`]);
-  const toeName = findBoneByOriginalExact(tgt, [`FK-Toes${suffix}`]);
 
   if (!sourceFoot || !sourceFootRest || !hipName || !thighName || !kneeName || !footName) {
     return false;
@@ -699,78 +687,23 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
   const thigh = tgt.bones.get(thighName);
   const knee = tgt.bones.get(kneeName);
   const foot = tgt.bones.get(footName);
-  const toe = toeName ? tgt.bones.get(toeName) : null;
 
-  const hipRest = tgt.rest.get(hipName);
   const thighRest = tgt.rest.get(thighName);
   const kneeRest = tgt.rest.get(kneeName);
   const footRest = tgt.rest.get(footName);
-  const toeRest = toeName ? tgt.rest.get(toeName) : null;
 
-  if (!hip || !thigh || !knee || !foot || !hipRest || !thighRest || !kneeRest || !footRest) {
+  if (!hip || !thigh || !knee || !foot || !thighRest || !kneeRest || !footRest) {
     return false;
   }
 
-  // Desired end-effector trajectory in the HIPS frame, not raw world space.
-  //
-  // Source Mixamo Hips contains global root motion. Target TORSO-Spine already
-  // receives that global translation/yaw. If Foot Match uses Source Foot world
-  // displacement again, a turn is effectively counted twice and the lower body
-  // fights the root motion. That is the wobble seen in dance/turn clips.
+  // Desired end-effector trajectory: reproduce the Source foot displacement
+  // relative to its own rest pose, scaled onto the Target rest foot.
   const sourceFootWorld = sourceFoot.getWorldPosition(new THREE.Vector3());
-  let desiredFoot;
-
-  if (sourceHips && sourceHipsRest) {
-    const sourceHipsWorld = sourceHips.getWorldPosition(new THREE.Vector3());
-    const sourceHipsWorldQ = sourceHips.getWorldQuaternion(new THREE.Quaternion());
-    const sourceHipsDeltaQ = sourceHipsWorldQ
-      .clone()
-      .multiply(sourceHipsRest.worldQuat.clone().invert())
-      .normalize();
-
-    const sourceRootYaw = extractWorldTwistQuaternion(
-      sourceHipsDeltaQ,
-      new THREE.Vector3(0, 1, 0),
-      new THREE.Quaternion()
-    );
-
-    // Where the Source foot would be if it only followed Hips translation+yaw.
-    const sourceRestOffset = sourceFootRest.worldPos
-      .clone()
-      .sub(sourceHipsRest.worldPos)
-      .applyQuaternion(sourceRootYaw);
-
-    const sourceRootOnlyFoot = sourceHipsWorld
-      .clone()
-      .add(sourceRestOffset);
-
-    // True leg/step motion after removing global root motion.
-    const localFootResidual = sourceFootWorld
-      .clone()
-      .sub(sourceRootOnlyFoot)
-      .multiplyScalar(motionScale);
-
-    // Target lower section is driven from FK-Hips / HIP(HTP)-Spine under the
-    // common TORSO-Spine carrier. Build the same root-only base with Target
-    // proportions, then add only the residual step motion.
-    const targetHipWorld = hip.getWorldPosition(new THREE.Vector3());
-    const targetRestOffset = footRest.worldPos
-      .clone()
-      .sub(hipRest.worldPos)
-      .applyQuaternion(sourceRootYaw);
-
-    desiredFoot = targetHipWorld
-      .clone()
-      .add(targetRestOffset)
-      .add(localFootResidual);
-  } else {
-    // Fallback for non-Mixamo/unknown sources.
-    desiredFoot = footRest.worldPos.clone().add(
-      sourceFootWorld.clone()
-        .sub(sourceFootRest.worldPos)
-        .multiplyScalar(motionScale)
-    );
-  }
+  const desiredFoot = footRest.worldPos.clone().add(
+    sourceFootWorld.clone()
+      .sub(sourceFootRest.worldPos)
+      .multiplyScalar(motionScale)
+  );
 
   // Preserve the retargeted foot orientation while solving thigh/knee.
   const desiredFootWorldQ = foot.getWorldQuaternion(new THREE.Quaternion());
@@ -860,52 +793,6 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
   // the correction rotations of thigh/knee.
   setBoneWorldQuaternion(tgt, foot, desiredFootWorldQ);
 
-  // FK-Toes is NOT a child of FK-Foot in the exported CloudRig hierarchy.
-  // It is an independent control at armature level, while DEF-Toes belongs to
-  // the deforming foot chain. Therefore transfer toe FLEX relative to Foot,
-  // then reconstruct the desired Toe world orientation from corrected FK-Foot.
-  // This prevents FK-Toes.R from accumulating an unrelated world twist.
-  if (sourceToe && sourceToeRest && toe && toeRest) {
-    const sourceFootWorldQ = sourceFoot.getWorldQuaternion(new THREE.Quaternion());
-    const sourceToeWorldQ = sourceToe.getWorldQuaternion(new THREE.Quaternion());
-
-    const sourceRestRelativeQ = sourceFootRest.worldQuat
-      .clone()
-      .invert()
-      .multiply(sourceToeRest.worldQuat)
-      .normalize();
-
-    const sourcePoseRelativeQ = sourceFootWorldQ
-      .clone()
-      .invert()
-      .multiply(sourceToeWorldQ)
-      .normalize();
-
-    const sourceToeFlexDeltaQ = sourcePoseRelativeQ
-      .clone()
-      .multiply(sourceRestRelativeQ.clone().invert())
-      .normalize();
-
-    const targetRestRelativeQ = footRest.worldQuat
-      .clone()
-      .invert()
-      .multiply(toeRest.worldQuat)
-      .normalize();
-
-    const targetPoseRelativeQ = sourceToeFlexDeltaQ
-      .clone()
-      .multiply(targetRestRelativeQ)
-      .normalize();
-
-    const correctedFootWorldQ = foot.getWorldQuaternion(new THREE.Quaternion());
-    const desiredToeWorldQ = correctedFootWorldQ
-      .clone()
-      .multiply(targetPoseRelativeQ)
-      .normalize();
-
-    setBoneWorldQuaternion(tgt, toe, desiredToeWorldQ);
-  }
-
   return true;
 }
 
@@ -949,22 +836,30 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     ordered.find(p => /hips$/i.test(originalObjectName(src.bones.get(p.source)) || p.source))?.source ||
     findSemanticBone(src, 'Hips');
 
-  // CloudRig section controls:
-  // - FK-Spine governs the torso/upper section.
-  // - HIP-Spine governs the hips/legs section.
-  // - TORSO-Spine is their common global carrier.
-  // Keep global translation/yaw on TORSO-Spine; do NOT remap the leg FK chain
-  // through FK-Hips/HIP-Spine here, because Foot Contact Match already solved
-  // the lower-body pose correctly before the portable-leg experiment.
-  const motionCarrierName =
-    findBoneByOriginalExact(tgt, ['TORSO-Spine']) ||
-    findBoneByOriginalExact(tgt, ['root']) ||
-    null;
+  // CloudRig hierarchy:
+  // root -> TORSO-Spine -> { FK-Spine (upper), HTP/HIP-Spine (lower) }.
+  //
+  // Source Mixamo has no separate root-motion bone: Hips contains both global
+  // locomotion and pelvic motion. Do not put all of that on TORSO-Spine.
+  //
+  // Split it:
+  //   root        = horizontal X/Z translation + global yaw
+  //   TORSO-Spine = vertical Y translation only
+  //
+  // This keeps the floor/root frame stable for FK-HNG legs and lets the
+  // sitting/down-up motion still move the body vertically.
+  const rootCarrierName = findBoneByOriginalExact(tgt, ['root']) || null;
+  const torsoCarrierName = findBoneByOriginalExact(tgt, ['TORSO-Spine']) || null;
 
-  const motionCarrier = motionCarrierName ? tgt.bones.get(motionCarrierName) : null;
-  const motionRest = motionCarrierName ? tgt.rest.get(motionCarrierName) : null;
-  const motionPositions = [];
-  const motionRotations = [];
+  const rootCarrier = rootCarrierName ? tgt.bones.get(rootCarrierName) : null;
+  const torsoCarrier = torsoCarrierName ? tgt.bones.get(torsoCarrierName) : null;
+
+  const rootRest = rootCarrierName ? tgt.rest.get(rootCarrierName) : null;
+  const torsoRest = torsoCarrierName ? tgt.rest.get(torsoCarrierName) : null;
+
+  const rootPositions = [];
+  const rootRotations = [];
+  const torsoPositions = [];
 
   const qSrc = new THREE.Quaternion();
   const qDelta = new THREE.Quaternion();
@@ -984,6 +879,8 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const srcPos = new THREE.Vector3();
   const desiredPos = new THREE.Vector3();
   const localPos = new THREE.Vector3();
+  const rootDeltaHorizontal = new THREE.Vector3();
+  const torsoBaseWorld = new THREE.Vector3();
 
   if (!src.mixer) {
     src.mixer = new THREE.AnimationMixer(src.root);
@@ -996,7 +893,7 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     updateSlotWorld(src);
     restoreRest(tgt);
 
-    if (rootMotion && sourceHipsName && motionCarrier && motionRest) {
+    if (rootMotion && sourceHipsName) {
       const sourceHips = src.bones.get(sourceHipsName);
       const sourceHipsRest = src.rest.get(sourceHipsName);
 
@@ -1007,14 +904,6 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
           .sub(sourceHipsRest.worldPos)
           .multiplyScalar(motionScale);
 
-        desiredPos.copy(motionRest.worldPos).add(targetDeltaWorld);
-        localPos.copy(desiredPos);
-
-        if (motionCarrier.parent) motionCarrier.parent.worldToLocal(localPos);
-
-        // Mixamo commonly stores character turning on Hips. Translation alone
-        // is not enough: without this yaw the pelvis twists inside a character
-        // that keeps facing its original direction.
         sourceHips.getWorldQuaternion(qSourceHipsWorld);
         qSourceHipsDelta.copy(qSourceHipsWorld)
           .multiply(sourceHipsRest.worldQuat.clone().invert())
@@ -1026,7 +915,6 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
           qRootYaw
         );
 
-        // Keep a continuous quaternion hemisphere across 180/360-degree turns.
         if (previousRootYaw && previousRootYaw.dot(qRootYaw) < 0) {
           qRootYaw.x *= -1;
           qRootYaw.y *= -1;
@@ -1035,37 +923,79 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
         }
         previousRootYaw = qRootYaw.clone();
 
-        qCarrierDesiredWorld.copy(qRootYaw)
-          .multiply(motionRest.worldQuat)
-          .normalize();
+        if (rootCarrier && rootRest) {
+          // Global floor/root motion: horizontal displacement + yaw only.
+          rootDeltaHorizontal.set(
+            targetDeltaWorld.x,
+            0,
+            targetDeltaWorld.z
+          );
 
-        if (motionCarrier.parent) {
-          motionCarrier.parent.getWorldQuaternion(qCarrierParentWorld);
-          qCarrierLocal.copy(qCarrierParentWorld)
-            .invert()
-            .multiply(qCarrierDesiredWorld)
+          desiredPos.copy(rootRest.worldPos).add(rootDeltaHorizontal);
+          localPos.copy(desiredPos);
+
+          if (rootCarrier.parent) rootCarrier.parent.worldToLocal(localPos);
+
+          qCarrierDesiredWorld.copy(qRootYaw)
+            .multiply(rootRest.worldQuat)
             .normalize();
-        } else {
-          qCarrierLocal.copy(qCarrierDesiredWorld);
+
+          if (rootCarrier.parent) {
+            rootCarrier.parent.getWorldQuaternion(qCarrierParentWorld);
+            qCarrierLocal.copy(qCarrierParentWorld)
+              .invert()
+              .multiply(qCarrierDesiredWorld)
+              .normalize();
+          } else {
+            qCarrierLocal.copy(qCarrierDesiredWorld);
+          }
+
+          rootCarrier.position.copy(localPos);
+          rootCarrier.quaternion.copy(qCarrierLocal);
+          rootCarrier.scale.copy(rootRest.scale);
+          updateSlotWorld(tgt);
+
+          rootPositions.push(
+            rootCarrier.position.x,
+            rootCarrier.position.y,
+            rootCarrier.position.z
+          );
+
+          rootRotations.push(
+            rootCarrier.quaternion.x,
+            rootCarrier.quaternion.y,
+            rootCarrier.quaternion.z,
+            rootCarrier.quaternion.w
+          );
         }
 
-        motionCarrier.position.copy(localPos);
-        motionCarrier.quaternion.copy(qCarrierLocal);
-        motionCarrier.scale.copy(motionRest.scale);
-        updateSlotWorld(tgt);
+        if (torsoCarrier && torsoRest) {
+          // Pelvic up/down must NOT move the floor root. Start from the torso
+          // rest local transform under the already-animated root, then add only
+          // the vertical component of Mixamo Hips.
+          torsoCarrier.position.copy(torsoRest.position);
+          torsoCarrier.quaternion.copy(torsoRest.quaternion);
+          torsoCarrier.scale.copy(torsoRest.scale);
+          updateSlotWorld(tgt);
 
-        motionPositions.push(
-          motionCarrier.position.x,
-          motionCarrier.position.y,
-          motionCarrier.position.z
-        );
+          torsoCarrier.getWorldPosition(torsoBaseWorld);
+          desiredPos.copy(torsoBaseWorld);
+          desiredPos.y += targetDeltaWorld.y;
 
-        motionRotations.push(
-          motionCarrier.quaternion.x,
-          motionCarrier.quaternion.y,
-          motionCarrier.quaternion.z,
-          motionCarrier.quaternion.w
-        );
+          localPos.copy(desiredPos);
+          if (torsoCarrier.parent) torsoCarrier.parent.worldToLocal(localPos);
+
+          torsoCarrier.position.copy(localPos);
+          torsoCarrier.quaternion.copy(torsoRest.quaternion);
+          torsoCarrier.scale.copy(torsoRest.scale);
+          updateSlotWorld(tgt);
+
+          torsoPositions.push(
+            torsoCarrier.position.x,
+            torsoCarrier.position.y,
+            torsoCarrier.position.z
+          );
+        }
       }
     }
 
@@ -1131,29 +1061,39 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
     );
   }
 
-  if (motionCarrierName && motionPositions.length === times.length * 3) {
+  if (rootCarrierName && rootPositions.length === times.length * 3) {
     tracks.push(
       new THREE.VectorKeyframeTrack(
-        `${motionCarrierName}.position`,
+        `${rootCarrierName}.position`,
         times,
-        motionPositions
+        rootPositions
       )
     );
   }
 
-  if (motionCarrierName && motionRotations.length === times.length * 4) {
+  if (rootCarrierName && rootRotations.length === times.length * 4) {
     tracks.push(
       new THREE.QuaternionKeyframeTrack(
-        `${motionCarrierName}.quaternion`,
+        `${rootCarrierName}.quaternion`,
         times,
-        motionRotations
+        rootRotations
+      )
+    );
+  }
+
+  if (torsoCarrierName && torsoPositions.length === times.length * 3) {
+    tracks.push(
+      new THREE.VectorKeyframeTrack(
+        `${torsoCarrierName}.position`,
+        times,
+        torsoPositions
       )
     );
   }
 
   log(
-    `Root motion: Source Hips → ${motionCarrierName ? originalObjectName(motionCarrier) || motionCarrierName : 'sin carrier'} ` +
-    `(posición + giro Y); FK-Hips conserva pitch/roll y movimiento pélvico relativo.`
+    `Root motion dividido: Source Hips → root (X/Z + yaw) + TORSO-Spine (Y). ` +
+    `FK-Spine y HTP/HIP-Spine permanecen como secciones superior/inferior del CloudRig.`
   );
 
   return new THREE.AnimationClip(clipName, clip.duration, tracks);
