@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { FBXLoader } from 'three/addons/loaders/FBXLoader.js';
 
-export const WALT_FBX_VERSION = '0.2.0';
+export const WALT_FBX_VERSION = '0.3.0';
 
 // Los 31 DEF con pesos reales en x1.fbx se reconstruyen desde los
 // controles FK. Los segmentos _2 comparten el delta de su control principal;
@@ -42,6 +42,47 @@ const CLOUDRIG_BINDINGS = [
   { driver: 'FK-Knee.R', driven: 'DEF-Knee_2.R' },
   { driver: 'FK-Foot.R', driven: 'DEF-Foot.R' },
   { driver: 'FK-Toes.R', driven: 'DEF-Toes.R' }
+];
+
+// Jerarquía FK "virtual" del CloudRig.
+// En el FBX exportado varios controles FK viven en ramas separadas porque
+// Blender resolvía sus posiciones mediante constraints. Esos constraints
+// no existen en el FBX, así que reconstruimos la jerarquía anatómica aquí.
+const CLOUDRIG_FK_PARENT = {
+  'FK-Hips': null,
+  'FK-Spine': 'FK-Hips',
+  'FK-Chest': 'FK-Spine',
+  'FK-Neck': 'FK-Chest',
+  'FK-Head': 'FK-Neck',
+
+  'FK-Shoulder.L': 'FK-Chest',
+  'FK-UpperArm.L': 'FK-Shoulder.L',
+  'FK-Forearm.L': 'FK-UpperArm.L',
+  'FK-Hand.L': 'FK-Forearm.L',
+
+  'FK-Shoulder.R': 'FK-Chest',
+  'FK-UpperArm.R': 'FK-Shoulder.R',
+  'FK-Forearm.R': 'FK-UpperArm.R',
+  'FK-Hand.R': 'FK-Forearm.R',
+
+  'FK-Thigh.L': 'FK-Hips',
+  'FK-Knee.L': 'FK-Thigh.L',
+  'FK-Foot.L': 'FK-Knee.L',
+  'FK-Toes.L': 'FK-Foot.L',
+
+  'FK-Thigh.R': 'FK-Hips',
+  'FK-Knee.R': 'FK-Thigh.R',
+  'FK-Foot.R': 'FK-Knee.R',
+  'FK-Toes.R': 'FK-Foot.R'
+};
+
+const CLOUDRIG_FK_ORDER = [
+  'FK-Hips',
+  'FK-Spine', 'FK-Chest', 'FK-Neck', 'FK-Head',
+  'FK-Shoulder.L', 'FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L',
+  'FK-Shoulder.R', 'FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R',
+  'FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L', 'FK-Toes.L',
+  'FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R', 'FK-Toes.R'
 ];
 
 const LOGICAL_CHAINS = {
@@ -382,6 +423,7 @@ export class WaltCloudRigRuntime {
       .sort((a, b) => depthOf(a.drivenBone) - depthOf(b.drivenBone));
 
     this.rest = new Map();
+    this.virtualFk = new Map();
     this.enabled = true;
     this.captureRest();
   }
@@ -422,27 +464,77 @@ export class WaltCloudRigRuntime {
   update() {
     if (!this.enabled || !this.bindings.length) return;
 
-    // Los constraints de Blender no vienen en este FBX. Reconstruimos la
-    // transformación rígida completa FK -> DEF en runtime.
+    // CloudRig depende de constraints que NO sobreviven al FBX.
+    // El problema visible en el video era que FK-Hips subía al levantarse,
+    // pero FK-Thigh / FK-UpperArm viven en ramas FBX separadas y sus pivotes
+    // se quedaban atrás. Resultado: muslos/brazos estirados y el personaje
+    // seguía "sentado" aunque el torso ya hubiera subido.
     //
-    // El fallo anterior era importante: copiábamos rotación, pero dejábamos
-    // casi todos los DEF en su POSICIÓN de rest. En CloudRig muchos DEF
-    // (hombros, brazos, piernas, cuello...) viven en ramas separadas del rig.
-    // Al rotarlos sin trasladar su origen, la piel se estiraba hasta formar
-    // esos triángulos/bandas que se veían en el video.
+    // Primero reconstruimos una jerarquía FK virtual anatómica y después
+    // usamos esos transforms virtuales para mover los DEF.
     this.resetDriven();
+    this.virtualFk.clear();
+    this.asset.displayRoot.updateMatrixWorld(true);
 
-    const qDriverCurrent = new THREE.Quaternion();
+    const qCurrent = new THREE.Quaternion();
     const qDelta = new THREE.Quaternion();
     const qDesiredWorld = new THREE.Quaternion();
     const qParentWorld = new THREE.Quaternion();
     const qDesiredLocal = new THREE.Quaternion();
 
-    const pDriverCurrent = new THREE.Vector3();
+    const pCurrent = new THREE.Vector3();
     const pRestOffset = new THREE.Vector3();
     const pDesiredWorld = new THREE.Vector3();
     const pDesiredLocal = new THREE.Vector3();
 
+    // 1) Reconstrucción de posiciones FK virtuales.
+    for (const name of CLOUDRIG_FK_ORDER) {
+      const bone = this.rig.get(name);
+      if (!bone) continue;
+
+      const rest = this.rest.get(bone);
+      if (!rest) continue;
+
+      bone.getWorldQuaternion(qCurrent);
+      qDelta.copy(qCurrent)
+        .multiply(rest.worldQuaternion.clone().invert())
+        .normalize();
+
+      const parentName = CLOUDRIG_FK_PARENT[name];
+      let virtualPosition;
+
+      if (!parentName) {
+        // FK-Hips sí recibe root motion real desde la Action.
+        virtualPosition = bone.getWorldPosition(new THREE.Vector3());
+      } else {
+        const parentBone = this.rig.get(parentName);
+        const parentRest = parentBone ? this.rest.get(parentBone) : null;
+        const parentVirtual = this.virtualFk.get(parentName);
+
+        if (parentBone && parentRest && parentVirtual) {
+          parentBone.getWorldQuaternion(qParentWorld);
+          const parentDelta = qParentWorld.clone()
+            .multiply(parentRest.worldQuaternion.clone().invert())
+            .normalize();
+
+          const offset = rest.worldPosition.clone()
+            .sub(parentRest.worldPosition)
+            .applyQuaternion(parentDelta);
+
+          virtualPosition = parentVirtual.position.clone().add(offset);
+        } else {
+          virtualPosition = bone.getWorldPosition(new THREE.Vector3());
+        }
+      }
+
+      this.virtualFk.set(name, {
+        position: virtualPosition,
+        quaternion: qCurrent.clone(),
+        deltaQuaternion: qDelta.clone()
+      });
+    }
+
+    // 2) Los DEF siguen el FK virtual, no el pivot crudo del FBX.
     for (const binding of this.bindings) {
       const driver = binding.driverBone;
       const driven = binding.drivenBone;
@@ -450,25 +542,28 @@ export class WaltCloudRigRuntime {
       const rr = this.rest.get(driven);
       if (!dr || !rr) continue;
 
-      driver.getWorldQuaternion(qDriverCurrent);
-      driver.getWorldPosition(pDriverCurrent);
+      const virtual = this.virtualFk.get(binding.driver);
+      if (virtual) {
+        pCurrent.copy(virtual.position);
+        qCurrent.copy(virtual.quaternion);
+        qDelta.copy(virtual.deltaQuaternion);
+      } else {
+        driver.getWorldPosition(pCurrent);
+        driver.getWorldQuaternion(qCurrent);
+        qDelta.copy(qCurrent)
+          .multiply(dr.worldQuaternion.clone().invert())
+          .normalize();
+      }
 
-      // Delta rígido del FK desde su rest.
-      qDelta.copy(qDriverCurrent)
-        .multiply(dr.worldQuaternion.clone().invert())
-        .normalize();
-
-      // Aplica ese delta a la orientación rest propia del DEF.
       qDesiredWorld.copy(qDelta)
         .multiply(rr.worldQuaternion)
         .normalize();
 
-      // Y también a su posición rest. Esto equivale a:
-      // M_DEF(t) = M_FK(t) * inverse(M_FK(rest)) * M_DEF(rest)
-      // pero sin propagar escala del control.
-      pRestOffset.copy(rr.worldPosition).sub(dr.worldPosition);
-      pRestOffset.applyQuaternion(qDelta);
-      pDesiredWorld.copy(pDriverCurrent).add(pRestOffset);
+      pRestOffset.copy(rr.worldPosition)
+        .sub(dr.worldPosition)
+        .applyQuaternion(qDelta);
+
+      pDesiredWorld.copy(pCurrent).add(pRestOffset);
 
       if (driven.parent) {
         driven.parent.getWorldQuaternion(qParentWorld);
@@ -487,9 +582,6 @@ export class WaltCloudRigRuntime {
       driven.position.copy(pDesiredLocal);
       driven.quaternion.copy(qDesiredLocal);
       driven.scale.copy(rr.localScale);
-
-      // Importante: los bindings están ordenados por profundidad, así cada
-      // padre DEF queda actualizado antes de resolver el hijo siguiente.
       this.asset.displayRoot.updateMatrixWorld(true);
     }
   }
@@ -497,7 +589,8 @@ export class WaltCloudRigRuntime {
   get status() {
     return {
       bindings: this.bindings.length,
-      requestedBindings: CLOUDRIG_BINDINGS.length
+      requestedBindings: CLOUDRIG_BINDINGS.length,
+      virtualFk: true
     };
   }
 }
