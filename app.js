@@ -1089,13 +1089,27 @@ function setWorkspaceView(view) {
   if (workspace) workspace.dataset.view = next;
 
   const shell = document.querySelector('.workspace-shell');
-  shell?.classList.toggle('animations-focus', next === 'animations');
+  const workflowSidebar = document.querySelector('.workflow-sidebar');
+  const settingsPanel = document.querySelector('.settings-panel');
+  const bridge = document.querySelector('.retarget-bridge');
+  const mappingCard = $('mappingCard');
+  const isAnimation = next === 'animations';
+
+  shell?.classList.toggle('animations-focus', isAnimation);
+
+  // No depender únicamente del CSS: ocultamos físicamente las zonas
+  // que no pertenecen a cada mesa de trabajo.
+  if (mappingCard) mappingCard.hidden = next !== 'mappings';
+  if (workflowSidebar) workflowSidebar.hidden = isAnimation;
+  if (settingsPanel) settingsPanel.hidden = isAnimation;
+  if (bridge) bridge.hidden = isAnimation || next === 'export';
 
   document.querySelectorAll('[data-workspace]').forEach(button => {
     button.classList.toggle('active', button.dataset.workspace === next);
   });
 
   if (next === 'mappings') {
+    if (mappingCard) mappingCard.hidden = false;
     setMappingCollapsed(false, false);
   } else if (next === 'workspace') {
     setMappingCollapsed(true, false);
