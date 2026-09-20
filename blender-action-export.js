@@ -36,7 +36,7 @@ function collectAnimatedBones(clip, slot, originalName) {
         bone: originalName(bone) || parsed.nodeName,
         rotation: false,
         position: false,
-        rotationDeltas: [],
+        basisRotations: [],
         positionDeltas: []
       };
       records.set(parsed.nodeName, record);
@@ -121,21 +121,23 @@ export function buildOriginalRigDeltaData(
         if (!bone || !rest) continue;
 
         if (record.rotation) {
-          const currentWorld = bone.getWorldQuaternion(new THREE.Quaternion());
-          const deltaThree = currentWorld
-            .multiply(rest.worldQuat.clone().invert())
+          // state.exportClip is now encoded as:
+          //   localTrack = rawFBXRestLocal * ORIGINAL_RIG_matrix_basis
+          // Therefore the portable pose-basis is obtained directly from the
+          // local channel, with no world-space/HNG reconstruction and no
+          // Blender/Three axis conversion.
+          const basis = rest.quaternion.clone()
+            .invert()
+            .multiply(bone.quaternion)
             .normalize();
 
-          const deltaBlender = stabilizeQuaternion(
-            record.rotationDeltas,
-            worldDeltaToBlender(deltaThree)
-          );
+          stabilizeQuaternion(record.basisRotations, basis);
 
-          record.rotationDeltas.push([
-            deltaBlender.w,
-            deltaBlender.x,
-            deltaBlender.y,
-            deltaBlender.z
+          record.basisRotations.push([
+            basis.w,
+            basis.x,
+            basis.y,
+            basis.z
           ]);
         }
 
@@ -289,29 +291,14 @@ for sample_index, frame in enumerate(frames):
     for item in items:
         pb = rig.pose.bones[item['bone']]
 
-        if item.get('rotation') and sample_index < len(item.get('rotationDeltas', [])):
-            w, x, y, z = item['rotationDeltas'][sample_index]
-            delta_q = Quaternion((w, x, y, z))
-
-            # Desired control pose = viewport world delta applied to the
-            # ORIGINAL edit-bone rest orientation.
-            target_rest_q = pb.bone.matrix_local.to_quaternion()
-            desired_arm_q = delta_q @ target_rest_q
-
-            # Back-solve the real pose basis through the ACTUAL parent.
-            # For FK-UpperArm/Head this parent is FK-HNG-*; its constraints
-            # have already been evaluated by Blender.
-            if pb.parent is None:
-                rel_rest_q = target_rest_q
-                parent_pose_q = Quaternion((1.0, 0.0, 0.0, 0.0))
-            else:
-                parent_rest_q = pb.parent.bone.matrix_local.to_quaternion()
-                rel_rest_q = parent_rest_q.inverted() @ target_rest_q
-                parent_pose_q = pb.parent.matrix.to_quaternion()
-
-            basis_q = rel_rest_q.inverted() @ parent_pose_q.inverted() @ desired_arm_q
+        if item.get('rotation') and sample_index < len(item.get('basisRotations', [])):
+            w, x, y, z = item['basisRotations'][sample_index]
+            basis_q = Quaternion((w, x, y, z))
             basis_q.normalize()
 
+            # This quaternion IS the original CloudRig pose-basis. Do not
+            # solve it again through FK-HNG/Chest; doing so was the source of
+            # the double-parent rotation seen in neck/head/shoulders/arms.
             if rotation_mode == 'quaternion':
                 pb.rotation_mode = 'QUATERNION'
                 pb.rotation_quaternion = basis_q
@@ -368,7 +355,7 @@ for item in changed_props:
 
   return [
     '# Retarget-to-play - CloudRig ORIGINAL',
-    '# Reconstruccion sobre rest/parents reales del .blend.',
+    '# Pose-basis portable para el CloudRig original.',
     '',
     'import bpy',
     'import json',
