@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-ikblendcap4" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-ikblendcap5" />
   <script type="importmap">
   {
     "imports": {
@@ -277,8 +277,8 @@
 
             <label class="field-label" for="rotationMode">Rotación · Action para rig original</label>
             <select id="rotationMode">
-              <option value="xyz" selected>XYZ Euler · predeterminado</option>
-              <option value="quaternion">Quaternion · WXYZ</option>
+              <option value="xyz">XYZ Euler</option>
+              <option value="quaternion" selected>Quaternion · WXYZ · recomendado</option>
             </select>
 
             <button id="exportBlenderAction" class="wide-button" type="button" disabled>Exportar Action .py para rig original</button>
@@ -317,6 +317,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-ikblendcap4"></script>
+  <script type="module" src="./app.js?v=20260920-ikblendcap5"></script>
 </body>
 </html>
