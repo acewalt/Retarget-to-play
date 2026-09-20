@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-footlock1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-footlock2';
 import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-footlock1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-footlock2';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -727,10 +727,17 @@ function cleanContactFlags(flags, maxGap = 2, minRun = 2) {
 }
 
 function buildFootContactPlan(src, side, times) {
-  const semantic = side === 'L' ? 'LeftFoot' : 'RightFoot';
-  const footName = findSemanticBone(src, semantic);
+  const footSemantic = side === 'L' ? 'LeftFoot' : 'RightFoot';
+  const toeSemantic = side === 'L' ? 'LeftToeBase' : 'RightToeBase';
+
+  const footName = findSemanticBone(src, footSemantic);
+  const toeName = findSemanticBone(src, toeSemantic);
+
   const foot = footName ? src.bones.get(footName) : null;
+  const toe = toeName ? src.bones.get(toeName) : null;
+
   const footRest = footName ? src.rest.get(footName) : null;
+  const toeRest = toeName ? src.rest.get(toeName) : null;
 
   const hipsName =
     findBoneByOriginalExact(src, ['mixamorig1:Hips', 'mixamorig:Hips', 'Hips']) ||
@@ -739,16 +746,23 @@ function buildFootContactPlan(src, side, times) {
 
   if (!foot || !footRest || !hipsRest || !src.mixer || !times.length) return null;
 
-  const positions = [];
-  const rotations = [];
+  const footPositions = [];
+  const footRotations = [];
+  const toePositions = [];
+  const toeRotations = [];
 
   for (const time of times) {
     restoreRest(src);
     src.mixer.setTime(Number(time));
     updateSlotWorld(src);
 
-    positions.push(foot.getWorldPosition(new THREE.Vector3()));
-    rotations.push(foot.getWorldQuaternion(new THREE.Quaternion()));
+    footPositions.push(foot.getWorldPosition(new THREE.Vector3()));
+    footRotations.push(foot.getWorldQuaternion(new THREE.Quaternion()));
+
+    if (toe) {
+      toePositions.push(toe.getWorldPosition(new THREE.Vector3()));
+      toeRotations.push(toe.getWorldQuaternion(new THREE.Quaternion()));
+    }
   }
 
   restoreRest(src);
@@ -758,30 +772,57 @@ function buildFootContactPlan(src, side, times) {
     hipsRest.worldPos.distanceTo(footRest.worldPos)
   );
 
-  const floorY = Math.min(...positions.map(p => p.y));
-  const enterHeight = Math.max(0.018, legLength * 0.035);
-  const exitHeight = Math.max(0.032, legLength * 0.065);
-  const enterSpeed = Math.max(0.045, legLength * 0.11);
-  const exitSpeed = Math.max(0.10, legLength * 0.24);
-
-  const speeds = positions.map((p, i) => {
-    if (positions.length < 2) return 0;
-
+  function sampleSpeed(positions, i) {
+    if (!positions?.length || positions.length < 2) return 0;
     const i0 = Math.max(0, i - 1);
     const i1 = Math.min(positions.length - 1, i + 1);
     const dt = Math.max(1e-6, Number(times[i1]) - Number(times[i0]));
     return positions[i1].distanceTo(positions[i0]) / dt;
-  });
+  }
+
+  const footFloor = Math.min(...footPositions.map(p => p.y));
+  const toeFloor = toePositions.length
+    ? Math.min(...toePositions.map(p => p.y))
+    : footFloor;
+
+  const footEnterHeight = Math.max(0.018, legLength * 0.035);
+  const footExitHeight = Math.max(0.035, legLength * 0.070);
+  const toeEnterHeight = Math.max(0.014, legLength * 0.028);
+  const toeExitHeight = Math.max(0.030, legLength * 0.060);
+
+  const enterSpeed = Math.max(0.040, legLength * 0.095);
+  const exitSpeed = Math.max(0.090, legLength * 0.20);
 
   const raw = [];
   let planted = false;
   let enterCount = 0;
   let exitCount = 0;
 
-  for (let i = 0; i < positions.length; i++) {
-    const height = positions[i].y - floorY;
-    const enter = height <= enterHeight && speeds[i] <= enterSpeed;
-    const stay = height <= exitHeight && speeds[i] <= exitSpeed;
+  for (let i = 0; i < footPositions.length; i++) {
+    const footHeight = footPositions[i].y - footFloor;
+    const footSpeed = sampleSpeed(footPositions, i);
+
+    const hasToe = toePositions.length === footPositions.length;
+    const toeHeight = hasToe ? toePositions[i].y - toeFloor : footHeight;
+    const toeSpeed = hasToe ? sampleSpeed(toePositions, i) : footSpeed;
+
+    // FULL-foot support requires both ankle/foot and toe base to be quiet.
+    // A dancer pivoting on the toe no longer gets classified as a rigid plant.
+    const enter =
+      footHeight <= footEnterHeight &&
+      footSpeed <= enterSpeed &&
+      (!hasToe || (
+        toeHeight <= toeEnterHeight &&
+        toeSpeed <= enterSpeed
+      ));
+
+    const stay =
+      footHeight <= footExitHeight &&
+      footSpeed <= exitSpeed &&
+      (!hasToe || (
+        toeHeight <= toeExitHeight &&
+        toeSpeed <= exitSpeed
+      ));
 
     if (!planted) {
       enterCount = enter ? enterCount + 1 : 0;
@@ -791,7 +832,7 @@ function buildFootContactPlan(src, side, times) {
       }
     } else {
       exitCount = stay ? 0 : exitCount + 1;
-      if (exitCount >= 2) {
+      if (exitCount >= 3) {
         planted = false;
         enterCount = 0;
       }
@@ -800,10 +841,12 @@ function buildFootContactPlan(src, side, times) {
     raw.push(planted);
   }
 
-  const contacts = cleanContactFlags(raw, 2, 2);
+  const contacts = cleanContactFlags(raw, 3, 3);
   const weights = new Array(times.length).fill(0);
   const segmentIds = new Array(times.length).fill(-1);
   const anchors = new Array(times.length).fill(null);
+  const rotationAnchors = new Array(times.length).fill(null);
+  const toeRotationAnchors = new Array(times.length).fill(null);
 
   let segmentId = 0;
   let i = 0;
@@ -811,38 +854,53 @@ function buildFootContactPlan(src, side, times) {
   while (i < contacts.length) {
     if (!contacts[i]) { i++; continue; }
 
-    const start = i;
+    const begin = i;
     while (i < contacts.length && contacts[i]) i++;
-    const end = i - 1;
+    const finish = i - 1;
 
     const anchor = new THREE.Vector3();
-    for (let j = start; j <= end; j++) anchor.add(positions[j]);
-    anchor.multiplyScalar(1 / Math.max(1, end - start + 1));
+    for (let j = begin; j <= finish; j++) {
+      anchor.add(footPositions[j]);
+    }
+    anchor.multiplyScalar(1 / Math.max(1, finish - begin + 1));
 
-    const ramp = Math.min(3, Math.floor((end - start + 1) / 2));
+    const footQ = averageQuaternionSamples(footRotations, begin, finish);
+    const toeQ = toeRotations.length
+      ? averageQuaternionSamples(toeRotations, begin, finish)
+      : null;
 
-    for (let j = start; j <= end; j++) {
+    const ramp = Math.min(4, Math.floor((finish - begin + 1) / 2));
+
+    for (let j = begin; j <= finish; j++) {
       const inWeight = ramp > 0
-        ? THREE.MathUtils.clamp((j - start + 1) / ramp, 0, 1)
+        ? THREE.MathUtils.clamp((j - begin + 1) / ramp, 0, 1)
         : 1;
       const outWeight = ramp > 0
-        ? THREE.MathUtils.clamp((end - j + 1) / ramp, 0, 1)
+        ? THREE.MathUtils.clamp((finish - j + 1) / ramp, 0, 1)
         : 1;
 
       weights[j] = Math.min(inWeight, outWeight);
       segmentIds[j] = segmentId;
       anchors[j] = anchor;
+      rotationAnchors[j] = footQ;
+      toeRotationAnchors[j] = toeQ;
     }
 
     segmentId++;
   }
 
   return {
-    positions,
-    rotations,
+    positions: footPositions,
+    rotations: footRotations,
+    toePositions,
+    toeRotations,
+    footRest,
+    toeRest,
     weights,
     segmentIds,
     anchors,
+    rotationAnchors,
+    toeRotationAnchors,
     contactFrames: contacts.filter(Boolean).length,
     totalFrames: contacts.length
   };
@@ -866,6 +924,10 @@ function applyFootContactCorrection(
   const sourceFoot = sourceFootName ? src.bones.get(sourceFootName) : null;
   const sourceFootRest = sourceFootName ? src.rest.get(sourceFootName) : null;
 
+  const sourceToeSemantic = side === 'L' ? 'LeftToeBase' : 'RightToeBase';
+  const sourceToeName = findSemanticBone(src, sourceToeSemantic);
+  const sourceToeRest = sourceToeName ? src.rest.get(sourceToeName) : null;
+
   const hipName = findBoneByOriginalExact(tgt, ['FK-Hips']);
   const thighName = findBoneByOriginalExact(tgt, [`FK-Thigh${suffix}`]);
   const kneeName = findBoneByOriginalExact(tgt, [`FK-Knee${suffix}`]);
@@ -885,6 +947,7 @@ function applyFootContactCorrection(
   const thighRest = tgt.rest.get(thighName);
   const kneeRest = tgt.rest.get(kneeName);
   const footRest = tgt.rest.get(footName);
+  const toeRest = toeName ? tgt.rest.get(toeName) : null;
 
   if (!hip || !thigh || !knee || !foot || !thighRest || !kneeRest || !footRest) {
     return false;
@@ -920,31 +983,54 @@ function applyFootContactCorrection(
     desiredFoot.lerp(lockedFoot, contactWeight);
   }
 
-  // Preserve/lock orientation while the source foot is actually planted.
-  // This removes the tiny frame-to-frame wobble visible in seated clips.
+  // Preserve the independently retargeted world rotations. Foot-contact
+  // correction changes parents (thigh/knee/foot), so these must be restored
+  // afterwards; otherwise FK-Toes inherits an extra rotation from FK-Foot.
   const desiredFootWorldQ = foot.getWorldQuaternion(new THREE.Quaternion());
-  const toeWorldQ = toe
+  const desiredToeWorldQ = toe
     ? toe.getWorldQuaternion(new THREE.Quaternion())
     : null;
-  const toeRelativeQ = toeWorldQ
-    ? desiredFootWorldQ.clone().invert().multiply(toeWorldQ).normalize()
-    : null;
+
+  // During a real full-foot plant, use the average Source orientation of the
+  // whole contact segment instead of noisy frame-by-frame ankle/toe values.
+  const sourceFootAnchorQ = contactPlan?.rotationAnchors?.[frameIndex];
+  if (contactWeight > 0 && sourceFootAnchorQ && sourceFootRest) {
+    const sourceDeltaQ = sourceFootAnchorQ.clone()
+      .multiply(sourceFootRest.worldQuat.clone().invert())
+      .normalize();
+
+    const plantedFootQ = sourceDeltaQ
+      .multiply(footRest.worldQuat.clone())
+      .normalize();
+
+    desiredFootWorldQ.slerp(plantedFootQ, contactWeight);
+  }
+
+  const sourceToeAnchorQ = contactPlan?.toeRotationAnchors?.[frameIndex];
+  let plantedToeQ = null;
+
+  if (
+    contactWeight > 0 &&
+    sourceToeAnchorQ &&
+    sourceToeRest &&
+    toeRest
+  ) {
+    const sourceToeDeltaQ = sourceToeAnchorQ.clone()
+      .multiply(sourceToeRest.worldQuat.clone().invert())
+      .normalize();
+
+    plantedToeQ = sourceToeDeltaQ
+      .multiply(toeRest.worldQuat.clone())
+      .normalize();
+  }
 
   if (lockState) {
     if (segmentId >= 0 && lockState.segmentId !== segmentId) {
       lockState.segmentId = segmentId;
-      lockState.footQuaternion = desiredFootWorldQ.clone();
-      lockState.toeRelativeQuaternion = toeRelativeQ?.clone() || null;
       lockState.bendDirection = null;
     } else if (segmentId < 0) {
       lockState.segmentId = -1;
-      lockState.footQuaternion = null;
-      lockState.toeRelativeQuaternion = null;
       lockState.bendDirection = null;
-    }
-
-    if (contactWeight > 0 && lockState.footQuaternion) {
-      desiredFootWorldQ.slerp(lockState.footQuaternion, contactWeight);
     }
   }
 
@@ -1045,28 +1131,16 @@ function applyFootContactCorrection(
   // the correction rotations of thigh/knee.
   setBoneWorldQuaternion(tgt, foot, desiredFootWorldQ);
 
-  // FK-Toes is a separate control in CloudRig. If the foot correction moves
-  // the leg without rebuilding the toe relative to the corrected foot, the
-  // toe can appear to twist (especially FK-Toes.R in turning/dance clips).
-  if (toe && toeRelativeQ) {
-    let stabilizedToeRelative = toeRelativeQ.clone();
+  // Critical: preserve the TOE WORLD orientation that came from retargeting.
+  // Re-applying its old Foot->Toe relative rotation after changing FK-Foot
+  // double-applies the foot correction and is what produced the visible
+  // FK-Toes.R twist in dance clips.
+  if (toe && desiredToeWorldQ) {
+    const finalToeWorldQ = desiredToeWorldQ.clone();
 
-    if (
-      lockState &&
-      contactWeight > 0 &&
-      lockState.toeRelativeQuaternion
-    ) {
-      stabilizedToeRelative.slerp(
-        lockState.toeRelativeQuaternion,
-        contactWeight
-      );
+    if (plantedToeQ && contactWeight > 0) {
+      finalToeWorldQ.slerp(plantedToeQ, contactWeight);
     }
-
-    const finalFootWorldQ = foot.getWorldQuaternion(new THREE.Quaternion());
-    const finalToeWorldQ = finalFootWorldQ
-      .clone()
-      .multiply(stabilizedToeRelative)
-      .normalize();
 
     setBoneWorldQuaternion(tgt, toe, finalToeWorldQ);
   }
@@ -1161,8 +1235,8 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   };
 
   const footLockState = {
-    L: { segmentId: -1, footQuaternion: null, toeRelativeQuaternion: null, bendDirection: null },
-    R: { segmentId: -1, footQuaternion: null, toeRelativeQuaternion: null, bendDirection: null }
+    L: { segmentId: -1, bendDirection: null },
+    R: { segmentId: -1, bendDirection: null }
   };
 
   for (const side of ['L', 'R']) {
