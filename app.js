@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-presets1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-presets1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-presets1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-presets2';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-presets2';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-presets2';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -593,7 +593,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-presets1',
+      definition.path + '?v=20260920-presets2',
       { cache: 'no-store' }
     );
     if (!response.ok) {
