@@ -213,7 +213,14 @@ for pb in rig.pose.bones:
             continue
         if not isinstance(value, (int, float)):
             continue
-        if key.startswith('ik_') and not key.startswith(NON_SWITCH_IK):
+        if key.startswith('ik_pole_follow'):
+            # Stable-pole mode mirrors the already-working arm poles:
+            # keep leg pole parent-switch on the root/default parent instead
+            # of letting P-POLE-Leg follow the animated IK foot.
+            if value != 0:
+                pb[key] = type(value)(0)
+                changed_props.append(pb.name + ':' + key + '=0')
+        elif key.startswith('ik_') and not key.startswith(NON_SWITCH_IK):
             if value != IK_SWITCH_VALUE:
                 pb[key] = type(value)(IK_SWITCH_VALUE)
                 changed_props.append(pb.name + ':' + key + '=' + str(IK_SWITCH_VALUE))
