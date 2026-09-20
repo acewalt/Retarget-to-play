@@ -417,6 +417,129 @@ function p70Value(modelNode, name) {
   return null;
 }
 
+
+function setP70Values(modelNode, name, values, typeName = 'Vector3D', label = 'Vector') {
+  let p70 = modelNode.children.find(c => c.name === 'Properties70');
+  if (!p70) {
+    p70 = properties70([]);
+    modelNode.children.push(p70);
+  }
+
+  let entry = p70.children.find(p =>
+    p.name === 'P' &&
+    p.properties?.length >= 1 &&
+    p.properties[0].value === name
+  );
+
+  if (!entry) {
+    entry = makeP(name, typeName, label, '', values);
+    p70.children.push(entry);
+    return;
+  }
+
+  const prefix = entry.properties.slice(0, 4);
+  entry.properties = [
+    ...prefix,
+    ...values.map(v => f64(Number(v) || 0))
+  ];
+}
+
+function quaternionToLclDegrees(qCombined, modelNode) {
+  const order = rotationPrelude(modelNode);
+  const pre = quaternionFromDegreesXYZ(modelVector3(modelNode, 'PreRotation'));
+  const post = quaternionFromDegreesXYZ(modelVector3(modelNode, 'PostRotation'));
+  const qLcl = pre.clone()
+    .invert()
+    .multiply(qCombined.clone().normalize())
+    .multiply(post)
+    .normalize();
+
+  const e = new THREE.Euler(0, 0, 0, order).setFromQuaternion(qLcl, order);
+  return [
+    THREE.MathUtils.radToDeg(e.x),
+    THREE.MathUtils.radToDeg(e.y),
+    THREE.MathUtils.radToDeg(e.z)
+  ];
+}
+
+function applyHierarchyRewrite(doc, rewriteEntries = []) {
+  if (!Array.isArray(rewriteEntries) || !rewriteEntries.length) {
+    return { rewired: 0, transforms: 0, skipped: [] };
+  }
+
+  const modelMap = buildModelMap(doc);
+  const connections = getConnections(doc);
+  const modelIds = new Set([...modelMap.values()].map(x => String(x.uid)));
+  const skipped = [];
+  let rewired = 0;
+  let transforms = 0;
+
+  for (const entry of rewriteEntries) {
+    const child = modelMap.get(entry.child);
+    const parent = modelMap.get(entry.parent);
+
+    if (!child || !parent) {
+      skipped.push({
+        child: entry.child,
+        parent: entry.parent,
+        reason: !child ? 'child missing' : 'parent missing'
+      });
+      continue;
+    }
+
+    let changedConnection = false;
+
+    for (const c of connections.children) {
+      if (c.name !== 'C' || c.properties.length < 3) continue;
+      if (c.properties[0]?.value !== 'OO') continue;
+
+      const src = c.properties[1]?.value;
+      const dst = c.properties[2]?.value;
+      if (String(src) !== String(child.uid)) continue;
+      if (!modelIds.has(String(dst))) continue;
+
+      c.properties[2].type = 'L';
+      c.properties[2].value = BigInt(parent.uid);
+      changedConnection = true;
+      rewired++;
+      break;
+    }
+
+    if (!changedConnection) {
+      connections.children.push(connection('OO', child.uid, parent.uid));
+      rewired++;
+    }
+
+    if (Array.isArray(entry.position) && entry.position.length >= 3) {
+      setP70Values(child.node, 'Lcl Translation', entry.position.slice(0, 3));
+      transforms++;
+    }
+
+    if (Array.isArray(entry.quaternion) && entry.quaternion.length >= 4) {
+      const q = new THREE.Quaternion(
+        Number(entry.quaternion[0]) || 0,
+        Number(entry.quaternion[1]) || 0,
+        Number(entry.quaternion[2]) || 0,
+        Number(entry.quaternion[3]) || 1
+      ).normalize();
+
+      setP70Values(
+        child.node,
+        'Lcl Rotation',
+        quaternionToLclDegrees(q, child.node)
+      );
+      transforms++;
+    }
+
+    if (Array.isArray(entry.scale) && entry.scale.length >= 3) {
+      setP70Values(child.node, 'Lcl Scaling', entry.scale.slice(0, 3));
+      transforms++;
+    }
+  }
+
+  return { rewired, transforms, skipped };
+}
+
 function modelRotationOrder(modelNode) {
   const value = p70Value(modelNode, 'RotationOrder');
   return value?.length ? Number(value[0]) : 0;
@@ -689,6 +812,7 @@ function shouldExportPosition(name, options = {}) {
     name === 'TORSO-Spine' ||
     /^IK-(Hand|Foot)\./.test(name) ||
     /^POLE-(Arm|Leg)\./.test(name) ||
+    (options.includeControlPositions && /^FK-/.test(name)) ||
     (options.includeDeformPositions && /^DEF-/.test(name));
 }
 
@@ -747,7 +871,8 @@ function buildAnimationPlan(doc, clip, options) {
  */
 export function injectAnimationsIntoOriginalFBX(originalBuffer, clips, {
   rotationMode = 'xyz',
-  currentActionName = null
+  currentActionName = null,
+  hierarchyRewrite = null
 } = {}) {
   if (!originalBuffer) throw new Error('WaltExactFBX: no se conservó el Target FBX original.');
 
@@ -757,6 +882,7 @@ export function injectAnimationsIntoOriginalFBX(originalBuffer, clips, {
   const parser = new ExactBinaryParser(originalBuffer.slice(0));
   const doc = parser.parse();
 
+  const hierarchyReport = applyHierarchyRewrite(doc, hierarchyRewrite || []);
   const removed = removeExistingAnimation(doc);
   const objects = getObjects(doc);
   const connections = getConnections(doc);
@@ -773,11 +899,13 @@ export function injectAnimationsIntoOriginalFBX(originalBuffer, clips, {
   for (const clipEntry of validClips) {
     const clip = clipEntry.clip || clipEntry;
     const includeDeformPositions = !!clipEntry.includeDeformPositions;
+    const includeControlPositions = !!clipEntry.includeControlPositions;
     const actionName = clipEntry.actionName || clip.name || 'Retargeted_Action';
 
     const groups = buildAnimationPlan(doc, clip, {
       rotationMode,
-      includeDeformPositions
+      includeDeformPositions,
+      includeControlPositions
     });
 
     if (!groups.length) continue;
@@ -840,7 +968,8 @@ export function injectAnimationsIntoOriginalFBX(originalBuffer, clips, {
       modelsAnimated: new Set(groups.map(g => g.model.uid.toString())).size,
       curveNodes: localCurveNodes,
       curves: localCurves,
-      includeDeformPositions
+      includeDeformPositions,
+      includeControlPositions
     });
   }
 
@@ -872,7 +1001,8 @@ export function injectAnimationsIntoOriginalFBX(originalBuffer, clips, {
       stacks: stackCount,
       curveNodes: curveNodeCount,
       curves: curveCount,
-      rotationMode: 'fbx-original-order'
+      rotationMode: 'fbx-original-order',
+      hierarchy: hierarchyReport
     }
   };
 }
