@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-foot1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-action1" />
   <script type="importmap">
   {
     "imports": {
@@ -274,11 +274,14 @@
               <option value="legacy">Legacy · reconstruir desde Three.js</option>
             </select>
 
-            <label class="field-label" for="rotationMode">Rotación de la Action</label>
+            <label class="field-label" for="rotationMode">Curvas de rotación dentro del FBX</label>
             <select id="rotationMode">
-              <option value="xyz" selected>XYZ Euler · recomendado</option>
-              <option value="quaternion">Quaternion / FBX order</option>
+              <option value="xyz" selected>XYZ Euler · FBX</option>
+              <option value="quaternion">Orden original del FBX</option>
             </select>
+
+            <button id="exportBlenderAction" class="wide-button" type="button" disabled>Exportar Action XYZ para Blender</button>
+            <p class="hint">Para el rig original usa esta Action: se escribe como matrix_basis con rotation_euler XYZ. Blender puede importar un FBX como Quaternion aunque sus curvas Lcl Rotation sean Euler.</p>
 
             <label class="setting-row">
               <div><b>Action DEF Preview</b><small>Hace que el FBX standalone mueva la malla sin constraints</small></div>
@@ -306,6 +309,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-foot1"></script>
+  <script type="module" src="./app.js?v=20260920-action1"></script>
 </body>
 </html>
