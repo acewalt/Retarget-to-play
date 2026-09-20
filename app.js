@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rootsplit1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-original1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-cleanrig1';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rootsplit1';
 
 const $ = (id) => document.getElementById(id);
@@ -1618,6 +1618,275 @@ function buildOriginalRigTransferClip(clip) {
   );
 }
 
+
+function buildCloudRigCleanHierarchyPlan() {
+  const tgt = state.target;
+  if (!tgt.root) return [];
+
+  restoreRest(tgt);
+  updateSlotWorld(tgt);
+
+  const lowerSectionName =
+    findBoneByOriginalExact(tgt, ['HTP-Spine', 'HIP-Spine']);
+
+  const lowerSectionBone = lowerSectionName
+    ? tgt.bones.get(lowerSectionName)
+    : null;
+
+  const lowerSectionOriginal = lowerSectionBone
+    ? originalObjectName(lowerSectionBone)
+    : null;
+
+  const pairs = [
+    ['FK-Spine', 'TORSO-Spine'],
+    ['FK-Chest', 'FK-Spine'],
+
+    ['FK-Shoulder.L', 'FK-Chest'],
+    ['FK-UpperArm.L', 'FK-Shoulder.L'],
+    ['FK-Forearm.L', 'FK-UpperArm.L'],
+    ['FK-Hand.L', 'FK-Forearm.L'],
+
+    ['FK-Shoulder.R', 'FK-Chest'],
+    ['FK-UpperArm.R', 'FK-Shoulder.R'],
+    ['FK-Forearm.R', 'FK-UpperArm.R'],
+    ['FK-Hand.R', 'FK-Forearm.R'],
+
+    ['FK-Neck', 'FK-Chest'],
+    ['FK-Head', 'FK-Neck'],
+
+    ...(lowerSectionOriginal ? [['FK-Hips', lowerSectionOriginal]] : []),
+
+    ['FK-Thigh.L', 'FK-Hips'],
+    ['FK-Knee.L', 'FK-Thigh.L'],
+    ['FK-Foot.L', 'FK-Knee.L'],
+    ['FK-Toes.L', 'FK-Foot.L'],
+
+    ['FK-Thigh.R', 'FK-Hips'],
+    ['FK-Knee.R', 'FK-Thigh.R'],
+    ['FK-Foot.R', 'FK-Knee.R'],
+    ['FK-Toes.R', 'FK-Foot.R']
+  ];
+
+  const entries = [];
+  const localMatrix = new THREE.Matrix4();
+  const localPosition = new THREE.Vector3();
+  const localQuaternion = new THREE.Quaternion();
+  const localScale = new THREE.Vector3();
+
+  for (const [childOriginal, parentOriginal] of pairs) {
+    const childName = findBoneByOriginalExact(tgt, [childOriginal]);
+    const parentName = findBoneByOriginalExact(tgt, [parentOriginal]);
+    if (!childName || !parentName) continue;
+
+    const child = tgt.bones.get(childName);
+    const parent = tgt.bones.get(parentName);
+    if (!child || !parent) continue;
+
+    localMatrix.copy(parent.matrixWorld)
+      .invert()
+      .multiply(child.matrixWorld);
+
+    localMatrix.decompose(localPosition, localQuaternion, localScale);
+
+    entries.push({
+      child: originalObjectName(child) || childOriginal,
+      parent: originalObjectName(parent) || parentOriginal,
+      runtimeChild: childName,
+      runtimeParent: parentName,
+      position: [localPosition.x, localPosition.y, localPosition.z],
+      quaternion: [
+        localQuaternion.x,
+        localQuaternion.y,
+        localQuaternion.z,
+        localQuaternion.w
+      ],
+      scale: [localScale.x, localScale.y, localScale.z]
+    });
+  }
+
+  restoreRest(tgt);
+  return entries;
+}
+
+function poseMatrixForCleanHierarchy(tgt, runtime, runtimeName, out) {
+  const bone = tgt.bones.get(runtimeName);
+  if (!bone) return null;
+
+  const virtual = runtime?.virtualFk?.get(runtimeName);
+  const position = virtual?.position
+    ? virtual.position
+    : bone.getWorldPosition(new THREE.Vector3());
+  const quaternion = virtual?.quaternion
+    ? virtual.quaternion
+    : bone.getWorldQuaternion(new THREE.Quaternion());
+  const scale = bone.getWorldScale(new THREE.Vector3());
+
+  return out.compose(
+    position.clone(),
+    quaternion.clone(),
+    scale
+  );
+}
+
+function bakeCleanHierarchyControlClip(sourceClip, rewritePlan) {
+  const tgt = state.target;
+  const runtime = tgt.rigRuntime;
+
+  if (!tgt.root || !sourceClip || !rewritePlan?.length) return sourceClip;
+
+  const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
+  const frameCount = Math.max(2, Math.ceil(sourceClip.duration * fps) + 1);
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(sourceClip.duration, i / fps)
+  );
+
+  const rewrittenNames = new Set(rewritePlan.map(x => x.runtimeChild));
+  const baseTracks = sourceClip.tracks
+    .filter(track => {
+      const parsed = parseTrackTarget(track.name);
+      if (!parsed || !rewrittenNames.has(parsed.nodeName)) return true;
+      return !['position', 'quaternion', 'scale'].includes(parsed.property);
+    })
+    .map(track => track.clone());
+
+  const data = new Map(
+    rewritePlan.map(entry => [
+      entry.runtimeChild,
+      { p: [], q: [], s: [], previousQ: null, entry }
+    ])
+  );
+
+  restoreRest(tgt);
+  tgt.mixer?.stopAllAction();
+
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(sourceClip).play();
+
+  const previousRuntimeEnabled = runtime?.enabled;
+  if (runtime) runtime.enabled = true;
+
+  const childWorld = new THREE.Matrix4();
+  const parentWorld = new THREE.Matrix4();
+  const local = new THREE.Matrix4();
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+
+  try {
+    for (const time of times) {
+      restoreRest(tgt);
+      mixer.setTime(Number(time));
+      updateSlotWorld(tgt);
+
+      runtime?.update?.();
+      updateSlotWorld(tgt);
+
+      for (const entry of rewritePlan) {
+        const d = data.get(entry.runtimeChild);
+        if (!d) continue;
+
+        if (
+          !poseMatrixForCleanHierarchy(
+            tgt,
+            runtime,
+            entry.runtimeChild,
+            childWorld
+          ) ||
+          !poseMatrixForCleanHierarchy(
+            tgt,
+            runtime,
+            entry.runtimeParent,
+            parentWorld
+          )
+        ) {
+          continue;
+        }
+
+        local.copy(parentWorld)
+          .invert()
+          .multiply(childWorld);
+
+        local.decompose(p, q, s);
+        q.normalize();
+
+        if (d.previousQ && d.previousQ.dot(q) < 0) {
+          q.x *= -1;
+          q.y *= -1;
+          q.z *= -1;
+          q.w *= -1;
+        }
+
+        d.p.push(p.x, p.y, p.z);
+        d.q.push(q.x, q.y, q.z, q.w);
+        d.s.push(s.x, s.y, s.z);
+        d.previousQ = q.clone();
+      }
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    if (runtime) runtime.enabled = previousRuntimeEnabled;
+    restoreRest(tgt);
+  }
+
+  const tracks = [...baseTracks];
+
+  for (const [name, d] of data) {
+    if (d.p.length === times.length * 3) {
+      tracks.push(new THREE.VectorKeyframeTrack(`${name}.position`, times, d.p));
+    }
+
+    if (d.q.length === times.length * 4) {
+      tracks.push(new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q));
+    }
+
+    if (d.s.length === times.length * 3) {
+      tracks.push(new THREE.VectorKeyframeTrack(`${name}.scale`, times, d.s));
+    }
+  }
+
+  return new THREE.AnimationClip(
+    'Retargeted_CleanControls',
+    sourceClip.duration,
+    tracks
+  );
+}
+
+function buildStandaloneCleanExport() {
+  const hierarchy = buildCloudRigCleanHierarchyPlan();
+
+  if (!hierarchy.length) {
+    throw new Error('No pude construir la jerarquía limpia del CloudRig.');
+  }
+
+  const controlSource = state.targetPreviewClip || state.exportClip;
+  const cleanControls = bakeCleanHierarchyControlClip(
+    controlSource,
+    hierarchy
+  );
+
+  const defBaked = bakeDeformPreviewClip();
+
+  if (!defBaked) {
+    throw new Error(
+      'No pude hornear los DEF del CloudRig para mover la malla standalone.'
+    );
+  }
+
+  const standalone = mergeClips(
+    'Retargeted_Standalone',
+    [cleanControls, defBaked]
+  );
+
+  return {
+    hierarchy,
+    clip: standalone,
+    controlTracks: cleanControls.tracks.length,
+    defTracks: defBaked.tracks.length
+  };
+}
+
 function downloadTextFile(text, fileName, mime = 'text/plain') {
   const blob = new Blob([text], { type: mime });
   const url = URL.createObjectURL(blob);
@@ -1668,7 +1937,37 @@ async function exportTargetFbx() {
     let bytes;
     let report = null;
 
-    if (exportMode === 'exact') {
+    if (exportMode === 'clean') {
+      const clean = buildStandaloneCleanExport();
+      const originalStandalone = createOriginalNameExportClip(
+        clean.clip,
+        state.target
+      );
+
+      const result = injectAnimationsIntoOriginalFBX(
+        state.target.originalBuffer,
+        [{
+          clip: originalStandalone,
+          actionName: 'Retargeted_Standalone',
+          includeDeformPositions: true,
+          includeControlPositions: true
+        }],
+        {
+          rotationMode,
+          currentActionName: 'Retargeted_Standalone',
+          hierarchyRewrite: clean.hierarchy
+        }
+      );
+
+      bytes = result.bytes;
+      report = result.report;
+
+      log(
+        `FBX CLEAN: jerarquía FK reescrita=${report.hierarchy?.rewired || 0}; ` +
+        `controles=${clean.controlTracks} tracks; DEF baked=${clean.defTracks} tracks. ` +
+        'La Action Retargeted_Standalone mueve controles y malla sin constraints.'
+      );
+    } else if (exportMode === 'exact') {
       const exactActions = [
         {
           clip: exportClip,
@@ -1775,16 +2074,18 @@ async function exportTargetFbx() {
     const base = (state.target.fileName || 'target.fbx').replace(/\.fbx$/i, '');
 
     a.href = url;
-    a.download = exportMode === 'exact'
-      ? `${base}_retarget_exact.fbx`
-      : `${base}_retarget_legacy.fbx`;
+    a.download = exportMode === 'clean'
+      ? `${base}_retarget_clean.fbx`
+      : exportMode === 'exact'
+        ? `${base}_retarget_exact.fbx`
+        : `${base}_retarget_legacy.fbx`;
 
     document.body.appendChild(a);
     a.click();
     a.remove();
     setTimeout(() => URL.revokeObjectURL(url), 1000);
 
-    if (exportMode === 'exact' && $('downloadOriginalRigAction')?.checked) {
+    if ((exportMode === 'clean' || exportMode === 'exact') && $('downloadOriginalRigAction')?.checked) {
       const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
       const originalRigRotationMode =
         $('rotationMode')?.value === 'quaternion' ? 'quaternion' : 'xyz';
@@ -1821,13 +2122,21 @@ async function exportTargetFbx() {
     updateWorkflowUI();
 
     setStatus(
-      exportMode === 'exact' ? 'FBX exacto exportado' : 'FBX legacy exportado',
+      exportMode === 'clean'
+        ? 'FBX clean exportado'
+        : exportMode === 'exact'
+          ? 'FBX exacto exportado'
+          : 'FBX legacy exportado',
       'good'
     );
 
     log(
       `Export terminado: "${exportClip.name}" · ${exportClip.tracks.length} tracks · ` +
-      `${exportMode === 'exact' ? 'FBX original preservado' : 'FBX reconstruido'}.`
+      `${exportMode === 'clean'
+        ? 'FBX original + jerarquía FK compensada + DEF baked'
+        : exportMode === 'exact'
+          ? 'FBX original preservado'
+          : 'FBX reconstruido'}.`
     );
   } catch (err) {
     console.error(err);
