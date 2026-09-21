@@ -1230,10 +1230,12 @@ async function loadFbx(file, slot, view) {
     updateConditionalFeatureVisibility(false);
   }
 
-  updateTransferBridgeVisibility(false);
-
   if (bothLoaded && $('preset').value !== 'none') {
+    state.activePreset = null;
+    updateTransferBridgeVisibility(false);
     void loadPreset().then(() => updateTransferBridgeVisibility(true));
+  } else {
+    updateTransferBridgeVisibility(false);
   }
 }
 
