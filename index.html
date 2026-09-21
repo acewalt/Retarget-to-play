@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-restposeeditor6" />
+  <link rel="stylesheet" href="./styles.css?v=20260921-progressiveui1" />
   <script type="importmap">
   {
     "imports": {
@@ -36,10 +36,9 @@
 
       <nav class="topnav" aria-label="Mesas de trabajo">
         <button class="nav-item active" type="button" data-workspace="workspace">Workspace</button>
-        <button class="nav-item" type="button" data-workspace="mappings">Mappings</button>
+        <button id="navMappings" class="nav-item conditional-feature" type="button" data-workspace="mappings" hidden>Mappings</button>
         <button class="nav-item" type="button" data-workspace="restpose">Redefine Rest Pose</button>
-        <button class="nav-item" type="button" data-workspace="animations">Animations</button>
-        <button class="nav-item" type="button" data-workspace="export">Export</button>
+        <button id="navAnimations" class="nav-item conditional-feature" type="button" data-workspace="animations" hidden>Animations</button>
       </nav>
 
       <div class="top-actions">
@@ -67,7 +66,7 @@
             <span class="step-dot">2</span>
             <div><b>Import Target</b><small>Rig de destino</small></div>
           </li>
-          <li id="stepMap" class="workflow-step" data-go-workspace="mappings">
+          <li id="stepMap" class="workflow-step conditional-feature" data-go-workspace="mappings" hidden>
             <span class="step-dot">3</span>
             <div><b>Bone Map</b><small>Emparejar esqueletos</small></div>
           </li>
@@ -75,7 +74,7 @@
             <span class="step-dot">4</span>
             <div><b>Retarget FK</b><small>Transferir movimiento</small></div>
           </li>
-          <li id="stepIk" class="workflow-step" data-go-workspace="animations">
+          <li id="stepIk" class="workflow-step conditional-feature" data-go-workspace="animations" hidden>
             <span class="step-dot">5</span>
             <div><b>FK → IK</b><small>Bake de controles</small></div>
           </li>
@@ -238,7 +237,7 @@
             <p class="notice" id="targetAnimNotice">Si el Target trae Actions, sus curvas se reescriben a su Bind/Rest Pose antes del Transfer.</p>
           </section>
 
-          <section class="settings-section">
+          <section id="mappingSettingsSection" class="settings-section conditional-feature" hidden>
             <div class="settings-heading"><div><span class="eyebrow">MAPPING</span><h2>Preset</h2></div></div>
             <label class="field-label" for="preset">Skeleton preset</label>
             <select id="preset">
@@ -352,6 +351,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-restposeeditor6"></script>
+  <script type="module" src="./app.js?v=20260921-progressiveui1"></script>
 </body>
 </html>
