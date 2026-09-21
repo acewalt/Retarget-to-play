@@ -324,3 +324,62 @@ h2,p{margin:0}
 .restpose-gizmo-toggle .switch:checked:before{
   transform:translateX(14px);
 }
+
+
+/* Center quick step shown after Transfer */
+.quick-ik-step{
+  width:100%;
+  display:grid;
+  gap:6px;
+  justify-items:center;
+  margin-top:8px;
+  animation:quickIkReveal .62s cubic-bezier(.17,.88,.24,1.14) both;
+}
+.quick-ik-hint{
+  display:inline-flex;
+  align-items:center;
+  gap:5px;
+  padding:4px 8px;
+  border-radius:999px;
+  background:var(--primary-soft);
+  color:var(--primary);
+  font-size:9px;
+  font-weight:800;
+  letter-spacing:.02em;
+}
+.quick-ik-button{
+  width:100%;
+  min-height:44px;
+  border-color:color-mix(in srgb,var(--primary) 35%,var(--border));
+  background:color-mix(in srgb,var(--primary-soft) 76%,var(--surface));
+  color:var(--primary);
+  font-weight:800;
+  box-shadow:0 8px 18px color-mix(in srgb,var(--primary) 14%,transparent);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:7px;
+}
+.quick-ik-button:hover:not(:disabled){
+  transform:translateY(-1px);
+  box-shadow:0 11px 22px color-mix(in srgb,var(--primary) 22%,transparent);
+}
+.quick-ik-button.done{
+  color:var(--success);
+  border-color:color-mix(in srgb,var(--success) 35%,var(--border));
+  background:var(--success-soft);
+}
+.quick-ik-step>small{
+  font-size:8.5px;
+  line-height:1.25;
+  color:var(--muted);
+  text-align:center;
+}
+@keyframes quickIkReveal{
+  0%{opacity:0;transform:translateY(-8px) scale(.9);filter:blur(5px)}
+  60%{opacity:1;transform:translateY(2px) scale(1.03);filter:blur(0)}
+  100%{opacity:1;transform:translateY(0) scale(1);filter:blur(0)}
+}
+@media(prefers-reduced-motion:reduce){
+  .quick-ik-step{animation:none!important}
+}
