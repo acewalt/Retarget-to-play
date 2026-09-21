@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-targetbaseline2';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-restposeeditor1';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -218,7 +219,14 @@ const state = {
   cameraSyncLock: false,
   exported: false,
   workspaceView: 'workspace',
-  workspaceMappingCollapsed: true
+  workspaceMappingCollapsed: true,
+  restEditor: {
+    selectedBone: null,
+    selectedRole: null,
+    transform: null,
+    transformHelper: null,
+    hasCustomRest: false
+  }
 };
 
 function makeSlot(kind) {
@@ -300,6 +308,263 @@ function createViewport(container) {
 
 const sourceView = createViewport($('sourceViewport'));
 const targetView = createViewport($('targetViewport'));
+
+const REST_POSE_BONES = [
+  { role: 'leftUpperArm', label: 'Left Upper Arm', semantic: 'LeftArm', aliases: ['LeftArm', 'upper_arm_fk.L', 'FK-UpperArm.L'] },
+  { role: 'rightUpperArm', label: 'Right Upper Arm', semantic: 'RightArm', aliases: ['RightArm', 'upper_arm_fk.R', 'FK-UpperArm.R'] },
+  { role: 'leftForearm', label: 'Left Forearm / Elbow', semantic: 'LeftForeArm', aliases: ['LeftForeArm', 'forearm_fk.L', 'FK-Forearm.L'] },
+  { role: 'rightForearm', label: 'Right Forearm / Elbow', semantic: 'RightForeArm', aliases: ['RightForeArm', 'forearm_fk.R', 'FK-Forearm.R'] },
+  { role: 'leftThigh', label: 'Left Thigh', semantic: 'LeftUpLeg', aliases: ['LeftUpLeg', 'thigh_fk.L', 'FK-Thigh.L'] },
+  { role: 'rightThigh', label: 'Right Thigh', semantic: 'RightUpLeg', aliases: ['RightUpLeg', 'thigh_fk.R', 'FK-Thigh.R'] },
+  { role: 'leftShin', label: 'Left Shin / Knee', semantic: 'LeftLeg', aliases: ['LeftLeg', 'shin_fk.L', 'FK-Knee.L'] },
+  { role: 'rightShin', label: 'Right Shin / Knee', semantic: 'RightLeg', aliases: ['RightLeg', 'shin_fk.R', 'FK-Knee.R'] }
+];
+
+const REST_POSE_MIRROR = new Map([
+  ['leftUpperArm', 'rightUpperArm'], ['rightUpperArm', 'leftUpperArm'],
+  ['leftForearm', 'rightForearm'], ['rightForearm', 'leftForearm'],
+  ['leftThigh', 'rightThigh'], ['rightThigh', 'leftThigh'],
+  ['leftShin', 'rightShin'], ['rightShin', 'leftShin']
+]);
+
+function resolveRestPoseBone(slot, definition) {
+  if (!slot?.root || !definition) return null;
+  return findBoneByOriginalExact(slot, definition.aliases || []) ||
+    findSemanticBone(slot, definition.semantic) || null;
+}
+
+function availableRestPoseBones() {
+  return REST_POSE_BONES.map(definition => ({
+    ...definition,
+    name: resolveRestPoseBone(state.source, definition)
+  })).filter(entry => !!entry.name);
+}
+
+function restPoseEntryByName(name) {
+  return availableRestPoseBones().find(entry => entry.name === name) || null;
+}
+
+function ensureRestPoseTransformControls() {
+  if (state.restEditor.transform) return state.restEditor.transform;
+
+  const transform = new TransformControls(sourceView.camera, sourceView.renderer.domElement);
+  transform.setMode('rotate');
+  transform.setSpace('local');
+  transform.setSize(0.78);
+
+  const helper = transform.getHelper();
+  helper.visible = false;
+  sourceView.scene.add(helper);
+
+  transform.addEventListener('dragging-changed', event => {
+    sourceView.controls.enabled = !event.value;
+  });
+
+  transform.addEventListener('objectChange', () => {
+    updateSlotWorld(state.source);
+    updateRigOverlays();
+  });
+
+  state.restEditor.transform = transform;
+  state.restEditor.transformHelper = helper;
+  return transform;
+}
+
+function detachRestPoseTransform() {
+  state.restEditor.transform?.detach?.();
+  if (state.restEditor.transformHelper) state.restEditor.transformHelper.visible = false;
+  sourceView.controls.enabled = true;
+}
+
+function updateRestPoseUi() {
+  const select = $('restBoneSelect');
+  const entries = availableRestPoseBones();
+
+  if (select) {
+    const previous = state.restEditor.selectedBone;
+    select.innerHTML = '';
+
+    if (!state.source.root) {
+      select.add(new Option('Carga un Source', ''));
+      select.disabled = true;
+    } else if (!entries.length) {
+      select.add(new Option('No encontré brazos/piernas compatibles', ''));
+      select.disabled = true;
+    } else {
+      select.disabled = false;
+      for (const entry of entries) {
+        const bone = state.source.bones.get(entry.name);
+        const original = originalObjectName(bone) || entry.name;
+        select.add(new Option(`${entry.label} · ${original}`, entry.name));
+      }
+
+      const selected = entries.some(entry => entry.name === previous)
+        ? previous
+        : entries[0].name;
+      select.value = selected;
+    }
+  }
+
+  const hasSource = !!state.source.root;
+  const hasSelection = !!state.restEditor.selectedBone;
+  if ($('copyRestBone')) $('copyRestBone').disabled = !hasSelection;
+  if ($('resetRestBone')) $('resetRestBone').disabled = !hasSelection;
+  if ($('resetRestPose')) $('resetRestPose').disabled = !hasSource;
+  if ($('commitRestPose')) $('commitRestPose').disabled = !hasSource;
+
+  const status = $('restPoseStatus');
+  if (status) {
+    status.textContent = !hasSource
+      ? 'Carga un Source. El Target queda como referencia visual.'
+      : state.restEditor.hasCustomRest
+        ? 'Rest personalizada activa para el próximo Transfer.'
+        : 'Rota brazos, codos, muslos o rodillas y confirma la pose cuando termine.';
+  }
+}
+
+function selectRestPoseBone(name) {
+  if (!state.source.root || !name || !state.source.bones.has(name)) {
+    state.restEditor.selectedBone = null;
+    state.restEditor.selectedRole = null;
+    detachRestPoseTransform();
+    updateRestPoseUi();
+    return;
+  }
+
+  const entry = restPoseEntryByName(name);
+  state.restEditor.selectedBone = name;
+  state.restEditor.selectedRole = entry?.role || null;
+
+  const transform = ensureRestPoseTransformControls();
+  transform.attach(state.source.bones.get(name));
+  transform.setMode('rotate');
+  if (state.restEditor.transformHelper) state.restEditor.transformHelper.visible = state.workspaceView === 'restpose';
+
+  const select = $('restBoneSelect');
+  if (select) select.value = name;
+  updateRestPoseUi();
+}
+
+function mirrorRestPoseDelta(deltaWorld) {
+  const reflection = new THREE.Matrix4().makeScale(-1, 1, 1);
+  const rotation = new THREE.Matrix4().makeRotationFromQuaternion(deltaWorld);
+  rotation.premultiply(reflection).multiply(reflection);
+  return new THREE.Quaternion().setFromRotationMatrix(rotation).normalize();
+}
+
+function copySelectedRestBone() {
+  const selectedName = state.restEditor.selectedBone;
+  const selectedRole = state.restEditor.selectedRole;
+  if (!selectedName || !selectedRole) return;
+
+  const mirrorRole = REST_POSE_MIRROR.get(selectedRole);
+  const mirrorEntry = availableRestPoseBones().find(entry => entry.role === mirrorRole);
+  if (!mirrorEntry) return;
+
+  const src = state.source;
+  const selectedBone = src.bones.get(selectedName);
+  const mirrorBone = src.bones.get(mirrorEntry.name);
+  const selectedRest = src.rest.get(selectedName);
+  const mirrorRest = src.rest.get(mirrorEntry.name);
+  if (!selectedBone || !mirrorBone || !selectedRest || !mirrorRest) return;
+
+  updateSlotWorld(src);
+  const currentWorld = selectedBone.getWorldQuaternion(new THREE.Quaternion());
+  const deltaWorld = currentWorld.multiply(selectedRest.worldQuat.clone().invert()).normalize();
+  const mirroredDelta = mirrorRestPoseDelta(deltaWorld);
+  const desiredMirrorWorld = mirroredDelta.multiply(mirrorRest.worldQuat).normalize();
+
+  setBoneWorldQuaternion(src, mirrorBone, desiredMirrorWorld);
+  updateSlotWorld(src);
+  updateRigOverlays();
+
+  log(`Redefine Rest Pose: ${originalObjectName(selectedBone) || selectedName} copiado en espejo a ${originalObjectName(mirrorBone) || mirrorEntry.name}.`);
+}
+
+function resetSelectedRestBone() {
+  const name = state.restEditor.selectedBone;
+  const rest = name ? state.source.rest.get(name) : null;
+  const bone = name ? state.source.bones.get(name) : null;
+  if (!rest || !bone) return;
+
+  bone.position.copy(rest.position);
+  bone.quaternion.copy(rest.quaternion);
+  bone.scale.copy(rest.scale);
+  updateSlotWorld(state.source);
+  updateRigOverlays();
+}
+
+function resetRestPoseEditorPose() {
+  if (!state.source.root) return;
+  restoreRest(state.source);
+  updateRigOverlays();
+}
+
+function invalidateRetargetAfterRestChange() {
+  state.fkClip = null;
+  state.fkRawClip = null;
+  state.ikOnlyClip = null;
+  state.deformPreviewClip = null;
+  state.exportClip = null;
+  state.targetPreviewClip = null;
+  state.exported = false;
+
+  if (state.target.root) {
+    state.target.mixer?.stopAllAction?.();
+    state.target.action = null;
+    state.target.mixer = null;
+    state.target.activeClip = null;
+    restoreRest(state.target);
+  }
+
+  updateButtons();
+  updateStats();
+  updateWorkflowUI();
+  updateTimelineBounds();
+}
+
+function commitRestPoseEditor() {
+  if (!state.source.root) return;
+
+  updateSlotWorld(state.source);
+  captureRest(state.source);
+  state.source.rigRuntime?.captureRest?.();
+  state.restEditor.hasCustomRest = true;
+  invalidateRetargetAfterRestChange();
+
+  const selected = state.restEditor.selectedBone;
+  if (selected && state.source.bones.has(selected)) selectRestPoseBone(selected);
+  updateRestPoseUi();
+
+  setStatus('Source Rest Pose redefinida', 'good');
+  log('Redefine Rest Pose: la pose actual del Source se usará como Rest para el próximo retarget. La Action original no fue modificada.');
+}
+
+function enterRestPoseWorkspace() {
+  state.playing = false;
+  if ($('playPause')) $('playPause').textContent = '▶';
+
+  if (state.source.root) {
+    restoreRest(state.source);
+    updateSlotWorld(state.source);
+  }
+  if (state.target.root) {
+    restoreRest(state.target);
+    updateSlotWorld(state.target);
+  }
+
+  updateRestPoseUi();
+  const entries = availableRestPoseBones();
+  const selected = entries.some(entry => entry.name === state.restEditor.selectedBone)
+    ? state.restEditor.selectedBone
+    : entries[0]?.name;
+  if (selected) selectRestPoseBone(selected);
+}
+
+function leaveRestPoseWorkspace() {
+  detachRestPoseTransform();
+  if (state.source.root) restoreRest(state.source);
+}
 
 function applyViewportTheme(view, theme = currentTheme()) {
   const palette = viewportPalette(theme);
@@ -649,6 +914,14 @@ async function loadFbx(file, slot, view) {
   refreshMapUi();
   updateButtons();
   updateTimelineBounds();
+
+  if (slot.kind === 'source') {
+    state.restEditor.selectedBone = null;
+    state.restEditor.selectedRole = null;
+    state.restEditor.hasCustomRest = false;
+  }
+  updateRestPoseUi();
+
   setStatus('LOCAL · sin subida', 'good');
 
   if (state.source.root && state.target.root && $('preset').value !== 'none') {
@@ -5236,8 +5509,11 @@ function resizeViewports() {
 }
 
 function setWorkspaceView(view) {
-  const allowed = new Set(['workspace', 'mappings', 'animations', 'export']);
+  const allowed = new Set(['workspace', 'mappings', 'restpose', 'animations', 'export']);
   const next = allowed.has(view) ? view : 'workspace';
+  const previous = state.workspaceView;
+
+  if (previous === 'restpose' && next !== 'restpose') leaveRestPoseWorkspace();
   state.workspaceView = next;
 
   const workspace = $('mainWorkspace');
@@ -5248,16 +5524,19 @@ function setWorkspaceView(view) {
   const settingsPanel = document.querySelector('.settings-panel');
   const bridge = document.querySelector('.retarget-bridge');
   const mappingCard = $('mappingCard');
+  const restToolbar = $('restPoseToolbar');
   const isAnimation = next === 'animations';
+  const isRestPose = next === 'restpose';
+  const isFocusDesk = isAnimation || isRestPose;
 
   shell?.classList.toggle('animations-focus', isAnimation);
+  shell?.classList.toggle('restpose-focus', isRestPose);
 
-  // No depender únicamente del CSS: ocultamos físicamente las zonas
-  // que no pertenecen a cada mesa de trabajo.
   if (mappingCard) mappingCard.hidden = next !== 'mappings';
-  if (workflowSidebar) workflowSidebar.hidden = isAnimation;
-  if (settingsPanel) settingsPanel.hidden = isAnimation;
-  if (bridge) bridge.hidden = isAnimation || next === 'export';
+  if (restToolbar) restToolbar.hidden = !isRestPose;
+  if (workflowSidebar) workflowSidebar.hidden = isFocusDesk;
+  if (settingsPanel) settingsPanel.hidden = isFocusDesk;
+  if (bridge) bridge.hidden = isAnimation || isRestPose || next === 'export';
 
   document.querySelectorAll('[data-workspace]').forEach(button => {
     button.classList.toggle('active', button.dataset.workspace === next);
@@ -5268,6 +5547,12 @@ function setWorkspaceView(view) {
     setMappingCollapsed(false, false);
   } else if (next === 'workspace') {
     setMappingCollapsed(true, false);
+  }
+
+  if (isRestPose) {
+    enterRestPoseWorkspace();
+  } else if (previous === 'restpose') {
+    requestAnimationFrame(() => seek(state.playTime));
   }
 
   requestAnimationFrame(() => {
@@ -5442,6 +5727,19 @@ $('targetPrefix').onchange = () => {
   if ($('preset').value !== 'none' && state.source.root && state.target.root) void loadPreset();
 };
 $('applyRetarget').onclick = applyRetarget;
+
+$('restBoneSelect').onchange = () => selectRestPoseBone($('restBoneSelect').value);
+$('restSpaceToggle').onclick = () => {
+  const transform = ensureRestPoseTransformControls();
+  const nextSpace = transform.space === 'local' ? 'world' : 'local';
+  transform.setSpace(nextSpace);
+  $('restSpaceToggle').textContent = nextSpace === 'local' ? 'Local' : 'World';
+};
+$('copyRestBone').onclick = copySelectedRestBone;
+$('resetRestBone').onclick = resetSelectedRestBone;
+$('resetRestPose').onclick = resetRestPoseEditorPose;
+$('commitRestPose').onclick = commitRestPoseEditor;
+
 $('convertIk').onclick = convertFkToIk;
 $('exportFbx').onclick = exportTargetFbx;
 $('exportWorkspaceButton').onclick = exportTargetFbx;
