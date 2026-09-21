@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifypreview4';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifyvirtual1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -2651,6 +2651,135 @@ function collectRigifyViewportDefBindings() {
     );
 }
 
+const RIGIFY_PREVIEW_FK_PARENT = {
+  'spine_fk': 'torso',
+  'spine_fk.001': 'spine_fk',
+  'spine_fk.002': 'spine_fk.001',
+  'spine_fk.003': 'spine_fk.002',
+  'neck': 'spine_fk.003',
+  'head': 'neck',
+
+  'shoulder.L': 'spine_fk.003',
+  'upper_arm_fk.L': 'shoulder.L',
+  'forearm_fk.L': 'upper_arm_fk.L',
+  'hand_fk.L': 'forearm_fk.L',
+
+  'shoulder.R': 'spine_fk.003',
+  'upper_arm_fk.R': 'shoulder.R',
+  'forearm_fk.R': 'upper_arm_fk.R',
+  'hand_fk.R': 'forearm_fk.R',
+
+  'thigh_fk.L': 'torso',
+  'shin_fk.L': 'thigh_fk.L',
+  'foot_fk.L': 'shin_fk.L',
+  'toe_fk.L': 'foot_fk.L',
+
+  'thigh_fk.R': 'torso',
+  'shin_fk.R': 'thigh_fk.R',
+  'foot_fk.R': 'shin_fk.R',
+  'toe_fk.R': 'foot_fk.R'
+};
+
+const RIGIFY_PREVIEW_FK_ORDER = [
+  'spine_fk', 'spine_fk.001', 'spine_fk.002', 'spine_fk.003',
+  'neck', 'head',
+
+  'shoulder.L', 'upper_arm_fk.L', 'forearm_fk.L', 'hand_fk.L',
+  'shoulder.R', 'upper_arm_fk.R', 'forearm_fk.R', 'hand_fk.R',
+
+  'thigh_fk.L', 'shin_fk.L', 'foot_fk.L', 'toe_fk.L',
+  'thigh_fk.R', 'shin_fk.R', 'foot_fk.R', 'toe_fk.R'
+];
+
+function rigifyPreviewBoneName(original) {
+  return findBoneByOriginalExact(state.target, [original]);
+}
+
+function buildRigifyVirtualFkFrame(tgt) {
+  const virtual = new Map();
+
+  // Same principle used by WaltCloudRigRuntime: live section controls are
+  // frames, while the anatomical FK hierarchy is reconstructed independently
+  // from the raw FBX parent tree (whose Blender constraints are missing).
+  for (const original of ['root', 'torso']) {
+    const name = rigifyPreviewBoneName(original);
+    const bone = name ? tgt.bones.get(name) : null;
+    const rest = name ? tgt.rest.get(name) : null;
+    if (!bone || !rest) continue;
+
+    const q = bone.getWorldQuaternion(new THREE.Quaternion()).normalize();
+    virtual.set(original, {
+      name,
+      position: bone.getWorldPosition(new THREE.Vector3()),
+      quaternion: q,
+      deltaQuaternion: q.clone()
+        .multiply(rest.worldQuat.clone().invert())
+        .normalize()
+    });
+  }
+
+  for (const original of RIGIFY_PREVIEW_FK_ORDER) {
+    const name = rigifyPreviewBoneName(original);
+    const bone = name ? tgt.bones.get(name) : null;
+    const rest = name ? tgt.rest.get(name) : null;
+    if (!bone || !rest) continue;
+
+    const parentOriginal = RIGIFY_PREVIEW_FK_PARENT[original];
+    const parentVirtual = parentOriginal ? virtual.get(parentOriginal) : null;
+    const parentName = parentOriginal
+      ? rigifyPreviewBoneName(parentOriginal)
+      : null;
+    const parentRest = parentName ? tgt.rest.get(parentName) : null;
+
+    let worldQuaternion;
+    let worldPosition;
+
+    if (parentVirtual && parentRest) {
+      // The retarget clip stores a pose basis on the FK control. Recompose
+      // that basis on the anatomical parent reconstructed above, exactly like
+      // the CloudRig virtual-FK runtime does.
+      const poseBasis = rest.quaternion.clone()
+        .invert()
+        .multiply(bone.quaternion)
+        .normalize();
+
+      const restRelative = parentRest.worldQuat.clone()
+        .invert()
+        .multiply(rest.worldQuat)
+        .normalize();
+
+      worldQuaternion = parentVirtual.quaternion.clone()
+        .multiply(restRelative)
+        .multiply(poseBasis)
+        .normalize();
+
+      const parentDelta = parentVirtual.quaternion.clone()
+        .multiply(parentRest.worldQuat.clone().invert())
+        .normalize();
+
+      const restOffset = rest.worldPos.clone()
+        .sub(parentRest.worldPos)
+        .applyQuaternion(parentDelta);
+
+      worldPosition = parentVirtual.position.clone().add(restOffset);
+    } else {
+      worldQuaternion = bone.getWorldQuaternion(new THREE.Quaternion()).normalize();
+      worldPosition = bone.getWorldPosition(new THREE.Vector3());
+    }
+
+    virtual.set(original, {
+      name,
+      position: worldPosition,
+      quaternion: worldQuaternion,
+      deltaQuaternion: worldQuaternion.clone()
+        .multiply(rest.worldQuat.clone().invert())
+        .normalize()
+    });
+  }
+
+  return virtual;
+}
+
 function buildRigifyViewportDeformClip(controlClip) {
   const tgt = state.target;
   if (!usesRigifyPipeline() || !tgt.root || !controlClip) return null;
@@ -2681,77 +2810,80 @@ function buildRigifyViewportDeformClip(controlClip) {
   const mixer = new THREE.AnimationMixer(tgt.root);
   const action = mixer.clipAction(controlClip).play();
 
-  const driverRestWorld = new THREE.Matrix4();
-  const drivenRestWorld = new THREE.Matrix4();
-  const deltaWorld = new THREE.Matrix4();
-  const rigidDelta = new THREE.Matrix4();
-  const desiredWorld = new THREE.Matrix4();
-  const local = new THREE.Matrix4();
-
-  const deltaP = new THREE.Vector3();
-  const deltaQ = new THREE.Quaternion();
-  const deltaS = new THREE.Vector3();
-
-  const p = new THREE.Vector3();
-  const q = new THREE.Quaternion();
-  const s = new THREE.Vector3();
-
   try {
     for (const time of times) {
       restoreRest(tgt);
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      // Parent-first: every DEF receives the world-space delta of its RAW FK
-      // control. We DO keep position because Rigify's FBX hierarchy contains
-      // MCH parents that do not evaluate Blender constraints in Three.js.
-      // Rotation-only made connected DEF chains separate/stretch badly.
+      const virtual = buildRigifyVirtualFkFrame(tgt);
+
+      // Drive DEF from the reconstructed anatomical FK hierarchy, not from
+      // each raw Rigify control independently. This is the CloudRig preview
+      // strategy: parent carry and bone lengths stay coherent even though the
+      // Blender MCH/constraint graph does not exist in the FBX runtime.
       for (const binding of bindings) {
         const driver = tgt.bones.get(binding.driver);
         const driven = tgt.bones.get(binding.driven);
+        const driverRest = tgt.rest.get(binding.driver);
         const drivenRest = tgt.rest.get(binding.driven);
+        if (!driver || !driven || !driverRest || !drivenRest) continue;
 
-        if (!driver || !driven || !drivenRest) continue;
-        if (!composeRestWorldMatrix(tgt, binding.driver, driverRestWorld)) continue;
-        if (!composeRestWorldMatrix(tgt, binding.driven, drivenRestWorld)) continue;
+        const driverOriginal =
+          originalObjectName(driver) || binding.driverOriginal || binding.driver;
+        const v =
+          virtual.get(driverOriginal) ||
+          virtual.get(binding.driverOriginal);
 
-        // Current RAW-FK world delta relative to the imported rest pose.
-        deltaWorld.copy(driver.matrixWorld)
-          .multiply(driverRestWorld.clone().invert());
+        let driverWorldPos;
+        let driverWorldQ;
+        let driverDeltaQ;
 
-        // Remove scale from the delta. The preview may move/rotate DEF bones,
-        // but it must never inject FK/MCH scale into the skinned skeleton.
-        deltaWorld.decompose(deltaP, deltaQ, deltaS);
-        deltaQ.normalize();
-        rigidDelta.compose(
-          deltaP,
-          deltaQ,
-          new THREE.Vector3(1, 1, 1)
-        );
-
-        desiredWorld.copy(rigidDelta).multiply(drivenRestWorld);
-
-        if (driven.parent) {
-          local.copy(driven.parent.matrixWorld)
-            .invert()
-            .multiply(desiredWorld);
+        if (v) {
+          driverWorldPos = v.position.clone();
+          driverWorldQ = v.quaternion.clone();
+          driverDeltaQ = v.deltaQuaternion.clone();
         } else {
-          local.copy(desiredWorld);
+          driverWorldPos = driver.getWorldPosition(new THREE.Vector3());
+          driverWorldQ = driver.getWorldQuaternion(new THREE.Quaternion()).normalize();
+          driverDeltaQ = driverWorldQ.clone()
+            .multiply(driverRest.worldQuat.clone().invert())
+            .normalize();
         }
 
-        local.decompose(p, q, s);
-        q.normalize();
+        const desiredWorldQ = driverDeltaQ.clone()
+          .multiply(drivenRest.worldQuat)
+          .normalize();
 
-        // Position + rotation reproduce the missing Rigify constraints.
-        // Scale remains exactly the imported Rest value.
-        driven.position.copy(p);
-        driven.quaternion.copy(q);
+        const restOffset = drivenRest.worldPos.clone()
+          .sub(driverRest.worldPos)
+          .applyQuaternion(driverDeltaQ);
+
+        const desiredWorldPos = driverWorldPos.clone().add(restOffset);
+
+        const desiredLocalPos = desiredWorldPos.clone();
+        let desiredLocalQ = desiredWorldQ.clone();
+
+        if (driven.parent) {
+          driven.parent.worldToLocal(desiredLocalPos);
+
+          const parentWorldQ =
+            driven.parent.getWorldQuaternion(new THREE.Quaternion());
+          desiredLocalQ = parentWorldQ
+            .invert()
+            .multiply(desiredWorldQ)
+            .normalize();
+        }
+
+        driven.position.copy(desiredLocalPos);
+        driven.quaternion.copy(desiredLocalQ);
         driven.scale.copy(drivenRest.scale);
         updateSlotWorld(tgt);
 
         const d = data.get(binding.driven);
         if (!d) continue;
 
+        const q = desiredLocalQ.clone();
         if (d.previousQ && d.previousQ.dot(q) < 0) {
           q.x *= -1;
           q.y *= -1;
@@ -2761,7 +2893,11 @@ function buildRigifyViewportDeformClip(controlClip) {
           updateSlotWorld(tgt);
         }
 
-        d.p.push(p.x, p.y, p.z);
+        d.p.push(
+          driven.position.x,
+          driven.position.y,
+          driven.position.z
+        );
         d.q.push(q.x, q.y, q.z, q.w);
         d.previousQ = q.clone();
       }
@@ -2789,8 +2925,8 @@ function buildRigifyViewportDeformClip(controlClip) {
   }
 
   log(
-    `Preview Rigify RAW-FK → DEF: ${bindings.length} controles, ` +
-    `${tracks.length} curvas POS/ROT · scale DEF preservada.`
+    `Preview Rigify virtual-FK → DEF: ${bindings.length} bindings · ` +
+    `${tracks.length} curvas POS/ROT · estrategia CloudRig · export intacto.`
   );
 
   return tracks.length
@@ -6394,7 +6530,6 @@ function seek(time) {
   if (state.source.mixer && state.source.activeClip) state.source.mixer.setTime(state.playTime);
   if (state.target.mixer && state.targetPreviewClip) state.target.mixer.setTime(state.playTime);
   applyTargetRigRuntime();
-  applyRigifyPreviewGroundAlignment();
   updateRigOverlays();
   $('timeline').value = String(state.playTime);
   $('timeReadout').textContent = `${state.playTime.toFixed(2)} / ${duration.toFixed(2)} s`;
