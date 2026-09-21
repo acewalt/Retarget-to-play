@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifyvirtual1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifyvirtual2';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -2669,12 +2669,16 @@ const RIGIFY_PREVIEW_FK_PARENT = {
   'forearm_fk.R': 'upper_arm_fk.R',
   'hand_fk.R': 'forearm_fk.R',
 
-  'thigh_fk.L': 'torso',
+  // Mixamo Hips ROT is mapped to spine_fk in the shipped
+  // Mixamo → Rigify preset. This is the lower/pelvis orientation frame.
+  // Parenting the legs to torso dropped that pelvis rotation in preview,
+  // which produced visible foot drift even though the exported Action was OK.
+  'thigh_fk.L': 'spine_fk',
   'shin_fk.L': 'thigh_fk.L',
   'foot_fk.L': 'shin_fk.L',
   'toe_fk.L': 'foot_fk.L',
 
-  'thigh_fk.R': 'torso',
+  'thigh_fk.R': 'spine_fk',
   'shin_fk.R': 'thigh_fk.R',
   'foot_fk.R': 'shin_fk.R',
   'toe_fk.R': 'foot_fk.R'
