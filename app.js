@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-restposeeditor3';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-restposeeditor5';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -227,7 +227,7 @@ const state = {
     transformHelper: null,
     hasCustomRest: false,
     undoStack: [],
-    sensitivity: 0.35,
+    sensitivity: 0.5,
     dragBaseQuaternion: null,
     applyingSensitivity: false
   }
@@ -443,7 +443,7 @@ function undoRestPoseEdit() {
 }
 
 function restPoseSensitivity() {
-  return THREE.MathUtils.clamp(Number(state.restEditor.sensitivity) || 0.35, 0.05, 1);
+  return THREE.MathUtils.clamp(Number(state.restEditor.sensitivity) || 0.5, 0.05, 1);
 }
 
 function applyRestPoseRotationSensitivity() {
@@ -471,10 +471,23 @@ function ensureRestPoseTransformControls() {
   const transform = new TransformControls(sourceView.camera, sourceView.renderer.domElement);
   transform.setMode('rotate');
   transform.setSpace('local');
-  transform.setSize(0.78);
+  transform.setSize(0.82);
 
   const helper = transform.getHelper();
   helper.visible = false;
+
+  // Make the rotation rings easier to read. Chromium/WebGL may clamp native
+  // line widths on some GPUs, but when supported this makes the gizmo visibly
+  // thicker without changing the rotation math or hit areas.
+  helper.traverse(object => {
+    if (!object.material) return;
+    const materials = Array.isArray(object.material) ? object.material : [object.material];
+    for (const material of materials) {
+      if ('linewidth' in material) material.linewidth = 3;
+      material.needsUpdate = true;
+    }
+  });
+
   sourceView.scene.add(helper);
 
   transform.addEventListener('mouseDown', () => {
@@ -769,7 +782,7 @@ function pickRestPoseBoneFromViewport(event) {
   }
 }
 
-sourceView.renderer.domElement.addEventListener('pointerdown', pickRestPoseBoneFromViewport);
+sourceView.renderer.domElement.addEventListener('click', pickRestPoseBoneFromViewport);
 
 function applyViewportTheme(view, theme = currentTheme()) {
   const palette = viewportPalette(theme);
@@ -5948,7 +5961,7 @@ $('resetRestBone').onclick = resetSelectedRestBone;
 $('resetRestPose').onclick = resetRestPoseEditorPose;
 $('commitRestPose').onclick = commitRestPoseEditor;
 $('restSensitivity').oninput = () => {
-  state.restEditor.sensitivity = Number($('restSensitivity').value) || 0.35;
+  state.restEditor.sensitivity = Number($('restSensitivity').value) || 0.5;
   updateRestPoseUi();
 };
 
