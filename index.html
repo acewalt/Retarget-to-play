@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260921-progressiveui3" />
+  <link rel="stylesheet" href="./styles.css?v=20260921-progressiveui4" />
   <script type="importmap">
   {
     "imports": {
@@ -112,7 +112,7 @@
           </div>
         </section>
 
-        <section class="retarget-stage">
+        <section class="retarget-stage no-transfer-bridge">
           <article id="sourceModule" class="viewport-card source-card">
             <header class="card-head">
               <div><span class="eyebrow">SOURCE</span><h2>Source Animation</h2></div>
@@ -136,7 +136,7 @@
             </div>
           </article>
 
-          <div class="retarget-bridge">
+          <div id="retargetBridge" class="retarget-bridge" hidden>
             <div class="bridge-arrow">→</div>
             <button id="applyRetarget" class="retarget-button" type="button" disabled>
               <span class="spark">✦</span>
@@ -241,6 +241,7 @@
             <div class="settings-heading"><div><span class="eyebrow">MAPPING</span><h2>Preset</h2></div></div>
             <label class="field-label" for="preset">Skeleton preset</label>
             <select id="preset">
+              <option value="none" selected>— Selecciona un preset —</option>
               <optgroup label="Mixamo source">
                 <option value="mixamo_to_cloudrig">Mixamo → CloudRig / Sintel</option>
                 <option value="mixamo_to_rigify">Mixamo → Rigify</option>
@@ -255,7 +256,6 @@
                 <option value="blendcap_to_mixamo">BlendCap → Mixamo</option>
                 <option value="blendcap_to_mixamo_ctrl">BlendCap → Mixamo Control Rig</option>
               </optgroup>
-              <option value="none">— Sin preset —</option>
             </select>
             <div class="stacked-fields">
               <label><span>Source Prefix</span><input id="sourcePrefix" placeholder="mixamorig1:" /></label>
@@ -351,6 +351,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260921-progressiveui3"></script>
+  <script type="module" src="./app.js?v=20260921-progressiveui4"></script>
 </body>
 </html>
