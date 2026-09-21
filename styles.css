@@ -164,3 +164,26 @@ h2,p{margin:0}
   color:var(--primary);
   background:var(--primary-soft);
 }
+
+
+/* Redefine Rest Pose desk */
+.restpose-toolbar{display:grid;grid-template-columns:minmax(220px,.8fr) minmax(0,2.2fr);align-items:center;gap:18px;padding:12px 14px;border:1px solid var(--border);border-radius:var(--radius);background:var(--surface);box-shadow:var(--shadow-soft)}
+.restpose-heading{display:flex;align-items:center;gap:16px;min-width:0}.restpose-heading h2{font-size:14px;margin:0}.restpose-heading p{margin:0;color:var(--muted);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.restpose-controls{display:flex;align-items:end;justify-content:flex-end;gap:8px;min-width:0;flex-wrap:wrap}
+.restpose-bone-field{display:flex;flex-direction:column;gap:4px;min-width:240px;flex:1 1 260px}.restpose-bone-field>span{font-size:9px;font-weight:800;color:var(--muted)}.restpose-bone-field select{height:36px}
+.restpose-compact{min-width:66px}
+.restpose-commit{min-height:36px;border:0;background:linear-gradient(135deg,var(--primary-2),var(--primary));color:#fff;font-weight:800;box-shadow:0 7px 18px color-mix(in srgb,var(--primary) 24%,transparent)}
+.workspace-shell.restpose-focus{grid-template-columns:minmax(0,1fr)!important}.workspace-shell.restpose-focus>.workflow-sidebar,.workspace-shell.restpose-focus>.settings-panel{display:none!important}.workspace-shell.restpose-focus .main-workspace{grid-column:1/-1;width:100%;max-width:none}
+.main-workspace[data-view="restpose"]{padding:14px 20px;overflow:hidden;gap:10px}
+.main-workspace[data-view="restpose"] .mapping-card,.main-workspace[data-view="restpose"] .timeline-card,.main-workspace[data-view="restpose"] .export-workbench,.main-workspace[data-view="restpose"] .retarget-bridge{display:none!important}
+.main-workspace[data-view="restpose"] .retarget-stage{grid-template-columns:minmax(0,1.65fr) minmax(300px,.65fr);gap:14px;min-height:0;flex:1}
+.main-workspace[data-view="restpose"] .viewport-card{height:100%;min-height:0;grid-template-rows:56px minmax(0,1fr)}
+.main-workspace[data-view="restpose"] .viewport-foot{display:none}
+.main-workspace[data-view="restpose"] .viewport-wrap{aspect-ratio:auto;min-height:0;height:100%}
+.main-workspace[data-view="restpose"] .source-card{border-color:color-mix(in srgb,var(--primary) 45%,var(--border));box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 12%,transparent),var(--shadow-soft)}
+.main-workspace[data-view="restpose"] .target-card{opacity:.92}
+.main-workspace[data-view="restpose"] .target-card .card-head h2::after{content:" · Reference";color:var(--muted);font-weight:500}
+.main-workspace[data-view="restpose"] .source-card .card-head h2::after{content:" · Rest Editor";color:var(--primary);font-weight:600}
+@media(min-width:1081px){.main-workspace[data-view="restpose"] .retarget-stage{height:calc(100vh - 70px - 14px - 14px - 78px - 10px)}}
+@media(max-width:1080px){.restpose-toolbar{grid-template-columns:1fr}.restpose-controls{justify-content:flex-start}}
+@media(max-width:760px){.main-workspace[data-view="restpose"]{overflow:auto}.main-workspace[data-view="restpose"] .retarget-stage{grid-template-columns:1fr}.main-workspace[data-view="restpose"] .viewport-wrap{aspect-ratio:1/1}.restpose-controls>*{flex:1 1 140px}.restpose-bone-field{flex-basis:100%}}
