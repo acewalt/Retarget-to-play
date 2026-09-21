@@ -37,6 +37,7 @@
       <nav class="topnav" aria-label="Mesas de trabajo">
         <button class="nav-item active" type="button" data-workspace="workspace">Workspace</button>
         <button class="nav-item" type="button" data-workspace="mappings">Mappings</button>
+        <button class="nav-item" type="button" data-workspace="restpose">Redefine Rest Pose</button>
         <button class="nav-item" type="button" data-workspace="animations">Animations</button>
         <button class="nav-item" type="button" data-workspace="export">Export</button>
       </nav>
@@ -92,6 +93,21 @@
       </aside>
 
       <section id="mainWorkspace" class="main-workspace" data-view="workspace">
+        <section id="restPoseToolbar" class="restpose-toolbar" hidden>
+          <div class="restpose-heading">
+            <div><span class="eyebrow">SOURCE REST EDITOR</span><h2>Redefine Rest Pose</h2></div>
+            <p id="restPoseStatus">Carga un Source. El Target queda como referencia visual.</p>
+          </div>
+          <div class="restpose-controls">
+            <label class="restpose-bone-field"><span>Bone</span><select id="restBoneSelect" disabled><option value="">Carga un Source</option></select></label>
+            <button id="restSpaceToggle" type="button" class="restpose-compact">Local</button>
+            <button id="copyRestBone" type="button" class="soft-primary" disabled>Copy Selected Bone</button>
+            <button id="resetRestBone" type="button" disabled>Reset Bone</button>
+            <button id="resetRestPose" type="button" disabled>Reset Pose</button>
+            <button id="commitRestPose" type="button" class="restpose-commit" disabled>Use This Pose as Rest</button>
+          </div>
+        </section>
+
         <section class="retarget-stage">
           <article id="sourceModule" class="viewport-card source-card">
             <header class="card-head">
@@ -331,6 +347,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-targetbaseline2"></script>
+  <script type="module" src="./app.js?v=20260920-restposeeditor1"></script>
 </body>
 </html>
