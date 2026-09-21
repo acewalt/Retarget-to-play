@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-ueaxis1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifypreview2';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -2670,7 +2670,7 @@ function buildRigifyViewportDeformClip(controlClip) {
   const data = new Map(
     bindings.map(binding => [
       binding.driven,
-      { p: [], q: [], s: [], previousQ: null }
+      { p: [], q: [], previousQ: null }
     ])
   );
 
@@ -2682,8 +2682,15 @@ function buildRigifyViewportDeformClip(controlClip) {
 
   const driverRest = new THREE.Matrix4();
   const drivenRest = new THREE.Matrix4();
+  const deltaWorld = new THREE.Matrix4();
+  const rigidDelta = new THREE.Matrix4();
   const desiredWorld = new THREE.Matrix4();
   const local = new THREE.Matrix4();
+
+  const deltaP = new THREE.Vector3();
+  const deltaQ = new THREE.Quaternion();
+  const deltaS = new THREE.Vector3();
+
   const p = new THREE.Vector3();
   const q = new THREE.Quaternion();
   const s = new THREE.Vector3();
@@ -2694,29 +2701,35 @@ function buildRigifyViewportDeformClip(controlClip) {
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      const fkPoseCache = new Map();
-
-      // Parent-first. We actually apply each preview DEF pose while baking,
-      // so the next child's parent.matrixWorld already contains the visual
-      // transform expected in the final preview clip.
+      // IMPORTANT: viewport preview must use the RAW browser FK controls.
+      // state.fkClip is rewritten for Blender's original Rigify hierarchy and
+      // is not a valid Three.js pose basis. Using it here is what produced the
+      // twisted / duplicated-looking Rigify mesh in the browser.
       for (const binding of bindings) {
+        const driver = tgt.bones.get(binding.driver);
         const driven = tgt.bones.get(binding.driven);
-        if (!driven) continue;
-
-        const driverPose = rigifyOriginalFkPoseMatrix(
-          tgt,
-          binding.driver,
-          fkPoseCache,
-          new THREE.Matrix4()
-        );
-        if (!driverPose) continue;
+        const drivenRestLocal = tgt.rest.get(binding.driven);
+        if (!driver || !driven || !drivenRestLocal) continue;
 
         if (!composeRestWorldMatrix(tgt, binding.driver, driverRest)) continue;
         if (!composeRestWorldMatrix(tgt, binding.driven, drivenRest)) continue;
 
-        desiredWorld.copy(driverPose)
-          .multiply(driverRest.clone().invert())
-          .multiply(drivenRest);
+        // World delta of the actual visible FK control.
+        deltaWorld.copy(driver.matrixWorld)
+          .multiply(driverRest.clone().invert());
+
+        // Rigify FK retargeting should not scale the deform skeleton.
+        // Tiny non-uniform scales from FBX/MCH parent decomposition were
+        // previously baked into DEF tracks and could explode the mesh.
+        deltaWorld.decompose(deltaP, deltaQ, deltaS);
+        deltaQ.normalize();
+        rigidDelta.compose(
+          deltaP,
+          deltaQ,
+          new THREE.Vector3(1, 1, 1)
+        );
+
+        desiredWorld.copy(rigidDelta).multiply(drivenRest);
 
         if (driven.parent) {
           local.copy(driven.parent.matrixWorld)
@@ -2729,9 +2742,11 @@ function buildRigifyViewportDeformClip(controlClip) {
         local.decompose(p, q, s);
         q.normalize();
 
+        // Keep the original local scale exactly. Preview only needs pose
+        // translation + rotation; scale belongs to Rigify's rest skeleton.
         driven.position.copy(p);
         driven.quaternion.copy(q);
-        driven.scale.copy(s);
+        driven.scale.copy(drivenRestLocal.scale);
         updateSlotWorld(tgt);
 
         const d = data.get(binding.driven);
@@ -2748,7 +2763,6 @@ function buildRigifyViewportDeformClip(controlClip) {
 
         d.p.push(p.x, p.y, p.z);
         d.q.push(q.x, q.y, q.z, q.w);
-        d.s.push(s.x, s.y, s.z);
         d.previousQ = q.clone();
       }
     }
@@ -2770,16 +2784,11 @@ function buildRigifyViewportDeformClip(controlClip) {
         new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q)
       );
     }
-    if (d.s.length === times.length * 3) {
-      tracks.push(
-        new THREE.VectorKeyframeTrack(`${name}.scale`, times, d.s)
-      );
-    }
   }
 
   log(
-    `Preview Rigify: ${bindings.length} controles → DEF, ` +
-    `${tracks.length} curvas visuales. Exportación sin cambios.`
+    `Preview Rigify RAW-FK → DEF: ${bindings.length} controles, ` +
+    `${tracks.length} curvas visuales · scale DEF preservada.`
   );
 
   return tracks.length
@@ -2797,7 +2806,7 @@ function rebuildTargetPreviewClip() {
   if (usesRigifyPipeline()) {
     if ($('previewDeform')?.checked) {
       state.deformPreviewClip =
-        buildRigifyViewportDeformClip(state.fkClip);
+        buildRigifyViewportDeformClip(state.fkRawClip || state.fkClip);
     } else {
       state.deformPreviewClip = null;
     }
