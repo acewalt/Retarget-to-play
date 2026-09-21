@@ -235,3 +235,5 @@ h2,p{margin:0}
 @media(prefers-reduced-motion:reduce){
   .conditional-feature.feature-reveal{animation:none!important}
 }
+
+.workflow-step.status-only{cursor:default}
