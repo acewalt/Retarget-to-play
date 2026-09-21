@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-quickik1';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -515,15 +515,100 @@ function installRestPoseGizmoThickness(helper) {
   }
 }
 
-function compactRestPoseGizmoGeometry(helper) {
-  helper.traverse(object => {
-    if (object.userData?.restPoseCompactGeometry) return;
-    if (!object.geometry || object.name !== 'E') return;
+function thickenRestPoseRingGeometry(geometry, tubeRadius = 0.026) {
+  const position = geometry?.attributes?.position;
+  if (!position?.count) return geometry;
 
-    object.geometry = object.geometry.clone();
-    object.geometry.scale(0.82, 0.82, 0.82);
-    object.userData.restPoseCompactGeometry = true;
-  });
+  geometry.computeBoundingBox();
+  const box = geometry.boundingBox;
+  if (!box) return geometry;
+
+  const size = box.getSize(new THREE.Vector3());
+  const axes = [
+    { key: 'x', size: size.x },
+    { key: 'y', size: size.y },
+    { key: 'z', size: size.z }
+  ].sort((a, b) => a.size - b.size);
+
+  const normalAxis = axes[0].key;
+  const planeA = axes[1].key;
+  const planeB = axes[2].key;
+
+  let radiusSum = 0;
+  for (let i = 0; i < position.count; i++) {
+    const a = position.getComponent(i, planeA === 'x' ? 0 : planeA === 'y' ? 1 : 2);
+    const b = position.getComponent(i, planeB === 'x' ? 0 : planeB === 'y' ? 1 : 2);
+    radiusSum += Math.hypot(a, b);
+  }
+  const centerRadius = radiusSum / position.count;
+
+  const axisIndex = { x: 0, y: 1, z: 2 };
+
+  for (let i = 0; i < position.count; i++) {
+    const values = [position.getX(i), position.getY(i), position.getZ(i)];
+    const ia = axisIndex[planeA];
+    const ib = axisIndex[planeB];
+    const inormal = axisIndex[normalAxis];
+
+    const a = values[ia];
+    const b = values[ib];
+    const radial = Math.max(1e-8, Math.hypot(a, b));
+    const radialOffset = radial - centerRadius;
+    const normalOffset = values[inormal];
+    const crossLen = Math.max(1e-8, Math.hypot(radialOffset, normalOffset));
+
+    const newRadial = centerRadius + (radialOffset / crossLen) * tubeRadius;
+    values[ia] = (a / radial) * newRadial;
+    values[ib] = (b / radial) * newRadial;
+    values[inormal] = (normalOffset / crossLen) * tubeRadius;
+
+    position.setXYZ(i, values[0], values[1], values[2]);
+  }
+
+  position.needsUpdate = true;
+  geometry.computeVertexNormals?.();
+  geometry.computeBoundingSphere?.();
+  return geometry;
+}
+
+function compactRestPoseGizmoGeometry(transform) {
+  const gizmo = transform?._gizmo;
+  if (!gizmo) return;
+
+  const visualE = gizmo.gizmo?.rotate?.children?.find(handle => handle.name === 'E');
+  const pickerE = gizmo.picker?.rotate?.children?.find(handle => handle.name === 'E');
+
+  if (visualE?.geometry && !visualE.userData.restPoseCompactGeometry) {
+    visualE.geometry = visualE.geometry.clone();
+    visualE.geometry.scale(0.72, 0.72, 0.72);
+    thickenRestPoseRingGeometry(visualE.geometry, 0.032);
+    visualE.userData.restPoseCompactGeometry = true;
+  }
+
+  if (pickerE?.geometry && !pickerE.userData.restPoseCompactGeometry) {
+    pickerE.geometry = pickerE.geometry.clone();
+    pickerE.geometry.scale(0.72, 0.72, 0.72);
+    pickerE.userData.restPoseCompactGeometry = true;
+  }
+}
+
+function setRestPoseHandleMaterialVisible(handle, visible) {
+  const materials = Array.isArray(handle?.material) ? handle.material : [handle?.material];
+  for (const material of materials) {
+    if (material) material.visible = visible;
+  }
+}
+
+function configureRestPosePickerHandle(handle, enabled) {
+  if (!handle) return;
+
+  if (!handle.userData.restPoseOriginalRaycast) {
+    handle.userData.restPoseOriginalRaycast = handle.raycast;
+  }
+
+  handle.raycast = enabled
+    ? handle.userData.restPoseOriginalRaycast
+    : function () {};
 }
 
 function updateRestPoseGizmoMode() {
@@ -532,22 +617,33 @@ function updateRestPoseGizmoMode() {
   if (!transform || !helper) return;
 
   const full = !!state.restEditor.showFullGimbal;
+  const gizmo = transform._gizmo;
 
-  // TransformControls exposes these flags for the colored X/Y/Z rotate rings.
-  // OFF leaves the screen-space E ring (yellow) as the primary rotation control.
-  transform.showX = full;
-  transform.showY = full;
-  transform.showZ = full;
+  // Important: r180 hides the E (yellow) ring whenever any of showX/Y/Z is
+  // false. Keep those internal flags enabled and hide the colored rings at
+  // material/picker level instead.
+  transform.showX = true;
+  transform.showY = true;
+  transform.showZ = true;
 
-  helper.traverse(object => {
-    if (!object.name) return;
-
-    // XYZE is the grey free-rotation circle. Hide it in compact mode so the
-    // default tool is literally the single yellow E ring.
-    if (object.name === 'XYZE') {
-      object.visible = full;
+  for (const handle of gizmo?.gizmo?.rotate?.children || []) {
+    if (handle.name === 'E') {
+      setRestPoseHandleMaterialVisible(handle, true);
+    } else if (['X', 'Y', 'Z', 'XYZE'].includes(handle.name)) {
+      setRestPoseHandleMaterialVisible(handle, full);
     }
-  });
+  }
+
+  for (const handle of gizmo?.picker?.rotate?.children || []) {
+    configureRestPosePickerHandle(
+      handle,
+      full || handle.name === 'E'
+    );
+  }
+
+  if (!full && transform.axis && transform.axis !== 'E') {
+    transform.axis = null;
+  }
 
   const toggle = $('showFullRestGimbal');
   if (toggle) toggle.checked = full;
@@ -582,7 +678,7 @@ function ensureRestPoseTransformControls() {
   const transform = new TransformControls(sourceView.camera, sourceView.renderer.domElement);
   transform.setMode('rotate');
   transform.setSpace('local');
-  transform.setSize(0.62);
+  transform.setSize(0.56);
 
   const helper = transform.getHelper();
   helper.visible = false;
@@ -601,11 +697,8 @@ function ensureRestPoseTransformControls() {
 
   // Bring the yellow E ring closer to the bone instead of leaving the
   // default TransformControls outer ring floating far away.
-  compactRestPoseGizmoGeometry(helper);
+  compactRestPoseGizmoGeometry(transform);
 
-  // WebGL on Windows often clamps LineBasicMaterial to 1 px. Add real tube
-  // geometry so the ring stays visibly thick on Chromium/Windows.
-  installRestPoseGizmoThickness(helper);
   updateRestPoseGizmoMode();
 
   sourceView.scene.add(helper);
