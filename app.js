@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-restposeeditor6';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-progressiveui2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -220,6 +220,7 @@ const state = {
   exported: false,
   workspaceView: 'workspace',
   workspaceMappingCollapsed: true,
+  dualFbxReady: false,
   restEditor: {
     selectedBone: null,
     selectedRole: null,
@@ -5774,6 +5775,57 @@ function updateStats() {
   if (workbench) workbench.textContent = summary;
 }
 
+
+function revealConditionalFeature(element, animate = false, delayMs = 0) {
+  if (!element) return;
+
+  element.hidden = false;
+  element.classList.remove('feature-reveal');
+
+  if (!animate) return;
+
+  element.style.setProperty('--feature-delay', `${delayMs}ms`);
+  // Force a new animation frame even if this feature was shown before.
+  void element.offsetWidth;
+  element.classList.add('feature-reveal');
+
+  window.setTimeout(() => {
+    element.classList.remove('feature-reveal');
+    element.style.removeProperty('--feature-delay');
+  }, 850 + delayMs);
+}
+
+function updateConditionalFeatureVisibility() {
+  const ready = !!state.source.root && !!state.target.root;
+  const becameReady = ready && !state.dualFbxReady;
+  state.dualFbxReady = ready;
+
+  const gated = [
+    $('navMappings'),
+    $('navAnimations'),
+    $('stepMap'),
+    $('stepIk'),
+    $('mappingSettingsSection')
+  ];
+
+  if (ready) {
+    gated.forEach((element, index) => {
+      revealConditionalFeature(element, becameReady, index * 65);
+    });
+  } else {
+    for (const element of gated) {
+      if (!element) continue;
+      element.classList.remove('feature-reveal');
+      element.style.removeProperty('--feature-delay');
+      element.hidden = true;
+    }
+
+    if (state.workspaceView === 'mappings' || state.workspaceView === 'animations') {
+      setWorkspaceView('workspace');
+    }
+  }
+}
+
 function setMappingCollapsed(collapsed, remember = true) {
   const card = $('mappingCard');
   if (!card) return;
@@ -5803,7 +5855,13 @@ function resizeViewports() {
 
 function setWorkspaceView(view) {
   const allowed = new Set(['workspace', 'mappings', 'restpose', 'animations', 'export']);
-  const next = allowed.has(view) ? view : 'workspace';
+  let next = allowed.has(view) ? view : 'workspace';
+
+  const needsBothFbx = next === 'mappings' || next === 'animations';
+  if (needsBothFbx && !(state.source.root && state.target.root)) {
+    next = 'workspace';
+  }
+
   const previous = state.workspaceView;
 
   if (previous === 'restpose' && next !== 'restpose') leaveRestPoseWorkspace();
@@ -5862,6 +5920,8 @@ function setWorkflowStep(id, mode) {
 }
 
 function updateWorkflowUI() {
+  updateConditionalFeatureVisibility();
+
   const hasSource = !!state.source.root;
   const hasTarget = !!state.target.root;
   const valid = validMap().length;
@@ -6158,6 +6218,7 @@ function animate(now) {
 
 setWorkspaceView('workspace');
 setMappingCollapsed(true, false);
+updateConditionalFeatureVisibility();
 updateStats();
 updateWorkflowUI();
 requestAnimationFrame(animate);
