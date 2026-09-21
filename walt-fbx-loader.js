@@ -357,6 +357,13 @@ function extractMetadata(parsed) {
     version: parsed.version,
     unitScaleFactor: 1,
     metersPerUnit: 0.01,
+    upAxis: 1,
+    upAxisSign: 1,
+    frontAxis: 2,
+    frontAxisSign: -1,
+    coordAxis: 0,
+    coordAxisSign: 1,
+    axisNormalization: 'none',
     objects: new Map(),
     connections: [],
     constraintCount: 0,
@@ -370,9 +377,22 @@ function extractMetadata(parsed) {
   for (const p of properties70?.children || []) {
     if (p.name !== 'P' || p.properties.length < 5) continue;
     const propName = p.properties[0];
+    const value = Number(p.properties[p.properties.length - 1]);
+
     if (propName === 'UnitScaleFactor') {
-      const value = Number(p.properties[p.properties.length - 1]);
       if (Number.isFinite(value) && value > 0) meta.unitScaleFactor = value;
+    } else if (propName === 'UpAxis' && Number.isFinite(value)) {
+      meta.upAxis = value;
+    } else if (propName === 'UpAxisSign' && Number.isFinite(value)) {
+      meta.upAxisSign = value;
+    } else if (propName === 'FrontAxis' && Number.isFinite(value)) {
+      meta.frontAxis = value;
+    } else if (propName === 'FrontAxisSign' && Number.isFinite(value)) {
+      meta.frontAxisSign = value;
+    } else if (propName === 'CoordAxis' && Number.isFinite(value)) {
+      meta.coordAxis = value;
+    } else if (propName === 'CoordAxisSign' && Number.isFinite(value)) {
+      meta.coordAxisSign = value;
     }
   }
 
@@ -441,12 +461,22 @@ function buildRig(root, metadata) {
   });
 
   const names = [...byOriginal.keys()];
+  const looksUnreal =
+    names.some(n => /^pelvis$/i.test(n)) &&
+    names.some(n => /^spine_0?1$/i.test(n)) &&
+    names.some(n => /^upperarm_l$/i.test(n)) &&
+    names.some(n => /^lowerarm_l$/i.test(n)) &&
+    names.some(n => /^thigh_l$/i.test(n)) &&
+    names.some(n => /^calf_l$/i.test(n));
+
   const profile =
     names.some(n => /^FK-UpperArm\.L$/i.test(n)) && names.some(n => /^DEF-Hips$/i.test(n))
       ? 'cloudrig'
       : names.some(n => /mixamorig\d*:Hips/i.test(n)) || names.some(n => /^Hips$/i.test(n))
         ? 'mixamo'
-        : 'generic';
+        : looksUnreal
+          ? 'ue'
+          : 'generic';
 
   return {
     root,
@@ -787,6 +817,28 @@ export class WaltRigOverlay {
   }
 }
 
+function normalizeDisplayAxes(displayRoot, metadata) {
+  const upAxis = Number(metadata?.upAxis);
+  const upSign = Number(metadata?.upAxisSign) || 1;
+
+  // Three.js workspace is Y-up. Unreal's FBX exporter declares Z-up
+  // (UpAxis=2). FBXLoader preserves those object transforms, so without this
+  // parent-space conversion an Unreal skeleton appears lying on the ground.
+  //
+  // Rotating the display parent instead of rewriting bone locals keeps every
+  // animation curve and bind/local transform untouched while world-space
+  // retarget math sees the corrected upright frame.
+  if (upAxis === 2) {
+    displayRoot.rotation.x = upSign >= 0 ? -Math.PI / 2 : Math.PI / 2;
+    metadata.axisNormalization = upSign >= 0
+      ? 'Z+ up → Y+ up'
+      : 'Z- up → Y+ up';
+    return;
+  }
+
+  metadata.axisNormalization = 'none';
+}
+
 export class WaltFBXLoader {
   constructor() {
     this.threeLoader = new FBXLoader();
@@ -803,6 +855,13 @@ export class WaltFBXLoader {
         version: null,
         unitScaleFactor: 1,
         metersPerUnit: 0.01,
+        upAxis: 1,
+        upAxisSign: 1,
+        frontAxis: 2,
+        frontAxisSign: -1,
+        coordAxis: 0,
+        coordAxisSign: 1,
+        axisNormalization: 'none',
         objects: new Map(),
         connections: [],
         constraintCount: 0,
@@ -830,6 +889,7 @@ export class WaltFBXLoader {
     const displayRoot = new THREE.Group();
     displayRoot.name = '__WALT_FBX_METERS__';
     displayRoot.scale.setScalar(metersPerUnit);
+    normalizeDisplayAxes(displayRoot, metadata);
     displayRoot.add(root);
     displayRoot.updateMatrixWorld(true);
 
