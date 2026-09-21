@@ -294,3 +294,33 @@ h2,p{margin:0}
 }
 
 .feature-reveal-prep{opacity:0!important;transform:translateY(-15px) scale(.88);filter:blur(9px)}
+
+
+/* Rest Pose compact/full gizmo switch */
+.restpose-gizmo-toggle{
+  display:flex;
+  align-items:center;
+  gap:8px;
+  min-height:36px;
+  padding:0 10px;
+  border:1px solid var(--border);
+  border-radius:9px;
+  background:var(--surface-2);
+  color:var(--muted);
+  font-size:9px;
+  font-weight:800;
+  white-space:nowrap;
+  cursor:pointer;
+}
+.restpose-gizmo-toggle .switch{
+  width:32px;
+  height:18px;
+  flex-basis:32px;
+}
+.restpose-gizmo-toggle .switch:before{
+  width:12px;
+  height:12px;
+}
+.restpose-gizmo-toggle .switch:checked:before{
+  transform:translateX(14px);
+}
