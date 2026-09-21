@@ -134,6 +134,13 @@ const LOGICAL_CHAINS = {
     ['DEF-Chest', 'DEF-Shoulder.R', 'DEF-UpperArm_1.R', 'DEF-Forearm_1.R', 'DEF-Hand.R'],
     ['DEF-Hips', 'DEF-Thigh_1.L', 'DEF-Knee_1.L', 'DEF-Foot.L', 'DEF-Toes.L'],
     ['DEF-Hips', 'DEF-Thigh_1.R', 'DEF-Knee_1.R', 'DEF-Foot.R', 'DEF-Toes.R']
+  ],
+  rigify: [
+    ['torso', 'spine_fk', 'spine_fk.001', 'spine_fk.002', 'spine_fk.003', 'neck', 'head'],
+    ['spine_fk.003', 'shoulder.L', 'upper_arm_fk.L', 'forearm_fk.L', 'hand_fk.L'],
+    ['spine_fk.003', 'shoulder.R', 'upper_arm_fk.R', 'forearm_fk.R', 'hand_fk.R'],
+    ['torso', 'thigh_fk.L', 'shin_fk.L', 'foot_fk.L', 'toe_fk.L'],
+    ['torso', 'thigh_fk.R', 'shin_fk.R', 'foot_fk.R', 'toe_fk.R']
   ]
 };
 
