@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik6';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik6';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik6';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik7';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik7';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik7';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -616,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyik6',
+      definition.path + '?v=20260920-rigifyik7',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -2602,34 +2602,57 @@ function encodeRigifyControlLocal(
       .multiply(controlRestWorld);
   }
 
-  const poseIdentity = parentPose.clone().multiply(ctrlRelRest);
-  const basisFull = poseIdentity.clone()
-    .invert()
-    .multiply(desiredWorld);
-
+  let basisT;
   const basisQ = new THREE.Quaternion();
   const basisS = new THREE.Vector3();
-  const basisLocalT = new THREE.Vector3();
-  basisFull.decompose(basisLocalT, basisQ, basisS);
-  basisQ.normalize();
-
-  let basisT = basisLocalT;
 
   if (noLocalLocation) {
-    // Exact BlendCap / Blender BONE_NO_LOCAL_LOCATION back-solve:
+    // Port of Blender's BKE_armature_mat_pose_to_bone common Rigify case:
+    //   BONE_NO_LOCAL_LOCATION + use_inherit_rotation + inherit_scale=AVERAGE.
     //
-    // pose.translation =
-    //   parentPose * ctrlRelRest.translation
-    //   + (parentPose.rot * inverse(parentRest.rot)) * basis_loc
+    // Blender deliberately uses TWO parent transforms here:
+    //   rotscale_mat -> rotation / scale channels
+    //   loc_mat      -> location channels
     //
-    // Therefore:
-    // basis_loc =
-    //   inverse(parentPose.rot * inverse(parentRest.rot))
-    //   * (desired.translation - restHeadAtPose)
-    //
-    // Rigify's standard human metarig explicitly sets
-    // ik_local_location=False for arm IK controls. This is particularly
-    // visible on arms because their parent frame is strongly rotated.
+    // Treating location as a normal inverse(parent * rest) transform is the
+    // source of the remaining Rigify hand offset. BlendCap's classic solver
+    // avoids the same bug by delegating t_pb.matrix to this Blender routine.
+    const parentP = new THREE.Vector3();
+    const parentQ = new THREE.Quaternion();
+    const parentS = new THREE.Vector3();
+    parentPose.decompose(parentP, parentQ, parentS);
+    parentQ.normalize();
+
+    // BONE_INHERIT_SCALE_AVERAGE:
+    // remove parent shear/non-uniform scale, then apply cubic-root volume
+    // scale uniformly before multiplying the child's rest offset.
+    const volumeScale = Math.cbrt(Math.abs(
+      parentS.x * parentS.y * parentS.z
+    )) || 1;
+
+    const parentAverage = new THREE.Matrix4().compose(
+      parentP,
+      parentQ,
+      new THREE.Vector3(volumeScale, volumeScale, volumeScale)
+    );
+
+    const rotScaleMat = parentAverage
+      .multiply(ctrlRelRest);
+
+    const boneBasisRS = rotScaleMat.clone()
+      .invert()
+      .multiply(desiredWorld);
+
+    boneBasisRS.decompose(
+      new THREE.Vector3(),
+      basisQ,
+      basisS
+    );
+    basisQ.normalize();
+
+    // BONE_NO_LOCAL_LOCATION loc_mat:
+    // origin = parentPose * rest-offset translation
+    // axes   = parentPose rotation+scale (NOT rest-relative axes).
     const restOffset = new THREE.Vector3();
     ctrlRelRest.decompose(
       restOffset,
@@ -2640,6 +2663,12 @@ function encodeRigifyControlLocal(
     const restHeadAtPose = restOffset.clone()
       .applyMatrix4(parentPose);
 
+    const locMat = new THREE.Matrix4().compose(
+      restHeadAtPose,
+      parentQ,
+      parentS
+    );
+
     const desiredT = new THREE.Vector3();
     desiredWorld.decompose(
       desiredT,
@@ -2647,29 +2676,16 @@ function encodeRigifyControlLocal(
       new THREE.Vector3()
     );
 
-    const delta = desiredT.sub(restHeadAtPose);
+    basisT = desiredT.applyMatrix4(locMat.clone().invert());
+  } else {
+    const poseIdentity = parentPose.clone().multiply(ctrlRelRest);
+    const basisFull = poseIdentity.clone()
+      .invert()
+      .multiply(desiredWorld);
 
-    const parentPoseQ = new THREE.Quaternion();
-    parentPose.decompose(
-      new THREE.Vector3(),
-      parentPoseQ,
-      new THREE.Vector3()
-    );
-    parentPoseQ.normalize();
-
-    const parentRestQ = new THREE.Quaternion();
-    parentRest.decompose(
-      new THREE.Vector3(),
-      parentRestQ,
-      new THREE.Vector3()
-    );
-    parentRestQ.normalize();
-
-    const frameQ = parentPoseQ.clone()
-      .multiply(parentRestQ.clone().invert())
-      .normalize();
-
-    basisT = delta.applyQuaternion(frameQ.invert());
+    basisT = new THREE.Vector3();
+    basisFull.decompose(basisT, basisQ, basisS);
+    basisQ.normalize();
   }
 
   const basis = new THREE.Matrix4().compose(
@@ -2873,7 +2889,7 @@ function bakeRigifyIkFromFk() {
 
   log(
     'FK→IK Rigify original-evaluated: fuente=FK Action portable; ' +
-    'piernas conservadas; brazos usan BlendCap no-local-location; ' +
+    'piernas conservadas; brazos usan BKE pose→bone no-local exacto; ' +
     'hand parent=root; arm pole parent=shoulder.'
   );
 
