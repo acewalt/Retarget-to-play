@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-progressiveui3';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-progressiveui4';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -205,7 +205,7 @@ const state = {
   source: makeSlot('source'),
   target: makeSlot('target'),
   boneMap: [],
-  activePresetId: 'mixamo_to_cloudrig',
+  activePresetId: 'none',
   activePreset: null,
   fkClip: null,
   fkRawClip: null,
@@ -1218,8 +1218,22 @@ async function loadFbx(file, slot, view) {
 
   setStatus('LOCAL · sin subida', 'good');
 
-  if (state.source.root && state.target.root && $('preset').value !== 'none') {
-    void loadPreset();
+  const bothLoaded = !!state.source.root && !!state.target.root;
+  if (bothLoaded && !state.dualFbxReady) {
+    // Let the loaded FBX render first, then reveal the newly available UI.
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        window.setTimeout(() => updateConditionalFeatureVisibility(true), 140);
+      });
+    });
+  } else {
+    updateConditionalFeatureVisibility(false);
+  }
+
+  updateTransferBridgeVisibility(false);
+
+  if (bothLoaded && $('preset').value !== 'none') {
+    void loadPreset().then(() => updateTransferBridgeVisibility(true));
   }
 }
 
@@ -1319,6 +1333,7 @@ async function loadPreset() {
     state.boneMap = [];
     refreshMapUi();
     updateButtons();
+    updateTransferBridgeVisibility(false);
     log('Preset desactivado.');
     return;
   }
@@ -5776,6 +5791,41 @@ function updateStats() {
 }
 
 
+function updateTransferBridgeVisibility(animate = false) {
+  const bridge = $('retargetBridge') || document.querySelector('.retarget-bridge');
+  const stage = bridge?.closest('.retarget-stage') || document.querySelector('.retarget-stage');
+  if (!bridge || !stage) return;
+
+  const hasBoth = !!state.source.root && !!state.target.root;
+  const hasPreset = !!$('preset') && $('preset').value !== 'none';
+  const shouldShow =
+    state.workspaceView === 'workspace' &&
+    hasBoth &&
+    hasPreset;
+
+  stage.classList.toggle('no-transfer-bridge', !shouldShow);
+
+  if (!shouldShow) {
+    bridge.classList.remove('transfer-reveal');
+    bridge.hidden = true;
+  } else {
+    bridge.hidden = false;
+
+    if (animate) {
+      bridge.classList.remove('transfer-reveal');
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => bridge.classList.add('transfer-reveal'));
+      });
+      window.setTimeout(() => bridge.classList.remove('transfer-reveal'), 900);
+    }
+  }
+
+  requestAnimationFrame(() => {
+    resizeViewports();
+    requestAnimationFrame(resizeViewports);
+  });
+}
+
 function revealConditionalFeature(element, animate = false, delayMs = 0) {
   if (!element) return;
 
@@ -5785,14 +5835,20 @@ function revealConditionalFeature(element, animate = false, delayMs = 0) {
   if (!animate) return;
 
   element.style.setProperty('--feature-delay', `${delayMs}ms`);
-  // Force a new animation frame even if this feature was shown before.
-  void element.offsetWidth;
-  element.classList.add('feature-reveal');
+
+  // Wait until the browser has actually painted the "hidden" state. This
+  // prevents the unlock animation from being consumed while FBX parsing is
+  // still blocking the main thread.
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => {
+      element.classList.add('feature-reveal');
+    });
+  });
 
   window.setTimeout(() => {
     element.classList.remove('feature-reveal');
     element.style.removeProperty('--feature-delay');
-  }, 850 + delayMs);
+  }, 1250 + delayMs);
 }
 
 function updateConditionalFeatureVisibility() {
@@ -5887,7 +5943,7 @@ function setWorkspaceView(view) {
   if (restToolbar) restToolbar.hidden = !isRestPose;
   if (workflowSidebar) workflowSidebar.hidden = isFocusDesk;
   if (settingsPanel) settingsPanel.hidden = isFocusDesk;
-  if (bridge) bridge.hidden = isAnimation || isRestPose || next === 'export';
+  if (bridge && (isAnimation || isRestPose)) bridge.hidden = true;
 
   document.querySelectorAll('[data-workspace]').forEach(button => {
     button.classList.toggle('active', button.dataset.workspace === next);
@@ -5906,6 +5962,8 @@ function setWorkspaceView(view) {
     requestAnimationFrame(() => seek(state.playTime));
   }
 
+  updateTransferBridgeVisibility(false);
+
   requestAnimationFrame(() => {
     resizeViewports();
     requestAnimationFrame(resizeViewports);
@@ -5920,8 +5978,6 @@ function setWorkflowStep(id, mode) {
 }
 
 function updateWorkflowUI() {
-  updateConditionalFeatureVisibility();
-
   const hasSource = !!state.source.root;
   const hasTarget = !!state.target.root;
   const valid = validMap().length;
@@ -6054,13 +6110,26 @@ $('fitTarget').onclick = () => fitView(targetView, state.target.displayRoot || s
 $('sourceClip').onchange = () => setSourceClip(Number($('sourceClip').value));
 $('loadPreset').onclick = () => void loadPreset();
 $('preset').onchange = () => {
-  state.activePresetId = $('preset').value;
-  if (state.source.root && state.target.root && $('preset').value !== 'none') {
-    void loadPreset();
-  } else if ($('preset').value === 'none') {
+  const id = $('preset').value;
+  state.activePresetId = id;
+
+  if (id === 'none') {
     state.activePreset = null;
     state.boneMap = [];
     refreshMapUi();
+    updateButtons();
+    updateTransferBridgeVisibility(false);
+    return;
+  }
+
+  if (state.source.root && state.target.root) {
+    updateTransferBridgeVisibility(false);
+    void loadPreset()
+      .then(() => updateTransferBridgeVisibility(true))
+      .catch(error => {
+        updateTransferBridgeVisibility(false);
+        log(`ERROR preset: ${error.message}`);
+      });
   }
 };
 $('autoMatch').onclick = autoMatch;
@@ -6218,7 +6287,8 @@ function animate(now) {
 
 setWorkspaceView('workspace');
 setMappingCollapsed(true, false);
-updateConditionalFeatureVisibility();
+updateConditionalFeatureVisibility(false);
+updateTransferBridgeVisibility(false);
 updateStats();
 updateWorkflowUI();
 requestAnimationFrame(animate);
