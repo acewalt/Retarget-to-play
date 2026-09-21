@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo1';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-quickik1';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -6065,10 +6065,46 @@ function updateWorkflowUI() {
   setWorkflowStep('stepExport', state.exported ? 'done' : state.exportClip ? 'active' : null);
 }
 
+function updateQuickIkStep() {
+  const step = $('quickIkStep');
+  const button = $('quickConvertIk');
+  const note = $('quickIkNote');
+  if (!step || !button || !note) return;
+
+  const hasFk = !!state.fkClip;
+  const supported = hasFk && supportsFkToIk();
+  const converted = !!state.ikOnlyClip;
+
+  step.hidden = !hasFk;
+
+  if (!hasFk) return;
+
+  if (converted) {
+    button.disabled = true;
+    button.classList.add('done');
+    button.innerHTML = '<span>✓</span><b>FK → IK listo</b>';
+    note.textContent = 'Controles IK generados';
+    return;
+  }
+
+  button.classList.remove('done');
+  button.innerHTML = '<span>→</span><b>FK → IK</b>';
+  button.disabled = !supported;
+
+  if (supported) {
+    note.textContent = 'Siguiente paso · bake de controles IK';
+    button.title = 'Convertir ahora FK → IK';
+  } else {
+    note.textContent = 'No disponible para este tipo de Target';
+    button.title = 'Este Target no expone un pipeline IK compatible';
+  }
+}
+
 function updateButtons() {
   const ready = !!state.source.root && !!state.target.root && !!state.source.activeClip && validMap().length > 0;
   $('applyRetarget').disabled = !ready;
   $('convertIk').disabled = !state.fkClip || !supportsFkToIk();
+  updateQuickIkStep();
   $('exportFbx').disabled = !state.exportClip;
   if ($('exportWorkspaceButton')) $('exportWorkspaceButton').disabled = !state.exportClip;
   if ($('exportBlenderAction')) $('exportBlenderAction').disabled = !state.exportClip;
@@ -6227,6 +6263,7 @@ $('restSensitivity').oninput = () => {
 };
 
 $('convertIk').onclick = convertFkToIk;
+$('quickConvertIk').onclick = convertFkToIk;
 $('exportFbx').onclick = exportTargetFbx;
 $('exportWorkspaceButton').onclick = exportTargetFbx;
 $('exportBlenderAction').onclick = exportBlenderXYZAction;
