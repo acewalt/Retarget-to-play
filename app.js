@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-targetbindaction1';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-targetbaseline2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -236,6 +236,7 @@ function makeSlot(kind) {
     bones: new Map(),
     rest: new Map(),
     animations: [],
+    neutralBaseClip: null,
     mixer: null,
     action: null,
     activeClip: null,
@@ -383,6 +384,81 @@ function restoreRest(slot) {
   updateSlotWorld(slot);
 }
 
+
+function buildNeutralTargetBaselineClip(slot, clips) {
+  if (!slot?.root || slot.kind !== 'target') return null;
+
+  const byTrack = new Map();
+
+  for (const clip of clips || []) {
+    for (const track of clip.tracks || []) {
+      const parsed = parseTrackTarget(track.name);
+      if (!parsed) continue;
+      if (!['position', 'quaternion', 'scale'].includes(parsed.property)) continue;
+      if (!slot.bones.has(parsed.nodeName)) continue;
+
+      // All Target input Actions have already been rewritten to the same
+      // Bind/Rest values. Keep one copy of every TRS channel that exists in
+      // any of them; this becomes the neutral baseline for future exports.
+      if (!byTrack.has(track.name)) {
+        byTrack.set(track.name, track.clone());
+      }
+    }
+  }
+
+  if (!byTrack.size) return null;
+
+  return new THREE.AnimationClip(
+    'Target_BindRest_Baseline',
+    0,
+    [...byTrack.values()]
+  );
+}
+
+function constantTrackForDuration(track, duration) {
+  const size = track.getValueSize?.() || 0;
+  if (!size || !track.values?.length) return null;
+
+  const value = Array.from(track.values.slice(0, size));
+  const times = duration > 0 ? [0, duration] : [0];
+  const values = [];
+
+  for (let i = 0; i < times.length; i++) values.push(...value);
+
+  const out = new track.constructor(track.name, times, values);
+  if (track.getInterpolation && out.setInterpolation) {
+    out.setInterpolation(track.getInterpolation());
+  }
+  return out;
+}
+
+function withTargetNeutralBaseline(clip) {
+  if (!clip) return null;
+
+  const baseline = state.target.neutralBaseClip;
+  if (!baseline?.tracks?.length) return clip.clone();
+
+  const byTrack = new Map();
+
+  // Baseline first: every channel that existed in the incoming Target Action
+  // receives an explicit Bind/Rest value for the full exported duration.
+  for (const track of baseline.tracks) {
+    const constant = constantTrackForDuration(track, clip.duration);
+    if (constant) byTrack.set(constant.name, constant);
+  }
+
+  // Retarget/IK tracks override the corresponding neutral channel.
+  for (const track of clip.tracks) {
+    byTrack.set(track.name, track.clone());
+  }
+
+  return new THREE.AnimationClip(
+    clip.name,
+    clip.duration,
+    [...byTrack.values()]
+  );
+}
+
 function applyWhiteViewportMaterial(slot) {
   if (!slot.root) return;
 
@@ -500,6 +576,10 @@ async function loadFbx(file, slot, view) {
     (targetRestActionReport?.curvesRewritten || 0) > 0 &&
     loadedAnimations.length > 0;
 
+  slot.neutralBaseClip = hasRewrittenTargetAction
+    ? buildNeutralTargetBaselineClip(slot, loadedAnimations)
+    : null;
+
   if (hasRewrittenTargetAction) {
     slot.mixer = new THREE.AnimationMixer(root);
     slot.activeClip = loadedAnimations[0];
@@ -561,7 +641,7 @@ async function loadFbx(file, slot, view) {
         : `Target con ${loadedAnimations.length} Action(s): no fue necesario reescribir curvas.`
       : 'Target sin Actions de entrada. Correcto.';
     const runtimeInfo = slot.rigRuntime?.status;
-    log(`WaltFBX v${WALT_FBX_VERSION} Target: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; Actions entrada=${loadedAnimations.length}; curvas Rest reescritas=${rewrittenCurves}; BindPose models=${targetRestActionReport?.bindModels || 0}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}; WaltRig FK→DEF=${runtimeInfo ? `${runtimeInfo.bindings}/${runtimeInfo.requestedBindings}` : 'n/a'}.`);
+    log(`WaltFBX v${WALT_FBX_VERSION} Target: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; Actions entrada=${loadedAnimations.length}; curvas Rest reescritas=${rewrittenCurves}; baseline TRS=${slot.neutralBaseClip?.tracks?.length || 0}; BindPose models=${targetRestActionReport?.bindModels || 0}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}; WaltRig FK→DEF=${runtimeInfo ? `${runtimeInfo.bindings}/${runtimeInfo.requestedBindings}` : 'n/a'}.`);
   }
 
   state.fkClip = state.fkRawClip = state.ikOnlyClip = state.deformPreviewClip = state.exportClip = state.targetPreviewClip = null;
@@ -4691,7 +4771,9 @@ function buildStandaloneCleanExport() {
     throw new Error('No pude construir la jerarquía limpia del CloudRig.');
   }
 
-  const controlSource = state.targetPreviewClip || state.exportClip;
+  const controlSource = withTargetNeutralBaseline(
+    state.targetPreviewClip || state.exportClip
+  );
   const cleanControls = bakeCleanHierarchyControlClip(
     controlSource,
     hierarchy
@@ -4772,7 +4854,8 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
     throw new Error('Falta Target, retarget o FBX original.');
   }
 
-  const controlClip = buildOriginalRigControlOnlyClip(state.exportClip);
+  const exportWithNeutralBase = withTargetNeutralBaseline(state.exportClip);
+  const controlClip = buildOriginalRigControlOnlyClip(exportWithNeutralBase);
   if (!controlClip || !controlClip.tracks.length) {
     throw new Error('No pude construir la Action de controles del rig original.');
   }
@@ -4835,7 +4918,8 @@ async function exportTargetFbx() {
   try {
     setStatus('Exportando FBX…');
 
-    const exportClip = createOriginalNameExportClip(state.exportClip, state.target);
+    const exportRuntimeClip = withTargetNeutralBaseline(state.exportClip);
+    const exportClip = createOriginalNameExportClip(exportRuntimeClip, state.target);
     let exportMode = $('exportMode')?.value || 'exact';
     const rotationMode = $('rotationMode')?.value || 'xyz';
 
@@ -4862,7 +4946,7 @@ async function exportTargetFbx() {
       // NO DEF curves. On the original CloudRig the DEF/STR chains must be
       // driven by its own constraints from the FK/IK controls.
       const originalRigControlClip = buildOriginalRigControlOnlyClip(
-        state.exportClip
+        withTargetNeutralBaseline(state.exportClip)
       );
 
       if (!originalRigControlClip || !originalRigControlClip.tracks.length) {

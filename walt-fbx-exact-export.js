@@ -1124,11 +1124,10 @@ function buildAnimationPlan(doc, clip, options) {
     const model = modelMap.get(parsed.nodeName);
     if (!model) continue;
 
-    if (parsed.property === 'scale') continue;
     if (parsed.property === 'position' && !shouldExportPosition(parsed.nodeName, options)) continue;
-    if (parsed.property !== 'position' && parsed.property !== 'quaternion') continue;
+    if (!['position', 'quaternion', 'scale'].includes(parsed.property)) continue;
 
-    if (parsed.property === 'position') {
+    if (parsed.property === 'position' || parsed.property === 'scale') {
       const axes = [[], [], []];
       for (let i = 0; i < track.times.length; i++) {
         axes[0].push(track.values[i * 3]);
@@ -1138,8 +1137,10 @@ function buildAnimationPlan(doc, clip, options) {
 
       groups.push({
         model,
-        attrName: 'T',
-        fbxProp: 'Lcl Translation',
+        attrName: parsed.property === 'position' ? 'T' : 'S',
+        fbxProp: parsed.property === 'position'
+          ? 'Lcl Translation'
+          : 'Lcl Scaling',
         times: track.times,
         axes,
         rotationOrder: null
