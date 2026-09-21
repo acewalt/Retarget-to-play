@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik8r1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik8r1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik8r1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik9';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik9';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik9';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -616,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyik8r1',
+      definition.path + '?v=20260920-rigifyik9',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -2272,12 +2272,14 @@ const RIGIFY_IK_CHAINS = [
     kind: 'ARM', side: 'L',
     a: 'upper_arm_fk.L', b: 'forearm_fk.L', c: 'hand_fk.L',
     ik: 'hand_ik.L', pole: 'upper_arm_ik_target.L',
+    endRef: 'MCH-upper_arm_ik_target.L',
     owner: 'MCH-forearm_ik.L'
   },
   {
     kind: 'ARM', side: 'R',
     a: 'upper_arm_fk.R', b: 'forearm_fk.R', c: 'hand_fk.R',
     ik: 'hand_ik.R', pole: 'upper_arm_ik_target.R',
+    endRef: 'MCH-upper_arm_ik_target.R',
     owner: 'MCH-forearm_ik.R'
   },
   {
@@ -2344,6 +2346,13 @@ function resolveRigifyIkChains(tgt) {
       if (!runtimeName) return null;
       resolved[key] = runtimeName;
     }
+    if (def.endRef) {
+      resolved.endRef =
+        findBoneByOriginalExact(tgt, [def.endRef]) ||
+        findSemanticBone(tgt, def.endRef) ||
+        '';
+    }
+
     resolved.owner =
       findBoneByOriginalExact(tgt, [def.owner]) ||
       findSemanticBone(tgt, def.owner) ||
@@ -2778,14 +2787,40 @@ function bakeRigifyIkFromFk() {
         if (!snap) continue;
 
         poseToMatrix(snap.c, fkPoseWorld);
-        if (!restWorldMatrix(tgt, chain.c, fkRestWorld)) continue;
-        if (!restWorldMatrix(tgt, chain.ik, ikRestWorld)) continue;
 
-        // BlendCap bake principle:
-        // desired IK = evaluated FK end * FK-rest^-1 * IK-rest.
-        desiredIkWorld.copy(fkPoseWorld)
-          .multiply(fkRestWorld.clone().invert())
-          .multiply(ikRestWorld);
+        if (chain.kind === 'ARM' && chain.endRef) {
+          // Rigify native limb snap does NOT map hand_fk directly through
+          // hand_fk REST. It preserves the CURRENT pose delta between the
+          // internal IK result target and the visible hand_ik control:
+          //
+          // end_mat =
+          //   hand_fk_pose
+          //   * inverse(MCH-upper_arm_ik_target pose)
+          //   * hand_ik pose
+          //
+          // MCH-upper_arm_ik_target is a direct child of hand_ik in the
+          // exported hierarchy, so this relative delta survives FBX even
+          // though the live Rigify constraints do not.
+          const endRefBone = tgt.bones.get(chain.endRef);
+          const handIkBone = tgt.bones.get(chain.ik);
+
+          if (!endRefBone || !handIkBone) continue;
+
+          const endRefPose = endRefBone.matrixWorld.clone();
+          const handIkPose = handIkBone.matrixWorld.clone();
+
+          desiredIkWorld.copy(fkPoseWorld)
+            .multiply(endRefPose.invert())
+            .multiply(handIkPose);
+        } else {
+          if (!restWorldMatrix(tgt, chain.c, fkRestWorld)) continue;
+          if (!restWorldMatrix(tgt, chain.ik, ikRestWorld)) continue;
+
+          // Keep the already-proven leg path unchanged.
+          desiredIkWorld.copy(fkPoseWorld)
+            .multiply(fkRestWorld.clone().invert())
+            .multiply(ikRestWorld);
+        }
 
         rigifyFunctionalParentPoseMatrix(
           tgt, chain, 'IK', fkPoseCache, parentPose
@@ -2894,9 +2929,9 @@ function bakeRigifyIkFromFk() {
   }
 
   log(
-    'FK→IK Rigify original-evaluated: fuente=FK Action portable; ' +
-    'piernas conservadas; hand_ik usa BKE no-local con parent 3x3 crudo; ' +
-    'hand parent=root; arm pole parent=shoulder.'
+    'FK→IK Rigify original-evaluated: piernas congeladas; ' +
+    'hand_ik usa pose-delta nativo vía MCH-upper_arm_ik_target; ' +
+    'BKE no-local conserva parent 3x3 crudo.'
   );
 
   return new THREE.AnimationClip(
