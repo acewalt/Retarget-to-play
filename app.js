@@ -414,11 +414,13 @@ function updateRestPoseUi() {
 
   const status = $('restPoseStatus');
   if (status) {
+    const selectedEntry = restPoseEntryByName(state.restEditor.selectedBone);
+    const selectedText = selectedEntry ? ` · Selected: ${selectedEntry.label}` : '';
     status.textContent = !hasSource
       ? 'Carga un Source. El Target queda como referencia visual.'
       : state.restEditor.hasCustomRest
-        ? 'Rest personalizada activa para el próximo Transfer.'
-        : 'Rota brazos, codos, muslos o rodillas y confirma la pose cuando termine.';
+        ? `Rest personalizada activa para el próximo Transfer${selectedText}.`
+        : `Rota brazos, codos, muslos o rodillas${selectedText}.`;
   }
 }
 
@@ -565,6 +567,62 @@ function leaveRestPoseWorkspace() {
   detachRestPoseTransform();
   if (state.source.root) restoreRest(state.source);
 }
+
+function pointSegmentDistance2D(point, a, b) {
+  const abx = b.x - a.x;
+  const aby = b.y - a.y;
+  const apx = point.x - a.x;
+  const apy = point.y - a.y;
+  const denom = abx * abx + aby * aby;
+  const t = denom > 1e-8
+    ? THREE.MathUtils.clamp((apx * abx + apy * aby) / denom, 0, 1)
+    : 0;
+  const x = a.x + abx * t;
+  const y = a.y + aby * t;
+  return Math.hypot(point.x - x, point.y - y);
+}
+
+function projectRestPosePoint(world, rect) {
+  const p = world.clone().project(sourceView.camera);
+  return {
+    x: (p.x * 0.5 + 0.5) * rect.width,
+    y: (-p.y * 0.5 + 0.5) * rect.height
+  };
+}
+
+function pickRestPoseBoneFromViewport(event) {
+  if (state.workspaceView !== 'restpose' || !state.source.root) return;
+  if (state.restEditor.transform?.dragging) return;
+
+  const rect = sourceView.renderer.domElement.getBoundingClientRect();
+  const click = { x: event.clientX - rect.left, y: event.clientY - rect.top };
+  let best = null;
+
+  updateSlotWorld(state.source);
+
+  for (const entry of availableRestPoseBones()) {
+    const bone = state.source.bones.get(entry.name);
+    if (!bone) continue;
+
+    const startWorld = bone.getWorldPosition(new THREE.Vector3());
+    const childBone = bone.children.find(child => child.isBone);
+    const endWorld = childBone
+      ? childBone.getWorldPosition(new THREE.Vector3())
+      : startWorld.clone();
+
+    const a = projectRestPosePoint(startWorld, rect);
+    const b = projectRestPosePoint(endWorld, rect);
+    const distance = pointSegmentDistance2D(click, a, b);
+
+    if (!best || distance < best.distance) best = { entry, distance };
+  }
+
+  if (best && best.distance <= 22) {
+    selectRestPoseBone(best.entry.name);
+  }
+}
+
+sourceView.renderer.domElement.addEventListener('pointerdown', pickRestPoseBoneFromViewport);
 
 function applyViewportTheme(view, theme = currentTheme()) {
   const palette = viewportPalette(theme);
