@@ -711,6 +711,295 @@ function connection(type, src, dst, relationship = null) {
   return node('C', props);
 }
 
+
+function decodeUncompressedNumericArray(p) {
+  if (!p?.extra) return null;
+  if (p.extra.encoding !== 0) {
+    throw new Error('WaltExactFBX: BindPose comprimido no soportado para neutralización.');
+  }
+
+  const bytes = p.extra.payload;
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const out = new Array(p.extra.length);
+
+  for (let i = 0; i < p.extra.length; i++) {
+    if (p.type === 'd') out[i] = view.getFloat64(i * 8, true);
+    else if (p.type === 'f') out[i] = view.getFloat32(i * 4, true);
+    else if (p.type === 'l') out[i] = Number(view.getBigInt64(i * 8, true));
+    else if (p.type === 'i') out[i] = view.getInt32(i * 4, true);
+    else throw new Error(`WaltExactFBX: array ${p.type} no soportado en BindPose.`);
+  }
+
+  return out;
+}
+
+function setCurveNodeDefaults(curveNodeNode, values) {
+  const p70 = curveNodeNode.children.find(c => c.name === 'Properties70');
+  if (!p70) return;
+
+  const wanted = new Map([
+    ['d|X', Number(values[0]) || 0],
+    ['d|Y', Number(values[1]) || 0],
+    ['d|Z', Number(values[2]) || 0]
+  ]);
+
+  for (const p of p70.children) {
+    if (p.name !== 'P' || p.properties.length < 5) continue;
+    const key = p.properties[0]?.value;
+    if (!wanted.has(key)) continue;
+    p.properties[p.properties.length - 1].type = 'D';
+    p.properties[p.properties.length - 1].value = wanted.get(key);
+  }
+}
+
+function bindPoseRestByModel(doc) {
+  const objects = getObjects(doc);
+  const connections = getConnections(doc);
+
+  const modelsById = new Map();
+  for (const n of objects.children) {
+    if (n.name !== 'Model') continue;
+    const uid = objectUid(n);
+    if (uid != null) modelsById.set(String(uid), n);
+  }
+
+  const parentById = new Map();
+  for (const c of connections.children) {
+    if (c.name !== 'C' || c.properties.length < 3) continue;
+    if (c.properties[0]?.value !== 'OO') continue;
+
+    const src = String(c.properties[1]?.value);
+    const dst = String(c.properties[2]?.value);
+    if (modelsById.has(src) && modelsById.has(dst)) parentById.set(src, dst);
+  }
+
+  const bindPose = objects.children.find(n =>
+    n.name === 'Pose' &&
+    (
+      n.properties?.[2]?.value === 'BindPose' ||
+      n.children?.some(c => c.name === 'Type' && c.properties?.[0]?.value === 'BindPose')
+    )
+  );
+
+  if (!bindPose) {
+    return {
+      restById: new Map(),
+      bindWorldById: new Map(),
+      modelsById,
+      parentById
+    };
+  }
+
+  const bindWorldById = new Map();
+
+  for (const poseNode of bindPose.children) {
+    if (poseNode.name !== 'PoseNode') continue;
+
+    const idNode = poseNode.children.find(c => c.name === 'Node');
+    const matrixNode = poseNode.children.find(c => c.name === 'Matrix');
+    const id = idNode?.properties?.[0]?.value;
+    const matrixProp = matrixNode?.properties?.[0];
+
+    if (id == null || !matrixProp) continue;
+
+    const values = decodeUncompressedNumericArray(matrixProp);
+    if (!values || values.length < 16) continue;
+
+    // FBX BindPose matrices are stored row-major / row-vector. THREE uses
+    // column-vector matrices, so transpose once when importing the matrix.
+    const world = new THREE.Matrix4().set(
+      values[0], values[1], values[2], values[3],
+      values[4], values[5], values[6], values[7],
+      values[8], values[9], values[10], values[11],
+      values[12], values[13], values[14], values[15]
+    ).transpose();
+
+    bindWorldById.set(String(id), world);
+  }
+
+  const restById = new Map();
+
+  for (const [id, world] of bindWorldById) {
+    const modelNode = modelsById.get(id);
+    if (!modelNode) continue;
+
+    const parentId = parentById.get(id);
+    const parentWorld = parentId ? bindWorldById.get(parentId) : null;
+
+    const local = parentWorld
+      ? parentWorld.clone().invert().multiply(world)
+      : world.clone();
+
+    const position = new THREE.Vector3();
+    const quaternion = new THREE.Quaternion();
+    const scale = new THREE.Vector3();
+    local.decompose(position, quaternion, scale);
+
+    restById.set(id, {
+      translation: [position.x, position.y, position.z],
+      rotation: quaternionToLclDegrees(quaternion, modelNode),
+      scale: [scale.x, scale.y, scale.z]
+    });
+  }
+
+  return { restById, bindWorldById, modelsById, parentById };
+}
+
+/**
+ * Rewrites ONLY the existing Target Action curve values so every keyed
+ * transform evaluates to the FBX BindPose/Rest pose.
+ *
+ * This intentionally leaves Model base transforms, geometry, skin, hierarchy,
+ * units, Action names, key times and Action durations untouched.
+ *
+ * It mirrors the "rest Action" pattern produced by Blender: the raw FBX curve
+ * values equal the bone's bind-local Lcl Translation/Rotation/Scaling, which
+ * Blender imports as Pose Location=0, Rotation=identity, Scale=1.
+ */
+export function rewriteTargetActionsToBindRest(originalBuffer) {
+  if (!originalBuffer) {
+    throw new Error('WaltExactFBX: no hay Target FBX para neutralizar.');
+  }
+
+  const parser = new ExactBinaryParser(originalBuffer.slice(0));
+  const doc = parser.parse();
+  const objects = getObjects(doc);
+  const connections = getConnections(doc);
+
+  const actionStacks = objects.children.filter(n => n.name === 'AnimationStack').length;
+  const animationCurves = objects.children.filter(n => n.name === 'AnimationCurve').length;
+
+  if (!actionStacks || !animationCurves) {
+    return {
+      bytes: new Uint8Array(originalBuffer.slice(0)),
+      report: {
+        actionStacks,
+        bindModels: 0,
+        curveNodesRewritten: 0,
+        curvesRewritten: 0,
+        skippedCurves: 0
+      }
+    };
+  }
+
+  const { restById } = bindPoseRestByModel(doc);
+  if (!restById.size) {
+    throw new Error('WaltExactFBX: el Target tiene Actions pero no encontré BindPose utilizable.');
+  }
+
+  const byId = new Map();
+  for (const n of objects.children) {
+    const uid = objectUid(n);
+    if (uid != null) byId.set(String(uid), n);
+  }
+
+  const curveNodeTarget = new Map();
+  const curveLink = new Map();
+
+  for (const c of connections.children) {
+    if (c.name !== 'C' || c.properties.length < 4) continue;
+    if (c.properties[0]?.value !== 'OP') continue;
+
+    const src = String(c.properties[1]?.value);
+    const dst = String(c.properties[2]?.value);
+    const relationship = String(c.properties[3]?.value || '');
+    const srcNode = byId.get(src);
+    const dstNode = byId.get(dst);
+
+    if (srcNode?.name === 'AnimationCurveNode' && dstNode?.name === 'Model') {
+      curveNodeTarget.set(src, {
+        modelId: dst,
+        property: relationship
+      });
+      continue;
+    }
+
+    if (srcNode?.name === 'AnimationCurve' && dstNode?.name === 'AnimationCurveNode') {
+      curveLink.set(src, {
+        curveNodeId: dst,
+        axis: relationship
+      });
+    }
+  }
+
+  const axisIndex = new Map([
+    ['d|X', 0],
+    ['d|Y', 1],
+    ['d|Z', 2]
+  ]);
+
+  const propKey = new Map([
+    ['Lcl Translation', 'translation'],
+    ['Lcl Rotation', 'rotation'],
+    ['Lcl Scaling', 'scale']
+  ]);
+
+  let curveNodesRewritten = 0;
+  let curvesRewritten = 0;
+  let skippedCurves = 0;
+
+  for (const [curveNodeId, target] of curveNodeTarget) {
+    const curveNodeNode = byId.get(curveNodeId);
+    const rest = restById.get(target.modelId);
+    const restKey = propKey.get(target.property);
+
+    if (!curveNodeNode || !rest || !restKey) continue;
+
+    setCurveNodeDefaults(curveNodeNode, rest[restKey]);
+    curveNodesRewritten++;
+  }
+
+  for (const n of objects.children) {
+    if (n.name !== 'AnimationCurve') continue;
+
+    const uid = objectUid(n);
+    const link = uid != null ? curveLink.get(String(uid)) : null;
+    const target = link ? curveNodeTarget.get(link.curveNodeId) : null;
+    const rest = target ? restById.get(target.modelId) : null;
+    const restKey = target ? propKey.get(target.property) : null;
+    const index = link ? axisIndex.get(link.axis) : null;
+
+    if (!link || !target || !rest || !restKey || index == null) {
+      skippedCurves++;
+      continue;
+    }
+
+    const value = Number(rest[restKey][index]) || 0;
+    const keyValue = n.children.find(c => c.name === 'KeyValueFloat');
+    const defaultNode = n.children.find(c => c.name === 'Default');
+    const keyProp = keyValue?.properties?.[0];
+    const count = keyProp?.extra?.length;
+
+    if (!keyValue || !Number.isFinite(count) || count < 1) {
+      skippedCurves++;
+      continue;
+    }
+
+    keyValue.properties[0] = typedArrayProp(
+      'f',
+      new Float32Array(count).fill(value)
+    );
+
+    if (defaultNode?.properties?.length) {
+      defaultNode.properties[0].type = 'D';
+      defaultNode.properties[0].value = value;
+    }
+
+    curvesRewritten++;
+  }
+
+  return {
+    bytes: encodeDocument(doc),
+    report: {
+      actionStacks,
+      bindModels: restById.size,
+      curveNodesRewritten,
+      curvesRewritten,
+      skippedCurves
+    }
+  };
+}
+
 function collectExistingAnimationIds(objects) {
   const ids = new Set();
   for (const n of objects.children) {

@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-preview1';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-targetbindaction1';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -439,7 +439,25 @@ function clearSlot(slot, view) {
 async function loadFbx(file, slot, view) {
   setStatus(`Leyendo ${file.name}…`);
   const buffer = await file.arrayBuffer();
-  const asset = fbxLoader.parse(buffer, '');
+
+  // Target-only: rewrite the FBX's own Action curve VALUES to its BindPose.
+  // The original bytes stay untouched in slot.originalBuffer for later export.
+  let parseBuffer = buffer;
+  let targetRestActionReport = null;
+
+  if (slot.kind === 'target') {
+    const neutralized = rewriteTargetActionsToBindRest(buffer);
+    targetRestActionReport = neutralized.report;
+
+    if (neutralized.report.curvesRewritten > 0) {
+      parseBuffer = neutralized.bytes.buffer.slice(
+        neutralized.bytes.byteOffset,
+        neutralized.bytes.byteOffset + neutralized.bytes.byteLength
+      );
+    }
+  }
+
+  const asset = fbxLoader.parse(parseBuffer, '');
   const root = asset.root;
   const loadedAnimations = [...asset.animations];
 
@@ -472,21 +490,58 @@ async function loadFbx(file, slot, view) {
     slot.overlay.update();
   }
 
-  captureRest(slot);
+  // If the Target arrived with Actions, their FBX curve values were rewritten
+  // above to the real BindPose. Evaluate that rewritten Action first and ONLY
+  // then capture the retarget rest. This is the same pattern seen in a proper
+  // Blender "rest Action": Pose Location=0 / Rotation=identity / Scale=1,
+  // while the raw FBX curves contain the bone's bind-local Lcl values.
+  const hasRewrittenTargetAction =
+    slot.kind === 'target' &&
+    (targetRestActionReport?.curvesRewritten || 0) > 0 &&
+    loadedAnimations.length > 0;
 
-  // A Target is always an unanimated destination on import.
-  // Keep the FBX's original animation bytes in originalBuffer for export,
-  // but never leave an Action/mixer active in the viewport or retarget state.
-  if (slot.kind === 'target') {
+  if (hasRewrittenTargetAction) {
+    slot.mixer = new THREE.AnimationMixer(root);
+    slot.activeClip = loadedAnimations[0];
+    slot.action = slot.mixer.clipAction(slot.activeClip);
+    slot.action.setLoop(THREE.LoopRepeat, Infinity).play();
+    slot.mixer.setTime(0);
+    updateSlotWorld(slot);
+
+    captureRest(slot);
+
+    // CloudRig runtime was created before the neutral Action was evaluated,
+    // so refresh its own FK/DEF rest cache from this corrected pose as well.
+    slot.rigRuntime?.captureRest?.();
+
+    slot.action.stop();
+    slot.mixer.stopAllAction();
+    slot.action = null;
+    slot.mixer = null;
+    slot.activeClip = null;
+
+    // Target input Actions are still not reused by retarget/playback.
+    // Their only job here was to establish the correct neutral rest.
     slot.animations = [];
     root.animations = [];
-    slot.activeClip = null;
-    slot.action?.stop?.();
-    slot.action = null;
-    slot.mixer?.stopAllAction?.();
-    slot.mixer = null;
+
+    restoreRest(slot);
     slot.rigRuntime?.resetDriven?.();
     restoreRest(slot);
+  } else {
+    captureRest(slot);
+
+    if (slot.kind === 'target') {
+      slot.animations = [];
+      root.animations = [];
+      slot.activeClip = null;
+      slot.action?.stop?.();
+      slot.action = null;
+      slot.mixer?.stopAllAction?.();
+      slot.mixer = null;
+      slot.rigRuntime?.resetDriven?.();
+      restoreRest(slot);
+    }
   }
 
   fitView(view, slot.displayRoot);
@@ -499,11 +554,14 @@ async function loadFbx(file, slot, view) {
     log(`WaltFBX v${WALT_FBX_VERSION} Source: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}.`);
   } else {
     $('targetLabel').textContent = `${file.name} · ${slot.bones.size} huesos · ${asset.rig.profile}`;
+    const rewrittenCurves = targetRestActionReport?.curvesRewritten || 0;
     $('targetAnimNotice').textContent = loadedAnimations.length
-      ? `Target cargado con ${loadedAnimations.length} Action(s): se ignoraron y no se reutilizarán.`
+      ? rewrittenCurves
+        ? `Target con ${loadedAnimations.length} Action(s): ${rewrittenCurves} curvas reescritas a Rest desde BindPose.`
+        : `Target con ${loadedAnimations.length} Action(s): no fue necesario reescribir curvas.`
       : 'Target sin Actions de entrada. Correcto.';
     const runtimeInfo = slot.rigRuntime?.status;
-    log(`WaltFBX v${WALT_FBX_VERSION} Target: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; Actions descartadas=${loadedAnimations.length}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}; WaltRig FK→DEF=${runtimeInfo ? `${runtimeInfo.bindings}/${runtimeInfo.requestedBindings}` : 'n/a'}.`);
+    log(`WaltFBX v${WALT_FBX_VERSION} Target: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; Actions entrada=${loadedAnimations.length}; curvas Rest reescritas=${rewrittenCurves}; BindPose models=${targetRestActionReport?.bindModels || 0}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}; WaltRig FK→DEF=${runtimeInfo ? `${runtimeInfo.bindings}/${runtimeInfo.requestedBindings}` : 'n/a'}.`);
   }
 
   state.fkClip = state.fkRawClip = state.ikOnlyClip = state.deformPreviewClip = state.exportClip = state.targetPreviewClip = null;
