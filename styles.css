@@ -237,3 +237,58 @@ h2,p{margin:0}
 }
 
 .workflow-step.status-only{cursor:default}
+
+
+/* Preset-gated Transfer: without a preset, Source + Target use the full stage. */
+.main-workspace[data-view="workspace"] .retarget-stage.no-transfer-bridge{
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+}
+.main-workspace[data-view="workspace"] .retarget-stage.no-transfer-bridge .source-card,
+.main-workspace[data-view="workspace"] .retarget-stage.no-transfer-bridge .target-card{
+  min-width:0;
+}
+
+.retarget-bridge.transfer-reveal{
+  animation:transferBridgeIn .68s cubic-bezier(.18,.9,.24,1.16) both;
+}
+@keyframes transferBridgeIn{
+  0%{opacity:0;transform:scale(.72) translateY(10px);filter:blur(7px)}
+  58%{opacity:1;transform:scale(1.06) translateY(-2px);filter:blur(0)}
+  100%{opacity:1;transform:scale(1) translateY(0);filter:blur(0)}
+}
+
+/* Make the post-load unlock intentionally visible instead of being consumed
+   while the second FBX is still parsing on the main thread. */
+.conditional-feature.feature-reveal{
+  animation-duration:.82s;
+  animation-timing-function:cubic-bezier(.16,.84,.22,1.08);
+}
+@keyframes featureUnlockIn{
+  0%{opacity:0;transform:translateY(-15px) scale(.88);filter:blur(9px)}
+  55%{opacity:1;transform:translateY(3px) scale(1.035);filter:blur(0)}
+  100%{opacity:1;transform:translateY(0) scale(1);filter:blur(0)}
+}
+@keyframes featureUnlockPanel{
+  0%{
+    opacity:0;
+    transform:translateX(28px) scale(.97);
+    filter:blur(8px);
+    box-shadow:inset 4px 0 0 transparent;
+  }
+  62%{
+    opacity:1;
+    transform:translateX(-3px) scale(1.005);
+    filter:blur(0);
+    box-shadow:inset 4px 0 0 var(--primary);
+  }
+  100%{
+    opacity:1;
+    transform:translateX(0) scale(1);
+    filter:blur(0);
+    box-shadow:inset 0 0 0 transparent;
+  }
+}
+
+@media(prefers-reduced-motion:reduce){
+  .retarget-bridge.transfer-reveal{animation:none!important}
+}
