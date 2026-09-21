@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-restposeeditor2" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-restposeeditor3" />
   <script type="importmap">
   {
     "imports": {
@@ -100,8 +100,13 @@
           </div>
           <div class="restpose-controls">
             <label class="restpose-bone-field"><span>Bone</span><select id="restBoneSelect" disabled><option value="">Carga un Source</option></select></label>
+            <label class="restpose-sensitivity">
+              <span>Sensitivity <b id="restSensitivityValue">35%</b></span>
+              <input id="restSensitivity" type="range" min="0.05" max="1" step="0.05" value="0.35" />
+            </label>
             <button id="restSpaceToggle" type="button" class="restpose-compact">Local</button>
             <button id="copyRestBone" type="button" class="soft-primary" disabled>Copy Selected Bone</button>
+            <button id="undoRestPose" type="button" disabled>Undo · Ctrl+Z</button>
             <button id="resetRestBone" type="button" disabled>Reset Bone</button>
             <button id="resetRestPose" type="button" disabled>Reset Pose</button>
             <button id="commitRestPose" type="button" class="restpose-commit" disabled>Use This Pose as Rest</button>
@@ -347,6 +352,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-restposeeditor2"></script>
+  <script type="module" src="./app.js?v=20260920-restposeeditor3"></script>
 </body>
 </html>
