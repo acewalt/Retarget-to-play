@@ -941,8 +941,6 @@ export class WaltRigifyRuntime {
 
     const qCurrent = new THREE.Quaternion();
     const qDelta = new THREE.Quaternion();
-    const qBasis = new THREE.Quaternion();
-    const qRestRelative = new THREE.Quaternion();
     const qParentWorld = new THREE.Quaternion();
     const qDesiredWorld = new THREE.Quaternion();
     const qDesiredLocal = new THREE.Quaternion();
@@ -1014,24 +1012,16 @@ export class WaltRigifyRuntime {
           : null;
       }
 
+      // Rigify differs from CloudRig here: the preview clip is the RAW
+      // generic retarget clip, so each FK control already evaluates to the
+      // desired WORLD rotation in Three.js. Reinterpreting bone.quaternion as
+      // "restLocal * poseBasis" double-applies parent rotation and caused the
+      // violent flips visible in IMG_7312.
+      bone.getWorldQuaternion(qCurrent).normalize();
+
       if (parentVirtual && parentRest) {
-        // Portable FK clip stores restLocal * poseBasis. Recompose the same
-        // basis on the reconstructed anatomical parent, exactly as CloudRig.
-        qBasis.copy(rest.localQuaternion)
-          .invert()
-          .multiply(bone.quaternion)
-          .normalize();
-
-        qRestRelative.copy(parentRest.worldQuaternion)
-          .invert()
-          .multiply(rest.worldQuaternion)
-          .normalize();
-
-        qCurrent.copy(parentVirtual.quaternion)
-          .multiply(qRestRelative)
-          .multiply(qBasis)
-          .normalize();
-
+        // Rebuild only the anatomical POSITION chain from the virtual parent.
+        // Keep the already-correct raw world quaternion from bakeRetarget.
         qParentWorld.copy(parentVirtual.quaternion);
         const parentDelta = qParentWorld.clone()
           .multiply(parentRest.worldQuaternion.clone().invert())
@@ -1043,7 +1033,6 @@ export class WaltRigifyRuntime {
 
         pCurrent.copy(parentVirtual.position).add(offset);
       } else {
-        bone.getWorldQuaternion(qCurrent).normalize();
         bone.getWorldPosition(pCurrent);
       }
 
