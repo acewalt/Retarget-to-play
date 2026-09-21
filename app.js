@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifypreview3';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifypreview4';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -2671,7 +2671,7 @@ function buildRigifyViewportDeformClip(controlClip) {
   const data = new Map(
     bindings.map(binding => [
       binding.driven,
-      { q: [], previousQ: null }
+      { p: [], q: [], previousQ: null }
     ])
   );
 
@@ -2681,11 +2681,20 @@ function buildRigifyViewportDeformClip(controlClip) {
   const mixer = new THREE.AnimationMixer(tgt.root);
   const action = mixer.clipAction(controlClip).play();
 
-  const driverWorldQ = new THREE.Quaternion();
+  const driverRestWorld = new THREE.Matrix4();
+  const drivenRestWorld = new THREE.Matrix4();
+  const deltaWorld = new THREE.Matrix4();
+  const rigidDelta = new THREE.Matrix4();
+  const desiredWorld = new THREE.Matrix4();
+  const local = new THREE.Matrix4();
+
+  const deltaP = new THREE.Vector3();
   const deltaQ = new THREE.Quaternion();
-  const desiredWorldQ = new THREE.Quaternion();
-  const parentWorldQ = new THREE.Quaternion();
-  const localQ = new THREE.Quaternion();
+  const deltaS = new THREE.Vector3();
+
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
 
   try {
     for (const time of times) {
@@ -2693,56 +2702,68 @@ function buildRigifyViewportDeformClip(controlClip) {
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      // Parent-first. For viewport deformation we only reproduce rotational
-      // pose deltas. Rigify's DEF bone lengths/offsets belong to the rest rig;
-      // keying translated DEF bones stretches the torso/limbs because the
-      // Blender MCH constraints that normally resolve them are absent in FBX.
+      // Parent-first: every DEF receives the world-space delta of its RAW FK
+      // control. We DO keep position because Rigify's FBX hierarchy contains
+      // MCH parents that do not evaluate Blender constraints in Three.js.
+      // Rotation-only made connected DEF chains separate/stretch badly.
       for (const binding of bindings) {
         const driver = tgt.bones.get(binding.driver);
         const driven = tgt.bones.get(binding.driven);
-        const driverRest = tgt.rest.get(binding.driver);
         const drivenRest = tgt.rest.get(binding.driven);
-        if (!driver || !driven || !driverRest || !drivenRest) continue;
 
-        driver.getWorldQuaternion(driverWorldQ);
+        if (!driver || !driven || !drivenRest) continue;
+        if (!composeRestWorldMatrix(tgt, binding.driver, driverRestWorld)) continue;
+        if (!composeRestWorldMatrix(tgt, binding.driven, drivenRestWorld)) continue;
 
-        deltaQ.copy(driverWorldQ)
-          .multiply(driverRest.worldQuat.clone().invert())
-          .normalize();
+        // Current RAW-FK world delta relative to the imported rest pose.
+        deltaWorld.copy(driver.matrixWorld)
+          .multiply(driverRestWorld.clone().invert());
 
-        desiredWorldQ.copy(deltaQ)
-          .multiply(drivenRest.worldQuat)
-          .normalize();
+        // Remove scale from the delta. The preview may move/rotate DEF bones,
+        // but it must never inject FK/MCH scale into the skinned skeleton.
+        deltaWorld.decompose(deltaP, deltaQ, deltaS);
+        deltaQ.normalize();
+        rigidDelta.compose(
+          deltaP,
+          deltaQ,
+          new THREE.Vector3(1, 1, 1)
+        );
+
+        desiredWorld.copy(rigidDelta).multiply(drivenRestWorld);
 
         if (driven.parent) {
-          driven.parent.getWorldQuaternion(parentWorldQ);
-          localQ.copy(parentWorldQ)
+          local.copy(driven.parent.matrixWorld)
             .invert()
-            .multiply(desiredWorldQ)
-            .normalize();
+            .multiply(desiredWorld);
         } else {
-          localQ.copy(desiredWorldQ);
+          local.copy(desiredWorld);
         }
 
-        driven.position.copy(drivenRest.position);
-        driven.quaternion.copy(localQ);
+        local.decompose(p, q, s);
+        q.normalize();
+
+        // Position + rotation reproduce the missing Rigify constraints.
+        // Scale remains exactly the imported Rest value.
+        driven.position.copy(p);
+        driven.quaternion.copy(q);
         driven.scale.copy(drivenRest.scale);
         updateSlotWorld(tgt);
 
         const d = data.get(binding.driven);
         if (!d) continue;
 
-        if (d.previousQ && d.previousQ.dot(localQ) < 0) {
-          localQ.x *= -1;
-          localQ.y *= -1;
-          localQ.z *= -1;
-          localQ.w *= -1;
-          driven.quaternion.copy(localQ);
+        if (d.previousQ && d.previousQ.dot(q) < 0) {
+          q.x *= -1;
+          q.y *= -1;
+          q.z *= -1;
+          q.w *= -1;
+          driven.quaternion.copy(q);
           updateSlotWorld(tgt);
         }
 
-        d.q.push(localQ.x, localQ.y, localQ.z, localQ.w);
-        d.previousQ = localQ.clone();
+        d.p.push(p.x, p.y, p.z);
+        d.q.push(q.x, q.y, q.z, q.w);
+        d.previousQ = q.clone();
       }
     }
   } finally {
@@ -2752,7 +2773,14 @@ function buildRigifyViewportDeformClip(controlClip) {
   }
 
   const tracks = [];
+
   for (const [name, d] of data) {
+    if (d.p.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(`${name}.position`, times, d.p)
+      );
+    }
+
     if (d.q.length === times.length * 4) {
       tracks.push(
         new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q)
@@ -2762,7 +2790,7 @@ function buildRigifyViewportDeformClip(controlClip) {
 
   log(
     `Preview Rigify RAW-FK → DEF: ${bindings.length} controles, ` +
-    `${tracks.length} rotaciones visuales · posición/escala DEF preservadas.`
+    `${tracks.length} curvas POS/ROT · scale DEF preservada.`
   );
 
   return tracks.length
