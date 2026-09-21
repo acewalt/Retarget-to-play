@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifychest1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifysplit1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -2694,9 +2694,9 @@ function collectRigifyViewportDefBindings() {
     });
   };
 
-  // Rigify spine is a split DEF chain. The intermediate segments must also
-  // receive the matching FK rotation; their positions remain inherited from
-  // Rest in the live runtime, so this does not stretch the chain.
+  // Split Rigify spine. Live runtime distributes each FK section across
+  // both connected DEF segments instead of concentrating the whole bend in
+  // the first segment.
   add('spine_fk', 'DEF-spine');
   add('spine_fk', 'DEF-spine.001');
 
