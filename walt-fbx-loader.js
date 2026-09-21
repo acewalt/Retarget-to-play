@@ -469,14 +469,24 @@ function buildRig(root, metadata) {
     names.some(n => /^thigh_l$/i.test(n)) &&
     names.some(n => /^calf_l$/i.test(n));
 
+  const looksRigify =
+    names.some(n => /^upper_arm_fk\.L$/i.test(n)) &&
+    names.some(n => /^forearm_fk\.L$/i.test(n)) &&
+    names.some(n => /^hand_fk\.L$/i.test(n)) &&
+    names.some(n => /^thigh_fk\.L$/i.test(n)) &&
+    names.some(n => /^shin_fk\.L$/i.test(n)) &&
+    names.some(n => /^foot_fk\.L$/i.test(n));
+
   const profile =
     names.some(n => /^FK-UpperArm\.L$/i.test(n)) && names.some(n => /^DEF-Hips$/i.test(n))
       ? 'cloudrig'
-      : names.some(n => /mixamorig\d*:Hips/i.test(n)) || names.some(n => /^Hips$/i.test(n))
-        ? 'mixamo'
+      : looksRigify
+        ? 'rigify'
         : looksUnreal
           ? 'ue'
-          : 'generic';
+          : names.some(n => /mixamorig\d*:Hips/i.test(n)) || names.some(n => /^Hips$/i.test(n))
+            ? 'mixamo'
+            : 'generic';
 
   return {
     root,
