@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyhandfk1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyhandfk1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyhandfk1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyfkbasis1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyfkbasis1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyfkbasis1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -616,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyhandfk1',
+      definition.path + '?v=20260920-rigifyfkbasis1',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -3577,107 +3577,324 @@ function buildRigifyOriginalRigTransferClip(clip) {
   const tgt = state.target;
   if (!clip || !tgt.root) return clip;
 
-  const childName =
-    findBoneByOriginalExact(tgt, ['head']) ||
-    findSemanticBone(tgt, 'head');
-  const helperName =
-    findBoneByOriginalExact(tgt, ['MCH-ROT-head']);
-  const followName =
-    findBoneByOriginalExact(tgt, ['torso']);
-
-  if (!childName || !helperName || !followName) {
-    return clip.clone();
-  }
-
-  const child = tgt.bones.get(childName);
-  const helper = tgt.bones.get(helperName);
-  const follow = tgt.bones.get(followName);
-  const childRest = tgt.rest.get(childName);
-  const helperRest = tgt.rest.get(helperName);
-
-  if (!child || !helper || !follow || !childRest || !helperRest) {
-    return clip.clone();
-  }
-
   const sourceTracks = clip.tracks.map(track => track.clone());
-  const headTrack = sourceTracks.find(track => {
-    const parsed = parseTrackTarget(track.name);
-    return parsed?.nodeName === childName && parsed.property === 'quaternion';
-  });
+  const replacements = new Map();
 
-  if (!headTrack) return clip.clone();
-
-  // Actual exported Rigify hierarchy:
-  // neck -> MCH-ROT-head -> head
-  //
-  // In Blender, however, MCH-ROT-head has COPY_ROTATION from Rigify's
-  // follow bone. Stock super_head creates head_follow with default 0,
-  // and its driver uses influence = 1 - head_follow; therefore the
-  // helper's rotation is carried by torso at the default setting.
-  // The FBX contains the helper hierarchy but not that live constraint.
-  //
-  // Bake the head matrix_basis against the pose the ORIGINAL helper
-  // will actually have at playback:
-  //   helperPoseRot = torsoPoseRot
-  //   identityHeadRot = helperPoseRot * helperRest^-1 * headRest
-  //   basis = identityHeadRot^-1 * desiredHeadRot
   restoreRest(tgt);
   tgt.mixer?.stopAllAction();
 
   const mixer = new THREE.AnimationMixer(tgt.root);
   const action = mixer.clipAction(clip).play();
 
-  const helperRestQ = helperRest.worldQuat.clone().normalize();
-  const headRestWorldQ = childRest.worldQuat.clone().normalize();
-  const relRestQ = helperRestQ.clone()
-    .invert()
-    .multiply(headRestWorldQ)
-    .normalize();
+  function findQuatTrack(runtimeName) {
+    return sourceTracks.find(track => {
+      const parsed = parseTrackTarget(track.name);
+      return (
+        parsed?.nodeName === runtimeName &&
+        parsed.property === 'quaternion'
+      );
+    }) || null;
+  }
 
-  const values = [];
-  const desiredHeadQ = new THREE.Quaternion();
-  const followPoseQ = new THREE.Quaternion();
-  const identityHeadQ = new THREE.Quaternion();
-  const basisDelta = new THREE.Quaternion();
-  const exportLocal = new THREE.Quaternion();
-  let previous = null;
+  function portableRotationTrack({
+    runtimeName,
+    parentRuntimeName,
+    times,
+    parentPoseQuaternionAtTime
+  }) {
+    const bone = tgt.bones.get(runtimeName);
+    const rest = tgt.rest.get(runtimeName);
+    const parentRest = tgt.rest.get(parentRuntimeName);
+    if (!bone || !rest || !parentRest) return null;
 
-  try {
-    for (const time of headTrack.times) {
+    const restRelativeQ = parentRest.worldQuat.clone()
+      .invert()
+      .multiply(rest.worldQuat)
+      .normalize();
+
+    const desiredQ = new THREE.Quaternion();
+    const parentPoseQ = new THREE.Quaternion();
+    const identityQ = new THREE.Quaternion();
+    const basisQ = new THREE.Quaternion();
+    const exportLocalQ = new THREE.Quaternion();
+    const values = [];
+    let previous = null;
+
+    for (const time of times) {
       restoreRest(tgt);
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      child.getWorldQuaternion(desiredHeadQ).normalize();
-      follow.getWorldQuaternion(followPoseQ).normalize();
+      bone.getWorldQuaternion(desiredQ).normalize();
+      parentPoseQuaternionAtTime(parentPoseQ);
 
-      identityHeadQ.copy(followPoseQ)
-        .multiply(relRestQ)
+      identityQ.copy(parentPoseQ)
+        .multiply(restRelativeQ)
         .normalize();
 
-      basisDelta.copy(identityHeadQ)
+      basisQ.copy(identityQ)
         .invert()
-        .multiply(desiredHeadQ)
+        .multiply(desiredQ)
         .normalize();
 
-      exportLocal.copy(childRest.quaternion)
-        .multiply(basisDelta)
+      // The FBX carrier stores actual local rest * Blender matrix_basis.
+      exportLocalQ.copy(rest.quaternion)
+        .multiply(basisQ)
         .normalize();
 
-      if (previous && previous.dot(exportLocal) < 0) {
-        exportLocal.x *= -1;
-        exportLocal.y *= -1;
-        exportLocal.z *= -1;
-        exportLocal.w *= -1;
+      if (previous && previous.dot(exportLocalQ) < 0) {
+        exportLocalQ.x *= -1;
+        exportLocalQ.y *= -1;
+        exportLocalQ.z *= -1;
+        exportLocalQ.w *= -1;
       }
 
       values.push(
-        exportLocal.x,
-        exportLocal.y,
-        exportLocal.z,
-        exportLocal.w
+        exportLocalQ.x,
+        exportLocalQ.y,
+        exportLocalQ.z,
+        exportLocalQ.w
       );
-      previous = exportLocal.clone();
+      previous = exportLocalQ.clone();
+    }
+
+    return new THREE.QuaternionKeyframeTrack(
+      `${runtimeName}.quaternion`,
+      Array.from(times),
+      values
+    );
+  }
+
+  try {
+    // ---------------------------------------------------------------
+    // HEAD
+    // ---------------------------------------------------------------
+    const headName =
+      findBoneByOriginalExact(tgt, ['head']) ||
+      findSemanticBone(tgt, 'head');
+    const headHelperName =
+      findBoneByOriginalExact(tgt, ['MCH-ROT-head']);
+    const torsoName =
+      findBoneByOriginalExact(tgt, ['torso']);
+
+    if (headName && headHelperName && torsoName) {
+      const head = tgt.bones.get(headName);
+      const torso = tgt.bones.get(torsoName);
+      const headRest = tgt.rest.get(headName);
+      const helperRest = tgt.rest.get(headHelperName);
+      const headTrack = findQuatTrack(headName);
+
+      if (head && torso && headRest && helperRest && headTrack) {
+        const relRestQ = helperRest.worldQuat.clone()
+          .invert()
+          .multiply(headRest.worldQuat)
+          .normalize();
+
+        const desiredHeadQ = new THREE.Quaternion();
+        const torsoPoseQ = new THREE.Quaternion();
+        const identityHeadQ = new THREE.Quaternion();
+        const basisDelta = new THREE.Quaternion();
+        const exportLocal = new THREE.Quaternion();
+        const values = [];
+        let previous = null;
+
+        for (const time of headTrack.times) {
+          restoreRest(tgt);
+          mixer.setTime(Number(time));
+          updateSlotWorld(tgt);
+
+          head.getWorldQuaternion(desiredHeadQ).normalize();
+          torso.getWorldQuaternion(torsoPoseQ).normalize();
+
+          identityHeadQ.copy(torsoPoseQ)
+            .multiply(relRestQ)
+            .normalize();
+
+          basisDelta.copy(identityHeadQ)
+            .invert()
+            .multiply(desiredHeadQ)
+            .normalize();
+
+          exportLocal.copy(headRest.quaternion)
+            .multiply(basisDelta)
+            .normalize();
+
+          if (previous && previous.dot(exportLocal) < 0) {
+            exportLocal.x *= -1;
+            exportLocal.y *= -1;
+            exportLocal.z *= -1;
+            exportLocal.w *= -1;
+          }
+
+          values.push(
+            exportLocal.x,
+            exportLocal.y,
+            exportLocal.z,
+            exportLocal.w
+          );
+          previous = exportLocal.clone();
+        }
+
+        replacements.set(
+          headTrack.name,
+          new THREE.QuaternionKeyframeTrack(
+            headTrack.name,
+            Array.from(headTrack.times),
+            values
+          )
+        );
+      }
+    }
+
+    // ---------------------------------------------------------------
+    // ARMS — BlendCap-style pose -> matrix_basis for ORIGINAL Rigify.
+    //
+    // Raw FBX hierarchy:
+    // ORG-shoulder -> MCH-upper_arm_parent -> upper_arm_fk
+    //                                  ... -> MCH-hand_fk -> hand_fk
+    //
+    // The original .blend evaluates ORG/MCH constraints that FBX loses.
+    // Preserve the already-good desired WORLD rotations from the raw
+    // retarget, but encode each FK control against its functional parent
+    // so the Action reproduces that same world pose on the real Rigify.
+    // ---------------------------------------------------------------
+    for (const side of ['L', 'R']) {
+      const shoulderName =
+        findBoneByOriginalExact(tgt, [`shoulder.${side}`]);
+      const upperName =
+        findBoneByOriginalExact(tgt, [`upper_arm_fk.${side}`]);
+      const foreName =
+        findBoneByOriginalExact(tgt, [`forearm_fk.${side}`]);
+      const handName =
+        findBoneByOriginalExact(tgt, [`hand_fk.${side}`]);
+      const handHelperName =
+        findBoneByOriginalExact(tgt, [`MCH-hand_fk.${side}`]);
+
+      if (
+        !shoulderName || !upperName || !foreName ||
+        !handName || !handHelperName
+      ) {
+        continue;
+      }
+
+      const shoulder = tgt.bones.get(shoulderName);
+      const upper = tgt.bones.get(upperName);
+      const fore = tgt.bones.get(foreName);
+      const handHelperRest = tgt.rest.get(handHelperName);
+      const foreRest = tgt.rest.get(foreName);
+      const handRest = tgt.rest.get(handName);
+
+      if (
+        !shoulder || !upper || !fore ||
+        !handHelperRest || !foreRest || !handRest
+      ) {
+        continue;
+      }
+
+      const upperTrack = findQuatTrack(upperName);
+      const foreTrack = findQuatTrack(foreName);
+      const handTrack = findQuatTrack(handName);
+
+      if (upperTrack) {
+        const replacement = portableRotationTrack({
+          runtimeName: upperName,
+          parentRuntimeName: shoulderName,
+          times: upperTrack.times,
+          parentPoseQuaternionAtTime: out =>
+            shoulder.getWorldQuaternion(out).normalize()
+        });
+        if (replacement) replacements.set(upperTrack.name, replacement);
+      }
+
+      if (foreTrack) {
+        const replacement = portableRotationTrack({
+          runtimeName: foreName,
+          parentRuntimeName: upperName,
+          times: foreTrack.times,
+          // The corrected upper_arm_fk is constructed to reproduce this
+          // same raw desired WORLD quaternion on the original rig.
+          parentPoseQuaternionAtTime: out =>
+            upper.getWorldQuaternion(out).normalize()
+        });
+        if (replacement) replacements.set(foreTrack.name, replacement);
+      }
+
+      if (handTrack) {
+        const helperRestRelativeQ = foreRest.worldQuat.clone()
+          .invert()
+          .multiply(handHelperRest.worldQuat)
+          .normalize();
+
+        const handRestRelativeQ = handHelperRest.worldQuat.clone()
+          .invert()
+          .multiply(handRest.worldQuat)
+          .normalize();
+
+        const desiredHandQ = new THREE.Quaternion();
+        const forePoseQ = new THREE.Quaternion();
+        const helperPoseQ = new THREE.Quaternion();
+        const identityHandQ = new THREE.Quaternion();
+        const basisQ = new THREE.Quaternion();
+        const exportLocalQ = new THREE.Quaternion();
+        const values = [];
+        let previous = null;
+
+        for (const time of handTrack.times) {
+          restoreRest(tgt);
+          mixer.setTime(Number(time));
+          updateSlotWorld(tgt);
+
+          tgt.bones.get(handName)
+            .getWorldQuaternion(desiredHandQ)
+            .normalize();
+
+          fore.getWorldQuaternion(forePoseQ).normalize();
+
+          // MCH-hand_fk has inherit_scale=NONE. For rotation this means
+          // it follows the forearm's unscaled orientation plus its rest
+          // offset. COPY_SCALE uniform affects scale, not quaternion.
+          helperPoseQ.copy(forePoseQ)
+            .multiply(helperRestRelativeQ)
+            .normalize();
+
+          identityHandQ.copy(helperPoseQ)
+            .multiply(handRestRelativeQ)
+            .normalize();
+
+          basisQ.copy(identityHandQ)
+            .invert()
+            .multiply(desiredHandQ)
+            .normalize();
+
+          exportLocalQ.copy(handRest.quaternion)
+            .multiply(basisQ)
+            .normalize();
+
+          if (previous && previous.dot(exportLocalQ) < 0) {
+            exportLocalQ.x *= -1;
+            exportLocalQ.y *= -1;
+            exportLocalQ.z *= -1;
+            exportLocalQ.w *= -1;
+          }
+
+          values.push(
+            exportLocalQ.x,
+            exportLocalQ.y,
+            exportLocalQ.z,
+            exportLocalQ.w
+          );
+          previous = exportLocalQ.clone();
+        }
+
+        replacements.set(
+          handTrack.name,
+          new THREE.QuaternionKeyframeTrack(
+            handTrack.name,
+            Array.from(handTrack.times),
+            values
+          )
+        );
+      }
     }
   } finally {
     action.stop();
@@ -3685,19 +3902,13 @@ function buildRigifyOriginalRigTransferClip(clip) {
     restoreRest(tgt);
   }
 
-  const replacement = new THREE.QuaternionKeyframeTrack(
-    headTrack.name,
-    Array.from(headTrack.times),
-    values
-  );
-
-  const tracks = sourceTracks.map(track =>
-    track.name === headTrack.name ? replacement : track
+  const tracks = sourceTracks.map(
+    track => replacements.get(track.name) || track
   );
 
   log(
-    'Rigify OriginalRig basis: head compensado contra ' +
-    'MCH-ROT-head con follow real de torso (head_follow=0).'
+    'Rigify OriginalRig basis: head + upper_arm_fk/forearm_fk/hand_fk ' +
+    'codificados contra parents funcionales del rig original.'
   );
 
   return new THREE.AnimationClip(
@@ -3706,7 +3917,6 @@ function buildRigifyOriginalRigTransferClip(clip) {
     tracks
   );
 }
-
 
 function buildCloudRigCleanHierarchyPlan() {
   const tgt = state.target;
