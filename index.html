@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260921-restgizmo1" />
+  <link rel="stylesheet" href="./styles.css?v=20260921-quickik1" />
   <script type="importmap">
   {
     "imports": {
@@ -147,6 +147,15 @@
               <span><b>Transfer</b></span>
             </button>
             <small>Source → Target</small>
+
+            <div id="quickIkStep" class="quick-ik-step" hidden>
+              <span class="quick-ik-hint">Ahora aquí</span>
+              <button id="quickConvertIk" class="quick-ik-button" type="button">
+                <span>→</span>
+                <b>FK → IK</b>
+              </button>
+              <small id="quickIkNote">Bake de controles IK</small>
+            </div>
           </div>
 
           <article id="targetModule" class="viewport-card target-card">
@@ -355,6 +364,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260921-restgizmo1"></script>
+  <script type="module" src="./app.js?v=20260921-quickik1"></script>
 </body>
 </html>
