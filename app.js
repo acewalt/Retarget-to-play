@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-restposeeditor1';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-restposeeditor3';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -225,7 +225,11 @@ const state = {
     selectedRole: null,
     transform: null,
     transformHelper: null,
-    hasCustomRest: false
+    hasCustomRest: false,
+    undoStack: [],
+    sensitivity: 0.35,
+    dragBaseQuaternion: null,
+    applyingSensitivity: false
   }
 };
 
@@ -344,6 +348,123 @@ function restPoseEntryByName(name) {
   return availableRestPoseBones().find(entry => entry.name === name) || null;
 }
 
+function cloneSourceRestMap() {
+  const out = new Map();
+  for (const [name, r] of state.source.rest) {
+    out.set(name, {
+      position: r.position.clone(),
+      quaternion: r.quaternion.clone(),
+      scale: r.scale.clone(),
+      worldPos: r.worldPos.clone(),
+      worldQuat: r.worldQuat.clone(),
+      worldScale: r.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+    });
+  }
+  return out;
+}
+
+function captureRestPoseUndoSnapshot(label = 'Edit Rest Pose') {
+  if (!state.source.root) return null;
+
+  const bones = new Map();
+  for (const [name, bone] of state.source.bones) {
+    bones.set(name, {
+      position: bone.position.clone(),
+      quaternion: bone.quaternion.clone(),
+      scale: bone.scale.clone()
+    });
+  }
+
+  return {
+    label,
+    bones,
+    rest: cloneSourceRestMap(),
+    hasCustomRest: state.restEditor.hasCustomRest
+  };
+}
+
+function pushRestPoseUndo(label) {
+  const snapshot = captureRestPoseUndoSnapshot(label);
+  if (!snapshot) return;
+  state.restEditor.undoStack.push(snapshot);
+  if (state.restEditor.undoStack.length > 60) state.restEditor.undoStack.shift();
+  updateRestPoseUndoUi();
+}
+
+function updateRestPoseUndoUi() {
+  const undoButton = $('undoRestPose');
+  if (undoButton) undoButton.disabled = state.restEditor.undoStack.length === 0;
+}
+
+function restoreRestPoseSnapshot(snapshot) {
+  if (!snapshot || !state.source.root) return;
+
+  for (const [name, value] of snapshot.bones) {
+    const bone = state.source.bones.get(name);
+    if (!bone) continue;
+    bone.position.copy(value.position);
+    bone.quaternion.copy(value.quaternion);
+    bone.scale.copy(value.scale);
+  }
+
+  state.source.rest = new Map();
+  for (const [name, r] of snapshot.rest) {
+    state.source.rest.set(name, {
+      position: r.position.clone(),
+      quaternion: r.quaternion.clone(),
+      scale: r.scale.clone(),
+      worldPos: r.worldPos.clone(),
+      worldQuat: r.worldQuat.clone(),
+      worldScale: r.worldScale.clone()
+    });
+  }
+
+  state.restEditor.hasCustomRest = snapshot.hasCustomRest;
+  state.source.rigRuntime?.captureRest?.();
+  updateSlotWorld(state.source);
+  updateRigOverlays();
+  updateRestPoseUi();
+}
+
+function undoRestPoseEdit() {
+  if (state.workspaceView !== 'restpose') return;
+  const snapshot = state.restEditor.undoStack.pop();
+  if (!snapshot) return;
+
+  restoreRestPoseSnapshot(snapshot);
+  invalidateRetargetAfterRestChange();
+
+  const selected = state.restEditor.selectedBone;
+  if (selected && state.source.bones.has(selected)) selectRestPoseBone(selected);
+
+  updateRestPoseUndoUi();
+  setStatus(`Undo · ${snapshot.label}`, 'good');
+  log(`Redefine Rest Pose Undo: ${snapshot.label}.`);
+}
+
+function restPoseSensitivity() {
+  return THREE.MathUtils.clamp(Number(state.restEditor.sensitivity) || 0.35, 0.05, 1);
+}
+
+function applyRestPoseRotationSensitivity() {
+  const boneName = state.restEditor.selectedBone;
+  const bone = boneName ? state.source.bones.get(boneName) : null;
+  const start = state.restEditor.dragBaseQuaternion;
+  const factor = restPoseSensitivity();
+
+  if (!bone || !start || factor >= 0.999 || state.restEditor.applyingSensitivity) return;
+
+  state.restEditor.applyingSensitivity = true;
+  try {
+    const raw = bone.quaternion.clone().normalize();
+    const delta = start.clone().invert().multiply(raw).normalize();
+    const scaledDelta = new THREE.Quaternion().identity().slerp(delta, factor).normalize();
+    bone.quaternion.copy(start.clone().multiply(scaledDelta).normalize());
+  } finally {
+    state.restEditor.applyingSensitivity = false;
+  }
+}
+
 function ensureRestPoseTransformControls() {
   if (state.restEditor.transform) return state.restEditor.transform;
 
@@ -356,11 +477,25 @@ function ensureRestPoseTransformControls() {
   helper.visible = false;
   sourceView.scene.add(helper);
 
+  transform.addEventListener('mouseDown', () => {
+    const bone = state.restEditor.selectedBone
+      ? state.source.bones.get(state.restEditor.selectedBone)
+      : null;
+    if (!bone) return;
+    pushRestPoseUndo('Rotate Bone');
+    state.restEditor.dragBaseQuaternion = bone.quaternion.clone();
+  });
+
+  transform.addEventListener('mouseUp', () => {
+    state.restEditor.dragBaseQuaternion = null;
+  });
+
   transform.addEventListener('dragging-changed', event => {
     sourceView.controls.enabled = !event.value;
   });
 
   transform.addEventListener('objectChange', () => {
+    applyRestPoseRotationSensitivity();
     updateSlotWorld(state.source);
     updateRigOverlays();
   });
@@ -411,6 +546,14 @@ function updateRestPoseUi() {
   if ($('resetRestBone')) $('resetRestBone').disabled = !hasSelection;
   if ($('resetRestPose')) $('resetRestPose').disabled = !hasSource;
   if ($('commitRestPose')) $('commitRestPose').disabled = !hasSource;
+  updateRestPoseUndoUi();
+
+  const sensitivityInput = $('restSensitivity');
+  const sensitivityValue = $('restSensitivityValue');
+  if (sensitivityInput && document.activeElement !== sensitivityInput) {
+    sensitivityInput.value = String(state.restEditor.sensitivity);
+  }
+  if (sensitivityValue) sensitivityValue.textContent = `${Math.round(restPoseSensitivity() * 100)}%`;
 
   const status = $('restPoseStatus');
   if (status) {
@@ -470,6 +613,7 @@ function copySelectedRestBone() {
   const mirrorRest = src.rest.get(mirrorEntry.name);
   if (!selectedBone || !mirrorBone || !selectedRest || !mirrorRest) return;
 
+  pushRestPoseUndo('Mirror Selected Bone');
   updateSlotWorld(src);
   const currentWorld = selectedBone.getWorldQuaternion(new THREE.Quaternion());
   const deltaWorld = currentWorld.multiply(selectedRest.worldQuat.clone().invert()).normalize();
@@ -489,6 +633,7 @@ function resetSelectedRestBone() {
   const bone = name ? state.source.bones.get(name) : null;
   if (!rest || !bone) return;
 
+  pushRestPoseUndo('Reset Bone');
   bone.position.copy(rest.position);
   bone.quaternion.copy(rest.quaternion);
   bone.scale.copy(rest.scale);
@@ -498,6 +643,7 @@ function resetSelectedRestBone() {
 
 function resetRestPoseEditorPose() {
   if (!state.source.root) return;
+  pushRestPoseUndo('Reset Pose');
   restoreRest(state.source);
   updateRigOverlays();
 }
@@ -528,6 +674,7 @@ function invalidateRetargetAfterRestChange() {
 function commitRestPoseEditor() {
   if (!state.source.root) return;
 
+  pushRestPoseUndo('Use This Pose as Rest');
   updateSlotWorld(state.source);
   captureRest(state.source);
   state.source.rigRuntime?.captureRest?.();
@@ -977,6 +1124,8 @@ async function loadFbx(file, slot, view) {
     state.restEditor.selectedBone = null;
     state.restEditor.selectedRole = null;
     state.restEditor.hasCustomRest = false;
+    state.restEditor.undoStack = [];
+    state.restEditor.dragBaseQuaternion = null;
   }
   updateRestPoseUi();
 
@@ -5794,9 +5943,14 @@ $('restSpaceToggle').onclick = () => {
   $('restSpaceToggle').textContent = nextSpace === 'local' ? 'Local' : 'World';
 };
 $('copyRestBone').onclick = copySelectedRestBone;
+$('undoRestPose').onclick = undoRestPoseEdit;
 $('resetRestBone').onclick = resetSelectedRestBone;
 $('resetRestPose').onclick = resetRestPoseEditorPose;
 $('commitRestPose').onclick = commitRestPoseEditor;
+$('restSensitivity').oninput = () => {
+  state.restEditor.sensitivity = Number($('restSensitivity').value) || 0.35;
+  updateRestPoseUi();
+};
 
 $('convertIk').onclick = convertFkToIk;
 $('exportFbx').onclick = exportTargetFbx;
@@ -5850,6 +6004,19 @@ $('footMatch').onchange = () => {
     log('Foot Contact Match cambió: vuelve a pulsar Transfer para recalcular la Action.');
   }
 };
+
+window.addEventListener('keydown', event => {
+  if (state.workspaceView !== 'restpose') return;
+
+  const isUndo = (event.ctrlKey || event.metaKey) &&
+    !event.shiftKey &&
+    String(event.key).toLowerCase() === 'z';
+
+  if (!isUndo) return;
+  event.preventDefault();
+  event.stopPropagation();
+  undoRestPoseEdit();
+}, { capture: true });
 
 function setTheme(theme, persist = true) {
   const next = theme === 'dark' ? 'dark' : 'light';
