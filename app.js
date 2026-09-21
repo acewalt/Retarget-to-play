@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-progressiveui4';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-progressiveui5';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -5797,7 +5797,7 @@ function updateTransferBridgeVisibility(animate = false) {
   if (!bridge || !stage) return;
 
   const hasBoth = !!state.source.root && !!state.target.root;
-  const hasPreset = !!$('preset') && $('preset').value !== 'none';
+  const hasPreset = !!state.activePreset && state.activePresetId !== 'none';
   const shouldShow =
     state.workspaceView === 'workspace' &&
     hasBoth &&
@@ -5829,24 +5829,27 @@ function updateTransferBridgeVisibility(animate = false) {
 function revealConditionalFeature(element, animate = false, delayMs = 0) {
   if (!element) return;
 
+  element.classList.remove('feature-reveal', 'feature-reveal-prep');
+
+  if (!animate) {
+    element.hidden = false;
+    return;
+  }
+
+  element.classList.add('feature-reveal-prep');
   element.hidden = false;
-  element.classList.remove('feature-reveal');
-
-  if (!animate) return;
-
   element.style.setProperty('--feature-delay', `${delayMs}ms`);
 
-  // Wait until the browser has actually painted the "hidden" state. This
-  // prevents the unlock animation from being consumed while FBX parsing is
-  // still blocking the main thread.
+  // First paint it in the prepared invisible state, then start the reveal.
   requestAnimationFrame(() => {
     requestAnimationFrame(() => {
+      element.classList.remove('feature-reveal-prep');
       element.classList.add('feature-reveal');
     });
   });
 
   window.setTimeout(() => {
-    element.classList.remove('feature-reveal');
+    element.classList.remove('feature-reveal', 'feature-reveal-prep');
     element.style.removeProperty('--feature-delay');
   }, 1250 + delayMs);
 }
@@ -5871,7 +5874,7 @@ function updateConditionalFeatureVisibility() {
   } else {
     for (const element of gated) {
       if (!element) continue;
-      element.classList.remove('feature-reveal');
+      element.classList.remove('feature-reveal', 'feature-reveal-prep');
       element.style.removeProperty('--feature-delay');
       element.hidden = true;
     }
@@ -6123,6 +6126,7 @@ $('preset').onchange = () => {
   }
 
   if (state.source.root && state.target.root) {
+    state.activePreset = null;
     updateTransferBridgeVisibility(false);
     void loadPreset()
       .then(() => updateTransferBridgeVisibility(true))
