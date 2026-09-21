@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-restposeeditor5';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260920-restposeeditor6';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -465,6 +465,75 @@ function applyRestPoseRotationSensitivity() {
   }
 }
 
+function installRestPoseGizmoThickness(helper) {
+  const lines = [];
+  helper.traverse(object => {
+    if (object.isLine && !object.isLineSegments && object.geometry?.attributes?.position?.count >= 3) {
+      lines.push(object);
+    }
+  });
+
+  for (const line of lines) {
+    if (line.userData.restPoseThickened) continue;
+
+    const attribute = line.geometry.attributes.position;
+    const points = [];
+    for (let i = 0; i < attribute.count; i++) {
+      points.push(new THREE.Vector3().fromBufferAttribute(attribute, i));
+    }
+
+    const closed = points.length > 5 && points[0].distanceTo(points[points.length - 1]) < 0.08;
+    const curve = new THREE.CatmullRomCurve3(points, closed, 'centripetal');
+    const materialSource = Array.isArray(line.material) ? line.material[0] : line.material;
+
+    const tube = new THREE.Mesh(
+      new THREE.TubeGeometry(
+        curve,
+        Math.max(16, Math.min(128, points.length * 2)),
+        0.012,
+        6,
+        closed
+      ),
+      new THREE.MeshBasicMaterial({
+        color: materialSource?.color?.clone?.() || new THREE.Color(0xffffff),
+        transparent: true,
+        opacity: materialSource?.opacity ?? 1,
+        depthTest: false,
+        depthWrite: false,
+        toneMapped: false
+      })
+    );
+
+    tube.frustumCulled = false;
+    tube.renderOrder = (line.renderOrder || 0) + 1;
+    tube.userData.restGizmoSourceLine = line;
+    tube.raycast = () => {};
+    line.add(tube);
+    line.userData.restPoseThickened = true;
+  }
+}
+
+function syncRestPoseGizmoThickness() {
+  const helper = state.restEditor.transformHelper;
+  if (!helper || state.workspaceView !== 'restpose') return;
+
+  helper.traverse(object => {
+    const sourceLine = object.userData?.restGizmoSourceLine;
+    if (!sourceLine || !object.material) return;
+
+    const sourceMaterial = Array.isArray(sourceLine.material)
+      ? sourceLine.material[0]
+      : sourceLine.material;
+
+    if (sourceMaterial?.color && object.material.color) {
+      object.material.color.copy(sourceMaterial.color);
+    }
+    if (Number.isFinite(sourceMaterial?.opacity)) {
+      object.material.opacity = sourceMaterial.opacity;
+    }
+  });
+}
+
 function ensureRestPoseTransformControls() {
   if (state.restEditor.transform) return state.restEditor.transform;
 
@@ -487,6 +556,10 @@ function ensureRestPoseTransformControls() {
       material.needsUpdate = true;
     }
   });
+
+  // WebGL on Windows often clamps LineBasicMaterial to 1 px. Add a thin
+  // tube over rotation rings so the thicker gizmo is visible consistently.
+  installRestPoseGizmoThickness(helper);
 
   sourceView.scene.add(helper);
 
@@ -6075,6 +6148,7 @@ function animate(now) {
 
   applyTargetRigRuntime();
   updateRigOverlays();
+  syncRestPoseGizmoThickness();
 
   sourceView.controls.update();
   targetView.controls.update();
