@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyfkbasis1';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyfkbasis1';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyfkbasis1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-preview1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -473,6 +473,22 @@ async function loadFbx(file, slot, view) {
   }
 
   captureRest(slot);
+
+  // A Target is always an unanimated destination on import.
+  // Keep the FBX's original animation bytes in originalBuffer for export,
+  // but never leave an Action/mixer active in the viewport or retarget state.
+  if (slot.kind === 'target') {
+    slot.animations = [];
+    root.animations = [];
+    slot.activeClip = null;
+    slot.action?.stop?.();
+    slot.action = null;
+    slot.mixer?.stopAllAction?.();
+    slot.mixer = null;
+    slot.rigRuntime?.resetDriven?.();
+    restoreRest(slot);
+  }
+
   fitView(view, slot.displayRoot);
 
   if (slot.kind === 'source') {
@@ -616,7 +632,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyfkbasis1',
+      definition.path + '?v=20260920-preview1',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -1678,9 +1694,253 @@ function applyTargetRigRuntime() {
   const runtime = state.target.rigRuntime;
   if (!runtime) return;
 
+  // Imported Targets are neutral by definition. Do not evaluate their
+  // control->DEF runtime until Transfer has created a preview clip.
+  if (!state.targetPreviewClip) {
+    runtime.enabled = false;
+    runtime.resetDriven();
+    return;
+  }
+
   runtime.enabled = $('previewDeform')?.checked ?? true;
   if (runtime.enabled) runtime.update();
   else runtime.resetDriven();
+}
+
+
+function collectRigifyViewportDefBindings() {
+  const tgt = state.target;
+  const byDriven = new Map();
+
+  const add = (driverOriginal, drivenOriginal) => {
+    const driver =
+      findBoneByOriginalExact(tgt, [driverOriginal]);
+    const driven =
+      findBoneByOriginalExact(tgt, [drivenOriginal]);
+    if (!driver || !driven) return;
+
+    byDriven.set(driven, {
+      driver,
+      driven,
+      driverOriginal,
+      drivenOriginal
+    });
+  };
+
+  // Main deform chain. Only the first DEF segment of split B-Bones is
+  // directly keyed; child DEF segments inherit that transform naturally.
+  add('spine_fk', 'DEF-spine');
+  add('spine_fk.001', 'DEF-spine.002');
+  add('spine_fk.002', 'DEF-spine.004');
+  add('spine_fk.003', 'DEF-spine.006');
+
+  add('neck', 'DEF-neck');
+  add('head', 'DEF-head');
+
+  for (const side of ['L', 'R']) {
+    add(`shoulder.${side}`, `DEF-shoulder.${side}`);
+    add(`upper_arm_fk.${side}`, `DEF-upper_arm.${side}`);
+    add(`forearm_fk.${side}`, `DEF-forearm.${side}`);
+    add(`hand_fk.${side}`, `DEF-hand.${side}`);
+
+    add(`thigh_fk.${side}`, `DEF-thigh.${side}`);
+    add(`shin_fk.${side}`, `DEF-shin.${side}`);
+    add(`foot_fk.${side}`, `DEF-foot.${side}`);
+    add(`toe_fk.${side}`, `DEF-toe.${side}`);
+  }
+
+  // Fingers and any other Rigify controls that have a direct DEF-<name>
+  // counterpart can be previewed automatically.
+  for (const pair of validMap()) {
+    const control = tgt.bones.get(pair.target);
+    if (!control) continue;
+
+    const original = originalObjectName(control) || pair.target;
+    const defOriginal = `DEF-${original}`;
+    if (findBoneByOriginalExact(tgt, [defOriginal])) {
+      add(original, defOriginal);
+    }
+  }
+
+  return [...byDriven.values()]
+    .sort((a, b) =>
+      boneDepth(tgt.bones.get(a.driven)) -
+      boneDepth(tgt.bones.get(b.driven))
+    );
+}
+
+function buildRigifyViewportDeformClip(controlClip) {
+  const tgt = state.target;
+  if (!usesRigifyPipeline() || !tgt.root || !controlClip) return null;
+
+  const bindings = collectRigifyViewportDefBindings();
+  if (!bindings.length) {
+    log('Preview Rigify: no encontré pares control → DEF; se usa FK raw.');
+    return null;
+  }
+
+  const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
+  const frameCount = Math.max(
+    2,
+    Math.ceil(controlClip.duration * fps) + 1
+  );
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(controlClip.duration, i / fps)
+  );
+
+  const data = new Map(
+    bindings.map(binding => [
+      binding.driven,
+      { p: [], q: [], s: [], previousQ: null }
+    ])
+  );
+
+  restoreRest(tgt);
+  tgt.mixer?.stopAllAction();
+
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(controlClip).play();
+
+  const driverRest = new THREE.Matrix4();
+  const drivenRest = new THREE.Matrix4();
+  const desiredWorld = new THREE.Matrix4();
+  const local = new THREE.Matrix4();
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+
+  try {
+    for (const time of times) {
+      restoreRest(tgt);
+      mixer.setTime(Number(time));
+      updateSlotWorld(tgt);
+
+      const fkPoseCache = new Map();
+
+      // Parent-first. We actually apply each preview DEF pose while baking,
+      // so the next child's parent.matrixWorld already contains the visual
+      // transform expected in the final preview clip.
+      for (const binding of bindings) {
+        const driven = tgt.bones.get(binding.driven);
+        if (!driven) continue;
+
+        const driverPose = rigifyOriginalFkPoseMatrix(
+          tgt,
+          binding.driver,
+          fkPoseCache,
+          new THREE.Matrix4()
+        );
+        if (!driverPose) continue;
+
+        if (!composeRestWorldMatrix(tgt, binding.driver, driverRest)) continue;
+        if (!composeRestWorldMatrix(tgt, binding.driven, drivenRest)) continue;
+
+        desiredWorld.copy(driverPose)
+          .multiply(driverRest.clone().invert())
+          .multiply(drivenRest);
+
+        if (driven.parent) {
+          local.copy(driven.parent.matrixWorld)
+            .invert()
+            .multiply(desiredWorld);
+        } else {
+          local.copy(desiredWorld);
+        }
+
+        local.decompose(p, q, s);
+        q.normalize();
+
+        driven.position.copy(p);
+        driven.quaternion.copy(q);
+        driven.scale.copy(s);
+        updateSlotWorld(tgt);
+
+        const d = data.get(binding.driven);
+        if (!d) continue;
+
+        if (d.previousQ && d.previousQ.dot(q) < 0) {
+          q.x *= -1;
+          q.y *= -1;
+          q.z *= -1;
+          q.w *= -1;
+          driven.quaternion.copy(q);
+          updateSlotWorld(tgt);
+        }
+
+        d.p.push(p.x, p.y, p.z);
+        d.q.push(q.x, q.y, q.z, q.w);
+        d.s.push(s.x, s.y, s.z);
+        d.previousQ = q.clone();
+      }
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    restoreRest(tgt);
+  }
+
+  const tracks = [];
+  for (const [name, d] of data) {
+    if (d.p.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(`${name}.position`, times, d.p)
+      );
+    }
+    if (d.q.length === times.length * 4) {
+      tracks.push(
+        new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q)
+      );
+    }
+    if (d.s.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(`${name}.scale`, times, d.s)
+      );
+    }
+  }
+
+  log(
+    `Preview Rigify: ${bindings.length} controles → DEF, ` +
+    `${tracks.length} curvas visuales. Exportación sin cambios.`
+  );
+
+  return tracks.length
+    ? new THREE.AnimationClip(
+        'Rigify_Viewport_DEF_Preview',
+        controlClip.duration,
+        tracks
+      )
+    : null;
+}
+
+function rebuildTargetPreviewClip() {
+  if (!state.fkClip) return;
+
+  if (usesRigifyPipeline()) {
+    if ($('previewDeform')?.checked) {
+      state.deformPreviewClip =
+        buildRigifyViewportDeformClip(state.fkClip);
+    } else {
+      state.deformPreviewClip = null;
+    }
+
+    state.targetPreviewClip = mergeClips(
+      'Rigify_Viewport_Preview',
+      [
+        state.fkRawClip,
+        state.deformPreviewClip,
+        state.ikOnlyClip
+      ]
+    );
+    return;
+  }
+
+  state.targetPreviewClip = state.ikOnlyClip
+    ? mergeClips(
+        'Preview_FK_IK',
+        [state.fkClip, state.ikOnlyClip]
+      )
+    : state.fkClip;
 }
 
 function bakeDeformPreviewClip() {
@@ -1802,22 +2062,24 @@ function applyRetarget() {
     state.exportClip = state.fkClip;
     state.exported = false;
 
-    // No horneamos DEF. WaltRig Runtime reproduce en tiempo real dentro
-    // del navegador la relación FK -> DEF que el FBX no contiene.
+    // Preview is intentionally separate from export. Rigify gets a visual
+    // DEF bake because its live Blender constraints are absent from FBX.
     state.deformPreviewClip = null;
-    // Rigify's portable head curve is encoded for the ORIGINAL Blender rig.
-    // The raw browser hierarchy lacks MCH-ROT-head evaluation, so preview the
-    // geometrically correct raw FK while exporting the corrected basis clip.
-    state.targetPreviewClip = usesRigifyPipeline()
-      ? state.fkRawClip
-      : state.fkClip;
+    rebuildTargetPreviewClip();
+
     state.playTime = 0;
     playTargetClip(state.targetPreviewClip);
     updateTimelineBounds();
     seek(0);
+
+    // Transfer means "show me the result": start playback automatically.
+    state.playing = true;
+    state.lastFrame = performance.now();
+    $('playPause').textContent = 'Ⅱ';
+
     updateButtons();
     updateStats();
-    setStatus('Retarget FK listo', 'good');
+    setStatus('Retarget FK listo · reproduciendo', 'good');
     const rt = state.target.rigRuntime?.status;
     log(`Retarget FK: ${map.length} controles FK, ${state.fkClip.tracks.length} curvas TRS, ${Number($('fps').value) || 30} FPS. Action DEF=0. WaltRig Runtime FK→DEF=${rt ? `${rt.bindings}/${rt.requestedBindings}` : 'n/a'}.`);
   } catch (err) {
@@ -3300,18 +3562,9 @@ function convertFkToIk() {
     state.exportClip = buildConvertedOutputClip($('keepFk').checked);
     state.exported = false;
 
-    // Preview always retains FK because the browser intentionally does not run
-    // CloudRig's Blender IK constraints. IK controls are baked/exported; the
-    // already-correct FK keeps the visible deformation identical while we
-    // validate the generated control curves.
-    state.targetPreviewClip = mergeClips(
-      'Preview_FK_IK',
-      [
-        usesRigifyPipeline() ? state.fkRawClip : state.fkClip,
-        state.ikOnlyClip
-      ]
-    );
-
+    // Preview remains independent from the exported Action. For Rigify,
+    // keep the viewport-only DEF bake while also showing generated IK controls.
+    rebuildTargetPreviewClip();
     playTargetClip(state.targetPreviewClip);
     updateButtons();
     updateStats();
@@ -5079,7 +5332,14 @@ $('keepFk').onchange = () => {
 };
 
 $('previewDeform').onchange = () => {
-  applyTargetRigRuntime();
+  if (usesRigifyPipeline() && state.fkClip) {
+    const resumeTime = state.playTime;
+    rebuildTargetPreviewClip();
+    playTargetClip(state.targetPreviewClip);
+    seek(resumeTime);
+  } else {
+    applyTargetRigRuntime();
+  }
   updateRigOverlays();
 };
 
