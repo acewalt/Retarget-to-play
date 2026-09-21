@@ -638,7 +638,7 @@ export class WaltCloudRigRuntime {
     this.asset.displayRoot.updateMatrixWorld(true);
   }
 
-  update() {
+  update(context = null) {
     if (!this.enabled || !this.bindings.length) return;
 
     // CloudRig depende de constraints que NO sobreviven al FBX.
@@ -879,6 +879,30 @@ export class WaltRigifyRuntime {
     this.bindings = [...direct, ...dynamic]
       .sort((a, b) => depthOf(a.drivenBone) - depthOf(b.drivenBone));
 
+    // Only roots of actual DEF chains receive explicit translation.
+    // Descendants inherit their anatomical position from their driven parent
+    // and only need rotation. Writing position on every DEF was one source of
+    // the obvious stretching seen in the Rigify preview.
+    const drivenSet = new Set(this.bindings.map(binding => binding.drivenBone));
+    this.positionDriven = new Set();
+
+    for (const binding of this.bindings) {
+      let parent = binding.drivenBone?.parent || null;
+      let hasDrivenAncestor = false;
+
+      while (parent) {
+        if (drivenSet.has(parent)) {
+          hasDrivenAncestor = true;
+          break;
+        }
+        parent = parent.parent;
+      }
+
+      if (!hasDrivenAncestor) {
+        this.positionDriven.add(binding.drivenBone);
+      }
+    }
+
     this.rest = new Map();
     this.virtualFk = new Map();
     this.enabled = true;
@@ -950,27 +974,67 @@ export class WaltRigifyRuntime {
     const pDesiredWorld = new THREE.Vector3();
     const pDesiredLocal = new THREE.Vector3();
 
-    // Live global frames. root carries horizontal motion and torso carries
-    // vertical motion in our Rigify presets.
-    for (const name of ['root', 'torso']) {
-      const bone = this.rig.get(name);
-      if (!bone) continue;
+    // ------------------------------------------------------------------
+    // BODY FRAME
+    // ------------------------------------------------------------------
+    // The exported Rigify FBX splits Mixamo Hips motion over different
+    // controls (root/torso/spine_fk). For preview we reconstruct a single
+    // body carrier from the Source Hips delta passed by app.js.
+    //
+    // This is preview-only and does not touch the exported Action.
+    const rootBone = this.rig.get('root');
+    const torsoBone = this.rig.get('torso');
+    const rootRest = rootBone ? this.rest.get(rootBone) : null;
+    const torsoRest = torsoBone ? this.rest.get(torsoBone) : null;
 
-      const rest = this.rest.get(bone);
-      if (!rest) continue;
+    const bodyDelta =
+      context?.bodyDelta?.isVector3
+        ? context.bodyDelta
+        : new THREE.Vector3();
 
-      const worldQ = bone.getWorldQuaternion(new THREE.Quaternion()).normalize();
-      const entry = {
-        position: bone.getWorldPosition(new THREE.Vector3()),
-        quaternion: worldQ,
-        deltaQuaternion: worldQ.clone()
-          .multiply(rest.worldQuaternion.clone().invert())
+    if (rootBone && rootRest) {
+      const rootQ = rootBone
+        .getWorldQuaternion(new THREE.Quaternion())
+        .normalize();
+
+      const rootPos = rootRest.worldPosition
+        .clone()
+        .add(bodyDelta);
+
+      const rootEntry = {
+        position: rootPos,
+        quaternion: rootQ,
+        deltaQuaternion: rootQ.clone()
+          .multiply(rootRest.worldQuaternion.clone().invert())
           .normalize()
       };
 
-      this.virtualFk.set(name, entry);
-      this.virtualFk.set(originalName(bone), entry);
-      this.virtualFk.set(bone.name, entry);
+      this.virtualFk.set('root', rootEntry);
+      this.virtualFk.set(originalName(rootBone), rootEntry);
+      this.virtualFk.set(rootBone.name, rootEntry);
+    }
+
+    if (torsoBone && torsoRest) {
+      const torsoQ = torsoBone
+        .getWorldQuaternion(new THREE.Quaternion())
+        .normalize();
+
+      const torsoPos = torsoRest.worldPosition
+        .clone()
+        .add(bodyDelta);
+
+      const torsoEntry = {
+        position: torsoPos,
+        quaternion: torsoQ,
+        deltaQuaternion: torsoQ.clone()
+          .multiply(torsoRest.worldQuaternion.clone().invert())
+          .normalize()
+      };
+
+      this.virtualFk.set('torso', torsoEntry);
+      this.virtualFk.set('@BODY', torsoEntry);
+      this.virtualFk.set(originalName(torsoBone), torsoEntry);
+      this.virtualFk.set(torsoBone.name, torsoEntry);
     }
 
     // Reconstruct anatomical FK world transforms independently from Rigify's
@@ -1051,14 +1115,16 @@ export class WaltRigifyRuntime {
       this.virtualFk.set(bone.name, entry);
 
       if (name === 'spine_fk') {
-        const torsoVirtual = this.virtualFk.get('torso');
-        if (torsoVirtual) {
+        const bodyVirtual =
+          this.virtualFk.get('@BODY') ||
+          this.virtualFk.get('torso');
+
+        if (bodyVirtual) {
           this.virtualFk.set('@PELVIS', {
-            // Critical difference from the previous build:
-            // DO NOT use spine_fk.position as the leg pivot. In Rigify that
-            // control belongs to the spine/MCH layout. The preset deliberately
-            // stores Hips LOC on torso and Hips ROT on spine_fk.
-            position: torsoVirtual.position.clone(),
+            // One pelvis carrier:
+            //   position = Source Hips motion mapped onto Target body
+            //   rotation = raw spine_fk / Hips rotation
+            position: bodyVirtual.position.clone(),
             quaternion: entry.quaternion.clone(),
             deltaQuaternion: entry.deltaQuaternion.clone()
           });
@@ -1116,7 +1182,16 @@ export class WaltRigifyRuntime {
         pDesiredLocal.copy(pDesiredWorld);
       }
 
-      driven.position.copy(pDesiredLocal);
+      if (this.positionDriven.has(driven)) {
+        // Root of a driven DEF chain: carry the reconstructed body/limb
+        // translation explicitly.
+        driven.position.copy(pDesiredLocal);
+      } else {
+        // Connected child: preserve Rigify's rest bone length/pivot and let
+        // parent motion carry it. This prevents visible stretching.
+        driven.position.copy(drivenRest.localPosition);
+      }
+
       driven.quaternion.copy(qDesiredLocal);
       driven.scale.copy(drivenRest.localScale);
 
