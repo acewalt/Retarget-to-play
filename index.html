@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260920-rigifyfkbasis1" />
+  <link rel="stylesheet" href="./styles.css?v=20260920-preview1" />
   <script type="importmap">
   {
     "imports": {
@@ -214,7 +214,7 @@
             <div class="settings-heading"><div><span class="eyebrow">INPUT</span><h2>Rig Setup</h2></div></div>
             <label class="field-label" for="sourceClip">Action / clip del Source</label>
             <select id="sourceClip"><option value="">Carga un Source</option></select>
-            <p class="notice" id="targetAnimNotice">El Target se cargará sin reproducir ni reutilizar sus Actions.</p>
+            <p class="notice" id="targetAnimNotice">El Target siempre entra en Rest Pose: sus Actions se ignoran hasta que pulses Transfer.</p>
           </section>
 
           <section class="settings-section">
@@ -331,6 +331,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260920-rigifyfkbasis1"></script>
+  <script type="module" src="./app.js?v=20260920-preview1"></script>
 </body>
 </html>
