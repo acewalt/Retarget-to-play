@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-progressiveui2';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-progressiveui3';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -5854,7 +5854,7 @@ function resizeViewports() {
 }
 
 function setWorkspaceView(view) {
-  const allowed = new Set(['workspace', 'mappings', 'restpose', 'animations', 'export']);
+  const allowed = new Set(['workspace', 'mappings', 'restpose', 'animations']);
   let next = allowed.has(view) ? view : 'workspace';
 
   const needsBothFbx = next === 'mappings' || next === 'animations';
