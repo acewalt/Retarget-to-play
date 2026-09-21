@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
 import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-preview1';
-import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-progressiveui5';
+import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo1';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
 const $ = (id) => document.getElementById(id);
@@ -229,6 +229,7 @@ const state = {
     hasCustomRest: false,
     undoStack: [],
     sensitivity: 0.5,
+    showFullGimbal: false,
     dragBaseQuaternion: null,
     applyingSensitivity: false
   }
@@ -491,8 +492,8 @@ function installRestPoseGizmoThickness(helper) {
       new THREE.TubeGeometry(
         curve,
         Math.max(16, Math.min(128, points.length * 2)),
-        0.012,
-        6,
+        0.022,
+        8,
         closed
       ),
       new THREE.MeshBasicMaterial({
@@ -514,9 +515,49 @@ function installRestPoseGizmoThickness(helper) {
   }
 }
 
+function compactRestPoseGizmoGeometry(helper) {
+  helper.traverse(object => {
+    if (object.userData?.restPoseCompactGeometry) return;
+    if (!object.geometry || object.name !== 'E') return;
+
+    object.geometry = object.geometry.clone();
+    object.geometry.scale(0.82, 0.82, 0.82);
+    object.userData.restPoseCompactGeometry = true;
+  });
+}
+
+function updateRestPoseGizmoMode() {
+  const transform = state.restEditor.transform;
+  const helper = state.restEditor.transformHelper;
+  if (!transform || !helper) return;
+
+  const full = !!state.restEditor.showFullGimbal;
+
+  // TransformControls exposes these flags for the colored X/Y/Z rotate rings.
+  // OFF leaves the screen-space E ring (yellow) as the primary rotation control.
+  transform.showX = full;
+  transform.showY = full;
+  transform.showZ = full;
+
+  helper.traverse(object => {
+    if (!object.name) return;
+
+    // XYZE is the grey free-rotation circle. Hide it in compact mode so the
+    // default tool is literally the single yellow E ring.
+    if (object.name === 'XYZE') {
+      object.visible = full;
+    }
+  });
+
+  const toggle = $('showFullRestGimbal');
+  if (toggle) toggle.checked = full;
+}
+
 function syncRestPoseGizmoThickness() {
   const helper = state.restEditor.transformHelper;
   if (!helper || state.workspaceView !== 'restpose') return;
+
+  updateRestPoseGizmoMode();
 
   helper.traverse(object => {
     const sourceLine = object.userData?.restGizmoSourceLine;
@@ -541,7 +582,7 @@ function ensureRestPoseTransformControls() {
   const transform = new TransformControls(sourceView.camera, sourceView.renderer.domElement);
   transform.setMode('rotate');
   transform.setSpace('local');
-  transform.setSize(0.82);
+  transform.setSize(0.62);
 
   const helper = transform.getHelper();
   helper.visible = false;
@@ -558,9 +599,14 @@ function ensureRestPoseTransformControls() {
     }
   });
 
-  // WebGL on Windows often clamps LineBasicMaterial to 1 px. Add a thin
-  // tube over rotation rings so the thicker gizmo is visible consistently.
+  // Bring the yellow E ring closer to the bone instead of leaving the
+  // default TransformControls outer ring floating far away.
+  compactRestPoseGizmoGeometry(helper);
+
+  // WebGL on Windows often clamps LineBasicMaterial to 1 px. Add real tube
+  // geometry so the ring stays visibly thick on Chromium/Windows.
   installRestPoseGizmoThickness(helper);
+  updateRestPoseGizmoMode();
 
   sourceView.scene.add(helper);
 
@@ -641,6 +687,9 @@ function updateRestPoseUi() {
     sensitivityInput.value = String(state.restEditor.sensitivity);
   }
   if (sensitivityValue) sensitivityValue.textContent = `${Math.round(restPoseSensitivity() * 100)}%`;
+
+  const fullGimbalToggle = $('showFullRestGimbal');
+  if (fullGimbalToggle) fullGimbalToggle.checked = !!state.restEditor.showFullGimbal;
 
   const status = $('restPoseStatus');
   if (status) {
@@ -6162,6 +6211,10 @@ $('restSpaceToggle').onclick = () => {
   const nextSpace = transform.space === 'local' ? 'world' : 'local';
   transform.setSpace(nextSpace);
   $('restSpaceToggle').textContent = nextSpace === 'local' ? 'Local' : 'World';
+};
+$('showFullRestGimbal').onchange = () => {
+  state.restEditor.showFullGimbal = $('showFullRestGimbal').checked;
+  updateRestPoseGizmoMode();
 };
 $('copyRestBone').onclick = copySelectedRestBone;
 $('undoRestPose').onclick = undoRestPoseEdit;
