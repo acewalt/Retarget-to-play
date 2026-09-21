@@ -187,3 +187,5 @@ h2,p{margin:0}
 @media(min-width:1081px){.main-workspace[data-view="restpose"] .retarget-stage{height:calc(100vh - 70px - 14px - 14px - 78px - 10px)}}
 @media(max-width:1080px){.restpose-toolbar{grid-template-columns:1fr}.restpose-controls{justify-content:flex-start}}
 @media(max-width:760px){.main-workspace[data-view="restpose"]{overflow:auto}.main-workspace[data-view="restpose"] .retarget-stage{grid-template-columns:1fr}.main-workspace[data-view="restpose"] .viewport-wrap{aspect-ratio:1/1}.restpose-controls>*{flex:1 1 140px}.restpose-bone-field{flex-basis:100%}}
+
+.main-workspace[data-view="restpose"] .source-card .viewport canvas{cursor:crosshair}
