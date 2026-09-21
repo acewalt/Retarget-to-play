@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik7';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik7';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik7';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik8';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik8';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik8';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -616,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyik7',
+      definition.path + '?v=20260920-rigifyik8',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -2651,8 +2651,11 @@ function encodeRigifyControlLocal(
     basisQ.normalize();
 
     // BONE_NO_LOCAL_LOCATION loc_mat:
-    // origin = parentPose * rest-offset translation
-    // axes   = parentPose rotation+scale (NOT rest-relative axes).
+    // Blender does NOT decompose/recompose parent_pose_mat here. It copies
+    // the raw parent 3x3, preserving scale AND shear, and combines that
+    // with the posed rest-head translation. This distinction is small but
+    // visible at the Rigify wrist (both hands land slightly inward if the
+    // raw 3x3 is replaced by quaternion+scale).
     const restOffset = new THREE.Vector3();
     ctrlRelRest.decompose(
       restOffset,
@@ -2663,10 +2666,13 @@ function encodeRigifyControlLocal(
     const restHeadAtPose = restOffset.clone()
       .applyMatrix4(parentPose);
 
-    const locMat = new THREE.Matrix4().compose(
-      restHeadAtPose,
-      parentQ,
-      parentS
+    const pe = parentPose.elements;
+    const locMat = new THREE.Matrix4();
+    locMat.set(
+      pe[0], pe[4], pe[8],  restHeadAtPose.x,
+      pe[1], pe[5], pe[9],  restHeadAtPose.y,
+      pe[2], pe[6], pe[10], restHeadAtPose.z,
+      0,     0,     0,      1
     );
 
     const desiredT = new THREE.Vector3();
@@ -2889,7 +2895,7 @@ function bakeRigifyIkFromFk() {
 
   log(
     'FK→IK Rigify original-evaluated: fuente=FK Action portable; ' +
-    'piernas conservadas; brazos usan BKE pose→bone no-local exacto; ' +
+    'piernas conservadas; hand_ik usa BKE no-local con parent 3x3 crudo; ' +
     'hand parent=root; arm pole parent=shoulder.'
   );
 
