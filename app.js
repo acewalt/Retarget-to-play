@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifypreview2';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifypreview3';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -1201,6 +1201,10 @@ function disposeObject(root) {
 }
 
 function clearSlot(slot, view) {
+  if (slot.kind === 'target' && slot.displayRoot) {
+    const baseY = slot.displayRoot.userData?.waltPreviewBaseY;
+    if (Number.isFinite(baseY)) slot.displayRoot.position.y = baseY;
+  }
   if (slot.action) slot.action.stop();
   if (slot.mixer) slot.mixer.stopAllAction();
   if (slot.helper) view.scene.remove(slot.helper);
@@ -2658,10 +2662,7 @@ function buildRigifyViewportDeformClip(controlClip) {
   }
 
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
-  const frameCount = Math.max(
-    2,
-    Math.ceil(controlClip.duration * fps) + 1
-  );
+  const frameCount = Math.max(2, Math.ceil(controlClip.duration * fps) + 1);
   const times = Array.from(
     { length: frameCount },
     (_, i) => Math.min(controlClip.duration, i / fps)
@@ -2670,7 +2671,7 @@ function buildRigifyViewportDeformClip(controlClip) {
   const data = new Map(
     bindings.map(binding => [
       binding.driven,
-      { p: [], q: [], previousQ: null }
+      { q: [], previousQ: null }
     ])
   );
 
@@ -2680,20 +2681,11 @@ function buildRigifyViewportDeformClip(controlClip) {
   const mixer = new THREE.AnimationMixer(tgt.root);
   const action = mixer.clipAction(controlClip).play();
 
-  const driverRest = new THREE.Matrix4();
-  const drivenRest = new THREE.Matrix4();
-  const deltaWorld = new THREE.Matrix4();
-  const rigidDelta = new THREE.Matrix4();
-  const desiredWorld = new THREE.Matrix4();
-  const local = new THREE.Matrix4();
-
-  const deltaP = new THREE.Vector3();
+  const driverWorldQ = new THREE.Quaternion();
   const deltaQ = new THREE.Quaternion();
-  const deltaS = new THREE.Vector3();
-
-  const p = new THREE.Vector3();
-  const q = new THREE.Quaternion();
-  const s = new THREE.Vector3();
+  const desiredWorldQ = new THREE.Quaternion();
+  const parentWorldQ = new THREE.Quaternion();
+  const localQ = new THREE.Quaternion();
 
   try {
     for (const time of times) {
@@ -2701,69 +2693,56 @@ function buildRigifyViewportDeformClip(controlClip) {
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      // IMPORTANT: viewport preview must use the RAW browser FK controls.
-      // state.fkClip is rewritten for Blender's original Rigify hierarchy and
-      // is not a valid Three.js pose basis. Using it here is what produced the
-      // twisted / duplicated-looking Rigify mesh in the browser.
+      // Parent-first. For viewport deformation we only reproduce rotational
+      // pose deltas. Rigify's DEF bone lengths/offsets belong to the rest rig;
+      // keying translated DEF bones stretches the torso/limbs because the
+      // Blender MCH constraints that normally resolve them are absent in FBX.
       for (const binding of bindings) {
         const driver = tgt.bones.get(binding.driver);
         const driven = tgt.bones.get(binding.driven);
-        const drivenRestLocal = tgt.rest.get(binding.driven);
-        if (!driver || !driven || !drivenRestLocal) continue;
+        const driverRest = tgt.rest.get(binding.driver);
+        const drivenRest = tgt.rest.get(binding.driven);
+        if (!driver || !driven || !driverRest || !drivenRest) continue;
 
-        if (!composeRestWorldMatrix(tgt, binding.driver, driverRest)) continue;
-        if (!composeRestWorldMatrix(tgt, binding.driven, drivenRest)) continue;
+        driver.getWorldQuaternion(driverWorldQ);
 
-        // World delta of the actual visible FK control.
-        deltaWorld.copy(driver.matrixWorld)
-          .multiply(driverRest.clone().invert());
+        deltaQ.copy(driverWorldQ)
+          .multiply(driverRest.worldQuat.clone().invert())
+          .normalize();
 
-        // Rigify FK retargeting should not scale the deform skeleton.
-        // Tiny non-uniform scales from FBX/MCH parent decomposition were
-        // previously baked into DEF tracks and could explode the mesh.
-        deltaWorld.decompose(deltaP, deltaQ, deltaS);
-        deltaQ.normalize();
-        rigidDelta.compose(
-          deltaP,
-          deltaQ,
-          new THREE.Vector3(1, 1, 1)
-        );
-
-        desiredWorld.copy(rigidDelta).multiply(drivenRest);
+        desiredWorldQ.copy(deltaQ)
+          .multiply(drivenRest.worldQuat)
+          .normalize();
 
         if (driven.parent) {
-          local.copy(driven.parent.matrixWorld)
+          driven.parent.getWorldQuaternion(parentWorldQ);
+          localQ.copy(parentWorldQ)
             .invert()
-            .multiply(desiredWorld);
+            .multiply(desiredWorldQ)
+            .normalize();
         } else {
-          local.copy(desiredWorld);
+          localQ.copy(desiredWorldQ);
         }
 
-        local.decompose(p, q, s);
-        q.normalize();
-
-        // Keep the original local scale exactly. Preview only needs pose
-        // translation + rotation; scale belongs to Rigify's rest skeleton.
-        driven.position.copy(p);
-        driven.quaternion.copy(q);
-        driven.scale.copy(drivenRestLocal.scale);
+        driven.position.copy(drivenRest.position);
+        driven.quaternion.copy(localQ);
+        driven.scale.copy(drivenRest.scale);
         updateSlotWorld(tgt);
 
         const d = data.get(binding.driven);
         if (!d) continue;
 
-        if (d.previousQ && d.previousQ.dot(q) < 0) {
-          q.x *= -1;
-          q.y *= -1;
-          q.z *= -1;
-          q.w *= -1;
-          driven.quaternion.copy(q);
+        if (d.previousQ && d.previousQ.dot(localQ) < 0) {
+          localQ.x *= -1;
+          localQ.y *= -1;
+          localQ.z *= -1;
+          localQ.w *= -1;
+          driven.quaternion.copy(localQ);
           updateSlotWorld(tgt);
         }
 
-        d.p.push(p.x, p.y, p.z);
-        d.q.push(q.x, q.y, q.z, q.w);
-        d.previousQ = q.clone();
+        d.q.push(localQ.x, localQ.y, localQ.z, localQ.w);
+        d.previousQ = localQ.clone();
       }
     }
   } finally {
@@ -2774,11 +2753,6 @@ function buildRigifyViewportDeformClip(controlClip) {
 
   const tracks = [];
   for (const [name, d] of data) {
-    if (d.p.length === times.length * 3) {
-      tracks.push(
-        new THREE.VectorKeyframeTrack(`${name}.position`, times, d.p)
-      );
-    }
     if (d.q.length === times.length * 4) {
       tracks.push(
         new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q)
@@ -2788,7 +2762,7 @@ function buildRigifyViewportDeformClip(controlClip) {
 
   log(
     `Preview Rigify RAW-FK → DEF: ${bindings.length} controles, ` +
-    `${tracks.length} curvas visuales · scale DEF preservada.`
+    `${tracks.length} rotaciones visuales · posición/escala DEF preservadas.`
   );
 
   return tracks.length
@@ -2798,6 +2772,156 @@ function buildRigifyViewportDeformClip(controlClip) {
         tracks
       )
     : null;
+}
+
+function rigifyPreviewSourceFeet() {
+  const src = state.source;
+  return [
+    findBoneByOriginalExact(src, ['mixamorig1:LeftFoot', 'mixamorig:LeftFoot', 'LeftFoot']) ||
+      findSemanticBone(src, 'LeftFoot'),
+    findBoneByOriginalExact(src, ['mixamorig1:LeftToeBase', 'mixamorig:LeftToeBase', 'LeftToeBase']) ||
+      findSemanticBone(src, 'LeftToeBase'),
+    findBoneByOriginalExact(src, ['mixamorig1:RightFoot', 'mixamorig:RightFoot', 'RightFoot']) ||
+      findSemanticBone(src, 'RightFoot'),
+    findBoneByOriginalExact(src, ['mixamorig1:RightToeBase', 'mixamorig:RightToeBase', 'RightToeBase']) ||
+      findSemanticBone(src, 'RightToeBase')
+  ].filter(Boolean);
+}
+
+function rigifyPreviewTargetFeet() {
+  const tgt = state.target;
+  return [
+    findBoneByOriginalExact(tgt, ['DEF-foot.L', 'foot_fk.L']),
+    findBoneByOriginalExact(tgt, ['DEF-toe.L', 'toe_fk.L']),
+    findBoneByOriginalExact(tgt, ['DEF-foot.R', 'foot_fk.R']),
+    findBoneByOriginalExact(tgt, ['DEF-toe.R', 'toe_fk.R'])
+  ].filter(Boolean);
+}
+
+function minBoneWorldY(slot, names, useRest = false) {
+  let minY = Infinity;
+
+  for (const name of names) {
+    if (!name) continue;
+
+    if (useRest) {
+      const rest = slot.rest.get(name);
+      if (rest) minY = Math.min(minY, rest.worldPos.y);
+      continue;
+    }
+
+    const bone = slot.bones.get(name);
+    if (!bone) continue;
+    minY = Math.min(
+      minY,
+      bone.getWorldPosition(new THREE.Vector3()).y
+    );
+  }
+
+  return Number.isFinite(minY) ? minY : null;
+}
+
+function rigifyPreviewVerticalScale(sourceFloor, targetFloor) {
+  const srcHead =
+    findBoneByOriginalExact(state.source, ['mixamorig1:Head', 'mixamorig:Head', 'Head']) ||
+    findSemanticBone(state.source, 'Head');
+  const tgtHead =
+    findBoneByOriginalExact(state.target, ['DEF-head', 'head']);
+
+  const srcHeadY = srcHead
+    ? state.source.rest.get(srcHead)?.worldPos?.y
+    : null;
+  const tgtHeadY = tgtHead
+    ? state.target.rest.get(tgtHead)?.worldPos?.y
+    : null;
+
+  const srcHeight = Number.isFinite(srcHeadY) ? srcHeadY - sourceFloor : NaN;
+  const tgtHeight = Number.isFinite(tgtHeadY) ? tgtHeadY - targetFloor : NaN;
+
+  const ratio =
+    Number.isFinite(srcHeight) &&
+    Number.isFinite(tgtHeight) &&
+    Math.abs(srcHeight) > 1e-5
+      ? tgtHeight / srcHeight
+      : 1;
+
+  return Number.isFinite(ratio)
+    ? THREE.MathUtils.clamp(ratio, 0.5, 2)
+    : 1;
+}
+
+function resetRigifyPreviewGroundAlignment() {
+  const displayRoot = state.target.displayRoot;
+  if (!displayRoot) return;
+
+  if (!Number.isFinite(displayRoot.userData.waltPreviewBaseY)) {
+    displayRoot.userData.waltPreviewBaseY = displayRoot.position.y;
+  }
+
+  displayRoot.position.y = displayRoot.userData.waltPreviewBaseY;
+  displayRoot.updateMatrixWorld(true);
+}
+
+function applyRigifyPreviewGroundAlignment() {
+  const displayRoot = state.target.displayRoot;
+
+  if (
+    !displayRoot ||
+    !usesRigifyPipeline() ||
+    !state.targetPreviewClip ||
+    !state.source.activeClip
+  ) {
+    resetRigifyPreviewGroundAlignment();
+    return;
+  }
+
+  if (!Number.isFinite(displayRoot.userData.waltPreviewBaseY)) {
+    displayRoot.userData.waltPreviewBaseY = displayRoot.position.y;
+  }
+
+  // Measure from an unshifted Target every frame. The resulting correction is
+  // applied only to the display parent, so export clips and bone transforms
+  // remain byte-for-byte untouched.
+  displayRoot.position.y = displayRoot.userData.waltPreviewBaseY;
+  updateSlotWorld(state.target);
+
+  const sourceFeet = rigifyPreviewSourceFeet();
+  const targetFeet = rigifyPreviewTargetFeet();
+  if (!sourceFeet.length || !targetFeet.length) return;
+
+  const sourceFloor = minBoneWorldY(state.source, sourceFeet, true);
+  const targetFloor = minBoneWorldY(state.target, targetFeet, true);
+  const sourceCurrent = minBoneWorldY(state.source, sourceFeet, false);
+  const targetCurrent = minBoneWorldY(state.target, targetFeet, false);
+
+  if (
+    sourceFloor == null ||
+    targetFloor == null ||
+    sourceCurrent == null ||
+    targetCurrent == null
+  ) {
+    return;
+  }
+
+  // Reproduce the Source's actual vertical foot trajectory. If a foot is on
+  // its rest floor, the Target is placed on its own rest floor; if the Source
+  // is genuinely airborne, that height is preserved proportionally.
+  const verticalScale = rigifyPreviewVerticalScale(
+    sourceFloor,
+    targetFloor
+  );
+  const desiredTargetFootY =
+    targetFloor + (sourceCurrent - sourceFloor) * verticalScale;
+
+  const correctionY = THREE.MathUtils.clamp(
+    desiredTargetFootY - targetCurrent,
+    -2,
+    2
+  );
+
+  displayRoot.position.y =
+    displayRoot.userData.waltPreviewBaseY + correctionY;
+  displayRoot.updateMatrixWorld(true);
 }
 
 function rebuildTargetPreviewClip() {
@@ -2917,6 +3041,7 @@ function updateRigOverlays() {
 function playTargetClip(clip) {
   const t = state.target;
   if (!t.root || !clip) return;
+  resetRigifyPreviewGroundAlignment();
   restoreRest(t);
   t.mixer?.stopAllAction();
   t.mixer = new THREE.AnimationMixer(t.root);
@@ -6241,6 +6366,7 @@ function seek(time) {
   if (state.source.mixer && state.source.activeClip) state.source.mixer.setTime(state.playTime);
   if (state.target.mixer && state.targetPreviewClip) state.target.mixer.setTime(state.playTime);
   applyTargetRigRuntime();
+  applyRigifyPreviewGroundAlignment();
   updateRigOverlays();
   $('timeline').value = String(state.playTime);
   $('timeReadout').textContent = `${state.playTime.toFixed(2)} / ${duration.toFixed(2)} s`;
