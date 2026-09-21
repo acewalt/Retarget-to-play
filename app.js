@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifyruntime3';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifybody1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -2572,6 +2572,83 @@ function mergeClips(name, clips) {
   return new THREE.AnimationClip(name, duration, usable.flatMap(c => c.tracks.map(t => t.clone())));
 }
 
+function rigifyPreviewBodyContext() {
+  if (!usesRigifyPipeline()) return null;
+
+  const src = state.source;
+  const tgt = state.target;
+
+  const sourceHipsName =
+    findBoneByOriginalExact(
+      src,
+      ['mixamorig1:Hips', 'mixamorig:Hips', 'Hips']
+    ) ||
+    findSemanticBone(src, 'Hips');
+
+  const sourceHips = sourceHipsName
+    ? src.bones.get(sourceHipsName)
+    : null;
+  const sourceHipsRest = sourceHipsName
+    ? src.rest.get(sourceHipsName)
+    : null;
+
+  if (!sourceHips || !sourceHipsRest) return null;
+
+  const sourceHeadName =
+    findBoneByOriginalExact(
+      src,
+      ['mixamorig1:Head', 'mixamorig:Head', 'Head']
+    ) ||
+    findSemanticBone(src, 'Head');
+
+  const targetTorsoName =
+    findBoneByOriginalExact(tgt, ['torso']) ||
+    findSemanticBone(tgt, 'torso');
+
+  const targetHeadName =
+    findBoneByOriginalExact(tgt, ['DEF-head', 'head']) ||
+    findSemanticBone(tgt, 'Head');
+
+  let scale = 1;
+
+  const sourceHeadRest = sourceHeadName
+    ? src.rest.get(sourceHeadName)
+    : null;
+  const targetTorsoRest = targetTorsoName
+    ? tgt.rest.get(targetTorsoName)
+    : null;
+  const targetHeadRest = targetHeadName
+    ? tgt.rest.get(targetHeadName)
+    : null;
+
+  if (sourceHeadRest && targetTorsoRest && targetHeadRest) {
+    const sourceHeight =
+      sourceHipsRest.worldPos.distanceTo(sourceHeadRest.worldPos);
+    const targetHeight =
+      targetTorsoRest.worldPos.distanceTo(targetHeadRest.worldPos);
+
+    if (sourceHeight > 1e-6 && targetHeight > 1e-6) {
+      scale = THREE.MathUtils.clamp(
+        targetHeight / sourceHeight,
+        0.5,
+        2
+      );
+    }
+  }
+
+  const currentHipsWorld =
+    sourceHips.getWorldPosition(new THREE.Vector3());
+
+  const bodyDelta = currentHipsWorld
+    .sub(sourceHipsRest.worldPos)
+    .multiplyScalar($('autoScale')?.checked ? scale : 1);
+
+  return {
+    bodyDelta,
+    motionScale: scale
+  };
+}
+
 function applyTargetRigRuntime() {
   const runtime = state.target.rigRuntime;
   if (!runtime) return;
@@ -2585,8 +2662,16 @@ function applyTargetRigRuntime() {
   }
 
   runtime.enabled = $('previewDeform')?.checked ?? true;
-  if (runtime.enabled) runtime.update();
-  else runtime.resetDriven();
+
+  if (runtime.enabled) {
+    runtime.update(
+      usesRigifyPipeline()
+        ? rigifyPreviewBodyContext()
+        : null
+    );
+  } else {
+    runtime.resetDriven();
+  }
 }
 
 
