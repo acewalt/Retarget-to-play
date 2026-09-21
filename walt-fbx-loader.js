@@ -950,7 +950,7 @@ export class WaltRigifyRuntime {
     this.asset.displayRoot.updateMatrixWorld(true);
   }
 
-  update() {
+  update(context = null) {
     if (!this.enabled || !this.bindings.length) return;
 
     // Deliberately mirrors WaltCloudRigRuntime:
