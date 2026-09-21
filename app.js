@@ -117,6 +117,18 @@ const BLENDCAP_PRESET_REGISTRY = {
     sourceFamily: 'mixamo',
     targetFamily: 'mixamo-ctrl'
   },
+  ue_to_cloudrig: {
+    label: 'UE → CloudRig / Sintel',
+    path: './presets/ue_to_cloudrig.json',
+    sourceFamily: 'ue',
+    targetFamily: 'cloudrig'
+  },
+  ue_to_rigify: {
+    label: 'UE → Rigify',
+    path: './presets/ue_to_rigify.json',
+    sourceFamily: 'ue',
+    targetFamily: 'rigify'
+  },
   blendcap_to_cloudrig: {
     label: 'BlendCap → CloudRig',
     path: './presets/blendcap_to_cloudrig.json',
@@ -316,14 +328,14 @@ const sourceView = createViewport($('sourceViewport'));
 const targetView = createViewport($('targetViewport'));
 
 const REST_POSE_BONES = [
-  { role: 'leftUpperArm', label: 'Left Upper Arm', semantic: 'LeftArm', aliases: ['LeftArm', 'upper_arm_fk.L', 'FK-UpperArm.L'] },
-  { role: 'rightUpperArm', label: 'Right Upper Arm', semantic: 'RightArm', aliases: ['RightArm', 'upper_arm_fk.R', 'FK-UpperArm.R'] },
-  { role: 'leftForearm', label: 'Left Forearm / Elbow', semantic: 'LeftForeArm', aliases: ['LeftForeArm', 'forearm_fk.L', 'FK-Forearm.L'] },
-  { role: 'rightForearm', label: 'Right Forearm / Elbow', semantic: 'RightForeArm', aliases: ['RightForeArm', 'forearm_fk.R', 'FK-Forearm.R'] },
-  { role: 'leftThigh', label: 'Left Thigh', semantic: 'LeftUpLeg', aliases: ['LeftUpLeg', 'thigh_fk.L', 'FK-Thigh.L'] },
-  { role: 'rightThigh', label: 'Right Thigh', semantic: 'RightUpLeg', aliases: ['RightUpLeg', 'thigh_fk.R', 'FK-Thigh.R'] },
-  { role: 'leftShin', label: 'Left Shin / Knee', semantic: 'LeftLeg', aliases: ['LeftLeg', 'shin_fk.L', 'FK-Knee.L'] },
-  { role: 'rightShin', label: 'Right Shin / Knee', semantic: 'RightLeg', aliases: ['RightLeg', 'shin_fk.R', 'FK-Knee.R'] }
+  { role: 'leftUpperArm', label: 'Left Upper Arm', semantic: 'LeftArm', aliases: ['LeftArm', 'upper_arm_fk.L', 'FK-UpperArm.L', 'upperarm_l'] },
+  { role: 'rightUpperArm', label: 'Right Upper Arm', semantic: 'RightArm', aliases: ['RightArm', 'upper_arm_fk.R', 'FK-UpperArm.R', 'upperarm_r'] },
+  { role: 'leftForearm', label: 'Left Forearm / Elbow', semantic: 'LeftForeArm', aliases: ['LeftForeArm', 'forearm_fk.L', 'FK-Forearm.L', 'lowerarm_l'] },
+  { role: 'rightForearm', label: 'Right Forearm / Elbow', semantic: 'RightForeArm', aliases: ['RightForeArm', 'forearm_fk.R', 'FK-Forearm.R', 'lowerarm_r'] },
+  { role: 'leftThigh', label: 'Left Thigh', semantic: 'LeftUpLeg', aliases: ['LeftUpLeg', 'thigh_fk.L', 'FK-Thigh.L', 'thigh_l'] },
+  { role: 'rightThigh', label: 'Right Thigh', semantic: 'RightUpLeg', aliases: ['RightUpLeg', 'thigh_fk.R', 'FK-Thigh.R', 'thigh_r'] },
+  { role: 'leftShin', label: 'Left Shin / Knee', semantic: 'LeftLeg', aliases: ['LeftLeg', 'shin_fk.L', 'FK-Knee.L', 'calf_l'] },
+  { role: 'rightShin', label: 'Right Shin / Knee', semantic: 'RightLeg', aliases: ['RightLeg', 'shin_fk.R', 'FK-Knee.R', 'calf_r'] }
 ];
 
 const REST_POSE_MIRROR = new Map([
@@ -1520,6 +1532,8 @@ async function loadPreset() {
       presetData.source_prefix ||
       $('sourcePrefix').value ||
       '';
+  } else if (definition.sourceFamily === 'ue') {
+    $('sourcePrefix').value = presetData.source_prefix || '';
   }
 
   if (definition.targetFamily === 'mixamo') {
