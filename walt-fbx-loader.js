@@ -120,6 +120,78 @@ const CLOUDRIG_FK_ORDER = [
   'FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R', 'FK-Toes.R'
 ];
 
+const RIGIFY_BINDINGS = [
+  { driver: 'spine_fk', driven: 'DEF-spine' },
+  { driver: 'spine_fk.001', driven: 'DEF-spine.002' },
+  { driver: 'spine_fk.002', driven: 'DEF-spine.004' },
+  { driver: 'spine_fk.003', driven: 'DEF-spine.006' },
+  { driver: 'neck', driven: 'DEF-neck' },
+  { driver: 'head', driven: 'DEF-head' },
+
+  { driver: 'shoulder.L', driven: 'DEF-shoulder.L' },
+  { driver: 'upper_arm_fk.L', driven: 'DEF-upper_arm.L' },
+  { driver: 'forearm_fk.L', driven: 'DEF-forearm.L' },
+  { driver: 'hand_fk.L', driven: 'DEF-hand.L' },
+
+  { driver: 'shoulder.R', driven: 'DEF-shoulder.R' },
+  { driver: 'upper_arm_fk.R', driven: 'DEF-upper_arm.R' },
+  { driver: 'forearm_fk.R', driven: 'DEF-forearm.R' },
+  { driver: 'hand_fk.R', driven: 'DEF-hand.R' },
+
+  { driver: 'thigh_fk.L', driven: 'DEF-thigh.L' },
+  { driver: 'shin_fk.L', driven: 'DEF-shin.L' },
+  { driver: 'foot_fk.L', driven: 'DEF-foot.L' },
+  { driver: 'toe_fk.L', driven: 'DEF-toe.L' },
+
+  { driver: 'thigh_fk.R', driven: 'DEF-thigh.R' },
+  { driver: 'shin_fk.R', driven: 'DEF-shin.R' },
+  { driver: 'foot_fk.R', driven: 'DEF-foot.R' },
+  { driver: 'toe_fk.R', driven: 'DEF-toe.R' }
+];
+
+// Same idea as CloudRig's virtual hierarchy: Rigify's exported FBX loses the
+// MCH/constraint graph that carries the FK controls anatomically in Blender.
+// Rebuild the useful humanoid parent chain in the browser.
+const RIGIFY_FK_PARENT = {
+  'spine_fk': 'torso',
+  'spine_fk.001': 'spine_fk',
+  'spine_fk.002': 'spine_fk.001',
+  'spine_fk.003': 'spine_fk.002',
+  'neck': 'spine_fk.003',
+  'head': 'neck',
+
+  'shoulder.L': 'spine_fk.003',
+  'upper_arm_fk.L': 'shoulder.L',
+  'forearm_fk.L': 'upper_arm_fk.L',
+  'hand_fk.L': 'forearm_fk.L',
+
+  'shoulder.R': 'spine_fk.003',
+  'upper_arm_fk.R': 'shoulder.R',
+  'forearm_fk.R': 'upper_arm_fk.R',
+  'hand_fk.R': 'forearm_fk.R',
+
+  // In the shipped Mixamo → Rigify preset Hips rotation drives spine_fk.
+  // Treat that as the lower/pelvis frame so planted legs inherit pelvis turn.
+  'thigh_fk.L': 'spine_fk',
+  'shin_fk.L': 'thigh_fk.L',
+  'foot_fk.L': 'shin_fk.L',
+  'toe_fk.L': 'foot_fk.L',
+
+  'thigh_fk.R': 'spine_fk',
+  'shin_fk.R': 'thigh_fk.R',
+  'foot_fk.R': 'shin_fk.R',
+  'toe_fk.R': 'foot_fk.R'
+};
+
+const RIGIFY_FK_ORDER = [
+  'spine_fk', 'spine_fk.001', 'spine_fk.002', 'spine_fk.003',
+  'neck', 'head',
+  'shoulder.L', 'upper_arm_fk.L', 'forearm_fk.L', 'hand_fk.L',
+  'shoulder.R', 'upper_arm_fk.R', 'forearm_fk.R', 'hand_fk.R',
+  'thigh_fk.L', 'shin_fk.L', 'foot_fk.L', 'toe_fk.L',
+  'thigh_fk.R', 'shin_fk.R', 'foot_fk.R', 'toe_fk.R'
+];
+
 const LOGICAL_CHAINS = {
   mixamo: [
     ['Hips', 'Spine', 'Spine1', 'Spine2', 'Neck', 'Head'],
@@ -769,6 +841,276 @@ export class WaltCloudRigRuntime {
   }
 }
 
+export class WaltRigifyRuntime {
+  constructor(asset) {
+    this.asset = asset;
+    this.rig = asset.rig;
+
+    const direct = RIGIFY_BINDINGS
+      .map(binding => ({
+        ...binding,
+        driverBone: this.rig.get(binding.driver),
+        drivenBone: this.rig.get(binding.driven)
+      }))
+      .filter(x => x.driverBone && x.drivenBone);
+
+    // Fingers and other direct FK→DEF controls use the same naming convention.
+    const dynamic = [];
+    const seenDriven = new Set(direct.map(x => x.driven));
+
+    for (const [original, driverBone] of this.rig.byOriginal) {
+      if (!/^(?:thumb|f_(?:index|middle|ring|pinky))\./i.test(original)) continue;
+
+      const drivenName = `DEF-${original}`;
+      if (seenDriven.has(drivenName)) continue;
+
+      const drivenBone = this.rig.get(drivenName);
+      if (!drivenBone) continue;
+
+      dynamic.push({
+        driver: original,
+        driven: drivenName,
+        driverBone,
+        drivenBone
+      });
+      seenDriven.add(drivenName);
+    }
+
+    this.bindings = [...direct, ...dynamic]
+      .sort((a, b) => depthOf(a.drivenBone) - depthOf(b.drivenBone));
+
+    this.rest = new Map();
+    this.virtualFk = new Map();
+    this.enabled = true;
+    this.captureRest();
+  }
+
+  captureRest() {
+    this.asset.displayRoot.updateMatrixWorld(true);
+    this.rest.clear();
+
+    const unique = new Set();
+
+    for (const binding of this.bindings) {
+      unique.add(binding.driverBone);
+      unique.add(binding.drivenBone);
+    }
+
+    for (const name of ['root', 'torso', ...RIGIFY_FK_ORDER]) {
+      const bone = this.rig.get(name);
+      if (bone) unique.add(bone);
+    }
+
+    for (const bone of unique) {
+      this.rest.set(bone, {
+        localPosition: bone.position.clone(),
+        localQuaternion: bone.quaternion.clone(),
+        localScale: bone.scale.clone(),
+        worldPosition: bone.getWorldPosition(new THREE.Vector3()),
+        worldQuaternion: bone.getWorldQuaternion(new THREE.Quaternion()),
+        worldScale: bone.getWorldScale(new THREE.Vector3())
+      });
+    }
+  }
+
+  resetDriven() {
+    for (const binding of this.bindings) {
+      const rest = this.rest.get(binding.drivenBone);
+      if (!rest) continue;
+
+      binding.drivenBone.position.copy(rest.localPosition);
+      binding.drivenBone.quaternion.copy(rest.localQuaternion);
+      binding.drivenBone.scale.copy(rest.localScale);
+    }
+
+    this.asset.displayRoot.updateMatrixWorld(true);
+  }
+
+  update() {
+    if (!this.enabled || !this.bindings.length) return;
+
+    // Deliberately mirrors WaltCloudRigRuntime:
+    // 1. reset DEF,
+    // 2. build a virtual anatomical FK hierarchy,
+    // 3. make DEF follow that hierarchy.
+    //
+    // This is viewport-only. No export clip is modified.
+    this.resetDriven();
+    this.virtualFk.clear();
+    this.asset.displayRoot.updateMatrixWorld(true);
+
+    const qCurrent = new THREE.Quaternion();
+    const qDelta = new THREE.Quaternion();
+    const qBasis = new THREE.Quaternion();
+    const qRestRelative = new THREE.Quaternion();
+    const qParentWorld = new THREE.Quaternion();
+    const qDesiredWorld = new THREE.Quaternion();
+    const qDesiredLocal = new THREE.Quaternion();
+
+    const pCurrent = new THREE.Vector3();
+    const pRestOffset = new THREE.Vector3();
+    const pDesiredWorld = new THREE.Vector3();
+    const pDesiredLocal = new THREE.Vector3();
+
+    // Live global frames. root carries horizontal motion and torso carries
+    // vertical motion in our Rigify presets.
+    for (const name of ['root', 'torso']) {
+      const bone = this.rig.get(name);
+      if (!bone) continue;
+
+      const rest = this.rest.get(bone);
+      if (!rest) continue;
+
+      const worldQ = bone.getWorldQuaternion(new THREE.Quaternion()).normalize();
+      const entry = {
+        position: bone.getWorldPosition(new THREE.Vector3()),
+        quaternion: worldQ,
+        deltaQuaternion: worldQ.clone()
+          .multiply(rest.worldQuaternion.clone().invert())
+          .normalize()
+      };
+
+      this.virtualFk.set(name, entry);
+      this.virtualFk.set(originalName(bone), entry);
+      this.virtualFk.set(bone.name, entry);
+    }
+
+    // Reconstruct anatomical FK world transforms independently from Rigify's
+    // raw FBX/MCH parent layout.
+    for (const name of RIGIFY_FK_ORDER) {
+      const bone = this.rig.get(name);
+      if (!bone) continue;
+
+      const rest = this.rest.get(bone);
+      if (!rest) continue;
+
+      const parentName = RIGIFY_FK_PARENT[name];
+      const parentVirtual = parentName
+        ? this.virtualFk.get(parentName)
+        : null;
+      const parentBone = parentName
+        ? this.rig.get(parentName)
+        : null;
+      const parentRest = parentBone
+        ? this.rest.get(parentBone)
+        : null;
+
+      if (parentVirtual && parentRest) {
+        // Portable FK clip stores restLocal * poseBasis. Recompose the same
+        // basis on the reconstructed anatomical parent, exactly as CloudRig.
+        qBasis.copy(rest.localQuaternion)
+          .invert()
+          .multiply(bone.quaternion)
+          .normalize();
+
+        qRestRelative.copy(parentRest.worldQuaternion)
+          .invert()
+          .multiply(rest.worldQuaternion)
+          .normalize();
+
+        qCurrent.copy(parentVirtual.quaternion)
+          .multiply(qRestRelative)
+          .multiply(qBasis)
+          .normalize();
+
+        qParentWorld.copy(parentVirtual.quaternion);
+        const parentDelta = qParentWorld.clone()
+          .multiply(parentRest.worldQuaternion.clone().invert())
+          .normalize();
+
+        const offset = rest.worldPosition.clone()
+          .sub(parentRest.worldPosition)
+          .applyQuaternion(parentDelta);
+
+        pCurrent.copy(parentVirtual.position).add(offset);
+      } else {
+        bone.getWorldQuaternion(qCurrent).normalize();
+        bone.getWorldPosition(pCurrent);
+      }
+
+      qDelta.copy(qCurrent)
+        .multiply(rest.worldQuaternion.clone().invert())
+        .normalize();
+
+      const entry = {
+        position: pCurrent.clone(),
+        quaternion: qCurrent.clone(),
+        deltaQuaternion: qDelta.clone()
+      };
+
+      this.virtualFk.set(name, entry);
+      this.virtualFk.set(originalName(bone), entry);
+      this.virtualFk.set(bone.name, entry);
+    }
+
+    // DEF follows the virtual FK frame. Position and rotation are reconstructed;
+    // scale always stays at Rest to avoid skin explosions.
+    for (const binding of this.bindings) {
+      const driver = binding.driverBone;
+      const driven = binding.drivenBone;
+      const driverRest = this.rest.get(driver);
+      const drivenRest = this.rest.get(driven);
+      if (!driverRest || !drivenRest) continue;
+
+      const virtual =
+        this.virtualFk.get(binding.driver) ||
+        this.virtualFk.get(originalName(driver)) ||
+        this.virtualFk.get(driver.name);
+
+      if (virtual) {
+        pCurrent.copy(virtual.position);
+        qCurrent.copy(virtual.quaternion);
+        qDelta.copy(virtual.deltaQuaternion);
+      } else {
+        driver.getWorldPosition(pCurrent);
+        driver.getWorldQuaternion(qCurrent).normalize();
+        qDelta.copy(qCurrent)
+          .multiply(driverRest.worldQuaternion.clone().invert())
+          .normalize();
+      }
+
+      qDesiredWorld.copy(qDelta)
+        .multiply(drivenRest.worldQuaternion)
+        .normalize();
+
+      pRestOffset.copy(drivenRest.worldPosition)
+        .sub(driverRest.worldPosition)
+        .applyQuaternion(qDelta);
+
+      pDesiredWorld.copy(pCurrent).add(pRestOffset);
+
+      if (driven.parent) {
+        driven.parent.getWorldQuaternion(qParentWorld);
+        qDesiredLocal.copy(qParentWorld)
+          .invert()
+          .multiply(qDesiredWorld)
+          .normalize();
+
+        pDesiredLocal.copy(pDesiredWorld);
+        driven.parent.worldToLocal(pDesiredLocal);
+      } else {
+        qDesiredLocal.copy(qDesiredWorld);
+        pDesiredLocal.copy(pDesiredWorld);
+      }
+
+      driven.position.copy(pDesiredLocal);
+      driven.quaternion.copy(qDesiredLocal);
+      driven.scale.copy(drivenRest.localScale);
+
+      this.asset.displayRoot.updateMatrixWorld(true);
+    }
+  }
+
+  get status() {
+    return {
+      bindings: this.bindings.length,
+      requestedBindings: RIGIFY_BINDINGS.length,
+      virtualFk: true,
+      profile: 'rigify'
+    };
+  }
+}
+
 export class WaltRigOverlay {
   constructor(asset) {
     this.asset = asset;
@@ -926,6 +1268,8 @@ export class WaltFBXLoader {
 
     if (rig.profile === 'cloudrig') {
       asset.runtime = new WaltCloudRigRuntime(asset);
+    } else if (rig.profile === 'rigify') {
+      asset.runtime = new WaltRigifyRuntime(asset);
     }
 
     asset.overlay = new WaltRigOverlay(asset);
