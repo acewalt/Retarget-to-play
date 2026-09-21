@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik8';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik8';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik8';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyfkarm1';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyfkarm1';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyfkarm1';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -616,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyik8',
+      definition.path + '?v=20260920-rigifyfkarm1',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -1127,6 +1127,189 @@ function applyFootContactCorrection(src, tgt, side, motionScale) {
   return true;
 }
 
+
+function applyRigifyArmEndpointCorrection(src, tgt, side) {
+  // Mixamo -> Rigify is rotation-only on the arm FK chain. Rotation-only
+  // retargeting preserves joint orientation but NOT the exact wrist
+  // trajectory when source/target rest proportions differ slightly.
+  //
+  // Fit upper_arm_fk + forearm_fk as a 2-bone chain so hand_fk reaches the
+  // source hand trajectory in the shoulder's moving frame. hand_fk rotation
+  // itself is preserved from the regular retarget.
+  const suffix = side === 'L' ? '.L' : '.R';
+  const sourceShoulderSemantic = side === 'L' ? 'LeftShoulder' : 'RightShoulder';
+  const sourceUpperSemantic = side === 'L' ? 'LeftArm' : 'RightArm';
+  const sourceHandSemantic = side === 'L' ? 'LeftHand' : 'RightHand';
+
+  const sourceShoulderName = findSemanticBone(src, sourceShoulderSemantic);
+  const sourceUpperName = findSemanticBone(src, sourceUpperSemantic);
+  const sourceHandName = findSemanticBone(src, sourceHandSemantic);
+
+  const targetShoulderName = findBoneByOriginalExact(tgt, [`shoulder${suffix}`]);
+  const targetUpperName = findBoneByOriginalExact(tgt, [`upper_arm_fk${suffix}`]);
+  const targetForeName = findBoneByOriginalExact(tgt, [`forearm_fk${suffix}`]);
+  const targetHandName = findBoneByOriginalExact(tgt, [`hand_fk${suffix}`]);
+
+  if (
+    !sourceShoulderName || !sourceUpperName || !sourceHandName ||
+    !targetShoulderName || !targetUpperName || !targetForeName || !targetHandName
+  ) return false;
+
+  const sourceShoulder = src.bones.get(sourceShoulderName);
+  const sourceUpper = src.bones.get(sourceUpperName);
+  const sourceHand = src.bones.get(sourceHandName);
+
+  const targetShoulder = tgt.bones.get(targetShoulderName);
+  const targetUpper = tgt.bones.get(targetUpperName);
+  const targetFore = tgt.bones.get(targetForeName);
+  const targetHand = tgt.bones.get(targetHandName);
+
+  const ssr = src.rest.get(sourceShoulderName);
+  const sur = src.rest.get(sourceUpperName);
+  const shr = src.rest.get(sourceHandName);
+
+  const tsr = tgt.rest.get(targetShoulderName);
+  const tur = tgt.rest.get(targetUpperName);
+  const tfr = tgt.rest.get(targetForeName);
+  const thr = tgt.rest.get(targetHandName);
+
+  if (
+    !sourceShoulder || !sourceUpper || !sourceHand ||
+    !targetShoulder || !targetUpper || !targetFore || !targetHand ||
+    !ssr || !sur || !shr || !tsr || !tur || !tfr || !thr
+  ) return false;
+
+  const sourceUpperPos = sourceUpper.getWorldPosition(new THREE.Vector3());
+  const sourceHandPos = sourceHand.getWorldPosition(new THREE.Vector3());
+  const sourceShoulderQ = sourceShoulder.getWorldQuaternion(new THREE.Quaternion());
+
+  const targetUpperPos = targetUpper.getWorldPosition(new THREE.Vector3());
+  const targetShoulderQ = targetShoulder.getWorldQuaternion(new THREE.Quaternion());
+
+  const srcRestSpan = shr.worldPos.clone().sub(sur.worldPos);
+  const tgtRestSpan = thr.worldPos.clone().sub(tur.worldPos);
+  const srcRestLen = srcRestSpan.length();
+  const tgtRestLen = tgtRestSpan.length();
+  if (srcRestLen < 1e-6 || tgtRestLen < 1e-6) return false;
+
+  // Express source arm articulation in the current shoulder frame, then map
+  // the source rest arm direction into the target shoulder's rest frame.
+  const srcPoseLocal = sourceHandPos.clone()
+    .sub(sourceUpperPos)
+    .applyQuaternion(sourceShoulderQ.clone().invert());
+
+  const srcRestLocal = srcRestSpan.clone()
+    .applyQuaternion(ssr.worldQuat.clone().invert());
+
+  const tgtRestLocal = tgtRestSpan.clone()
+    .applyQuaternion(tsr.worldQuat.clone().invert());
+
+  if (srcRestLocal.lengthSq() < 1e-10 || tgtRestLocal.lengthSq() < 1e-10) {
+    return false;
+  }
+
+  const localAlign = new THREE.Quaternion().setFromUnitVectors(
+    srcRestLocal.clone().normalize(),
+    tgtRestLocal.clone().normalize()
+  );
+
+  const desiredLocal = srcPoseLocal
+    .applyQuaternion(localAlign)
+    .multiplyScalar(tgtRestLen / srcRestLen);
+
+  const desiredHand = targetUpperPos.clone().add(
+    desiredLocal.applyQuaternion(targetShoulderQ)
+  );
+
+  // Preserve the already-correct retargeted hand orientation.
+  const desiredHandWorldQ = targetHand.getWorldQuaternion(new THREE.Quaternion());
+
+  // Virtual chain uses REST offsets, so the intermediate MCH-hand_fk rest
+  // offset is included in forearm -> hand even though it isn't animated.
+  const A = targetUpperPos.clone();
+  let B = virtualFkChildPosition(tgt, targetUpperName, targetForeName, A);
+  if (!B) return false;
+  let C = virtualFkChildPosition(tgt, targetForeName, targetHandName, B);
+  if (!C) return false;
+
+  const l1 = A.distanceTo(B);
+  const l2 = B.distanceTo(C);
+  if (l1 < 1e-6 || l2 < 1e-6) return false;
+
+  const toTarget = desiredHand.clone().sub(A);
+  let distance = toTarget.length();
+  if (distance < 1e-6) return false;
+
+  const minReach = Math.abs(l1 - l2) + 1e-5;
+  const maxReach = l1 + l2 - 1e-5;
+  distance = THREE.MathUtils.clamp(distance, minReach, maxReach);
+
+  const dir = toTarget.normalize();
+
+  // Preserve the elbow bend plane already produced by the rotation retarget.
+  const v1 = B.clone().sub(A).normalize();
+  const v2 = C.clone().sub(B).normalize();
+  let normal = v1.clone().cross(v2);
+
+  if (normal.lengthSq() < 1e-8) {
+    normal = new THREE.Vector3(0, 0, side === 'L' ? 1 : -1);
+    if (Math.abs(normal.dot(dir)) > 0.95) normal.set(0, 1, 0);
+  }
+  normal.normalize();
+
+  let bendDir = normal.clone().cross(dir).normalize();
+  const currentAlong = dir.clone().multiplyScalar(B.clone().sub(A).dot(dir));
+  const currentPerp = B.clone().sub(A).sub(currentAlong);
+
+  if (currentPerp.lengthSq() > 1e-8 && bendDir.dot(currentPerp) < 0) {
+    bendDir.negate();
+  }
+
+  const x = (l1 * l1 - l2 * l2 + distance * distance) / (2 * distance);
+  const h = Math.sqrt(Math.max(0, l1 * l1 - x * x));
+
+  const desiredElbow = A.clone()
+    .addScaledVector(dir, x)
+    .addScaledVector(bendDir, h);
+
+  // Upper arm.
+  const upperAlign = new THREE.Quaternion().setFromUnitVectors(
+    B.clone().sub(A).normalize(),
+    desiredElbow.clone().sub(A).normalize()
+  );
+
+  const upperWorldQ = targetUpper.getWorldQuaternion(new THREE.Quaternion());
+  setBoneWorldQuaternion(
+    tgt,
+    targetUpper,
+    upperAlign.multiply(upperWorldQ).normalize()
+  );
+
+  // Recompute after upper-arm correction.
+  B = virtualFkChildPosition(tgt, targetUpperName, targetForeName, A);
+  if (!B) return false;
+  C = virtualFkChildPosition(tgt, targetForeName, targetHandName, B);
+  if (!C) return false;
+
+  // Forearm.
+  const foreAlign = new THREE.Quaternion().setFromUnitVectors(
+    C.clone().sub(B).normalize(),
+    desiredHand.clone().sub(B).normalize()
+  );
+
+  const foreWorldQ = targetFore.getWorldQuaternion(new THREE.Quaternion());
+  setBoneWorldQuaternion(
+    tgt,
+    targetFore,
+    foreAlign.multiply(foreWorldQ).normalize()
+  );
+
+  // Keep hand orientation from the source rotation retarget; only its wrist
+  // position is corrected through upper/forearm rotations.
+  setBoneWorldQuaternion(tgt, targetHand, desiredHandWorldQ);
+  return true;
+}
+
 function extractWorldTwistQuaternion(q, axis, out = new THREE.Quaternion()) {
   // Swing-twist decomposition. For root turning we only want the twist around
   // the scene up axis; pitch/roll remain on FK-Hips as pelvis motion.
@@ -1538,6 +1721,14 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       tb.position.copy(localPos);
       tb.scale.copy(tr.scale);
       updateSlotWorld(tgt);
+    }
+
+    // Mixamo -> Rigify wrist endpoint fit.
+    // IK conversion reads hand_fk afterwards, so correcting FK here fixes
+    // both FK and the eventual hand_ik without changing the IK solver.
+    if (state.activePresetId === 'mixamo_to_rigify') {
+      applyRigifyArmEndpointCorrection(src, tgt, 'L');
+      applyRigifyArmEndpointCorrection(src, tgt, 'R');
     }
 
     // BlendCap leg-anchor compensation:
