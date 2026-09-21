@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifyvirtual2';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifyruntime1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -3096,18 +3096,15 @@ function rebuildTargetPreviewClip() {
   if (!state.fkClip) return;
 
   if (usesRigifyPipeline()) {
-    if ($('previewDeform')?.checked) {
-      state.deformPreviewClip =
-        buildRigifyViewportDeformClip(state.fkRawClip || state.fkClip);
-    } else {
-      state.deformPreviewClip = null;
-    }
+    // Rigify now previews the same way CloudRig does:
+    // play the RAW FK controls and let a live runtime reconstruct the missing
+    // Blender constraint/MCH result onto DEF every frame.
+    state.deformPreviewClip = null;
 
     state.targetPreviewClip = mergeClips(
       'Rigify_Viewport_Preview',
       [
-        state.fkRawClip,
-        state.deformPreviewClip,
+        state.fkRawClip || state.fkClip,
         state.ikOnlyClip
       ]
     );
