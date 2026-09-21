@@ -121,42 +121,52 @@ const CLOUDRIG_FK_ORDER = [
 ];
 
 const RIGIFY_BINDINGS = [
-  // Spine is a split deform chain. Drive the intermediate DEF segments too,
-  // but keep their local positions inherited from Rest via positionDriven.
-  // This fixes the chest tearing without reintroducing the limb .001 issue.
-  { driver: 'spine_fk', driven: 'DEF-spine' },
-  { driver: 'spine_fk', driven: 'DEF-spine.001' },
+  // Rigify exports several limbs/spine sections as two connected DEF
+  // segments. A single FK control represents the whole section, so the first
+  // DEF receives half of the world-space delta and the second reaches the
+  // full delta. This spreads the bend across the section instead of folding
+  // all deformation into its first half.
+  { driver: 'spine_fk', driven: 'DEF-spine', rotationWeight: 0.5 },
+  { driver: 'spine_fk', driven: 'DEF-spine.001', rotationWeight: 1.0 },
 
-  { driver: 'spine_fk.001', driven: 'DEF-spine.002' },
-  { driver: 'spine_fk.001', driven: 'DEF-spine.003' },
+  { driver: 'spine_fk.001', driven: 'DEF-spine.002', rotationWeight: 0.5 },
+  { driver: 'spine_fk.001', driven: 'DEF-spine.003', rotationWeight: 1.0 },
 
-  { driver: 'spine_fk.002', driven: 'DEF-spine.004' },
-  { driver: 'spine_fk.002', driven: 'DEF-spine.005' },
+  { driver: 'spine_fk.002', driven: 'DEF-spine.004', rotationWeight: 0.5 },
+  { driver: 'spine_fk.002', driven: 'DEF-spine.005', rotationWeight: 1.0 },
 
-  { driver: 'spine_fk.003', driven: 'DEF-spine.006' },
-  { driver: 'neck', driven: 'DEF-neck' },
-  { driver: 'head', driven: 'DEF-head' },
+  { driver: 'spine_fk.003', driven: 'DEF-spine.006', rotationWeight: 1.0 },
+  { driver: 'neck', driven: 'DEF-neck', rotationWeight: 1.0 },
+  { driver: 'head', driven: 'DEF-head', rotationWeight: 1.0 },
 
-  { driver: 'shoulder.L', driven: 'DEF-shoulder.L' },
-  { driver: 'upper_arm_fk.L', driven: 'DEF-upper_arm.L' },
-  { driver: 'forearm_fk.L', driven: 'DEF-forearm.L' },
-  { driver: 'hand_fk.L', driven: 'DEF-hand.L' },
+  { driver: 'shoulder.L', driven: 'DEF-shoulder.L', rotationWeight: 1.0 },
+  { driver: 'upper_arm_fk.L', driven: 'DEF-upper_arm.L', rotationWeight: 0.5 },
+  { driver: 'upper_arm_fk.L', driven: 'DEF-upper_arm.L.001', rotationWeight: 1.0 },
+  { driver: 'forearm_fk.L', driven: 'DEF-forearm.L', rotationWeight: 0.5 },
+  { driver: 'forearm_fk.L', driven: 'DEF-forearm.L.001', rotationWeight: 1.0 },
+  { driver: 'hand_fk.L', driven: 'DEF-hand.L', rotationWeight: 1.0 },
 
-  { driver: 'shoulder.R', driven: 'DEF-shoulder.R' },
-  { driver: 'upper_arm_fk.R', driven: 'DEF-upper_arm.R' },
-  { driver: 'forearm_fk.R', driven: 'DEF-forearm.R' },
-  { driver: 'hand_fk.R', driven: 'DEF-hand.R' },
+  { driver: 'shoulder.R', driven: 'DEF-shoulder.R', rotationWeight: 1.0 },
+  { driver: 'upper_arm_fk.R', driven: 'DEF-upper_arm.R', rotationWeight: 0.5 },
+  { driver: 'upper_arm_fk.R', driven: 'DEF-upper_arm.R.001', rotationWeight: 1.0 },
+  { driver: 'forearm_fk.R', driven: 'DEF-forearm.R', rotationWeight: 0.5 },
+  { driver: 'forearm_fk.R', driven: 'DEF-forearm.R.001', rotationWeight: 1.0 },
+  { driver: 'hand_fk.R', driven: 'DEF-hand.R', rotationWeight: 1.0 },
 
-  { driver: 'thigh_fk.L', driven: 'DEF-thigh.L' },
-  { driver: 'shin_fk.L', driven: 'DEF-shin.L' },
-  { driver: 'foot_fk.L', driven: 'DEF-foot.L' },
-  { driver: 'toe_fk.L', driven: 'DEF-toe.L' },
+  { driver: 'thigh_fk.L', driven: 'DEF-thigh.L', rotationWeight: 0.5 },
+  { driver: 'thigh_fk.L', driven: 'DEF-thigh.L.001', rotationWeight: 1.0 },
+  { driver: 'shin_fk.L', driven: 'DEF-shin.L', rotationWeight: 0.5 },
+  { driver: 'shin_fk.L', driven: 'DEF-shin.L.001', rotationWeight: 1.0 },
+  { driver: 'foot_fk.L', driven: 'DEF-foot.L', rotationWeight: 1.0 },
+  { driver: 'toe_fk.L', driven: 'DEF-toe.L', rotationWeight: 1.0 },
 
-  { driver: 'thigh_fk.R', driven: 'DEF-thigh.R' },
-  { driver: 'shin_fk.R', driven: 'DEF-shin.R' },
-  { driver: 'foot_fk.R', driven: 'DEF-foot.R' },
-  { driver: 'toe_fk.R', driven: 'DEF-toe.R' }
-];
+  { driver: 'thigh_fk.R', driven: 'DEF-thigh.R', rotationWeight: 0.5 },
+  { driver: 'thigh_fk.R', driven: 'DEF-thigh.R.001', rotationWeight: 1.0 },
+  { driver: 'shin_fk.R', driven: 'DEF-shin.R', rotationWeight: 0.5 },
+  { driver: 'shin_fk.R', driven: 'DEF-shin.R.001', rotationWeight: 1.0 },
+  { driver: 'foot_fk.R', driven: 'DEF-foot.R', rotationWeight: 1.0 },
+  { driver: 'toe_fk.R', driven: 'DEF-toe.R', rotationWeight: 1.0 }
+]
 
 // Same idea as CloudRig's virtual hierarchy: Rigify's exported FBX loses the
 // MCH/constraint graph that carries the FK controls anatomically in Blender.
@@ -880,7 +890,8 @@ export class WaltRigifyRuntime {
         driver: original,
         driven: drivenName,
         driverBone,
-        drivenBone
+        drivenBone,
+        rotationWeight: 1.0
       });
       seenDriven.add(drivenName);
     }
@@ -974,6 +985,7 @@ export class WaltRigifyRuntime {
 
     const qCurrent = new THREE.Quaternion();
     const qDelta = new THREE.Quaternion();
+    const qWeightedDelta = new THREE.Quaternion();
     const qParentWorld = new THREE.Quaternion();
     const qDesiredWorld = new THREE.Quaternion();
     const qDesiredLocal = new THREE.Quaternion();
@@ -1167,13 +1179,22 @@ export class WaltRigifyRuntime {
           .normalize();
       }
 
-      qDesiredWorld.copy(qDelta)
+      const rotationWeight = Number.isFinite(binding.rotationWeight)
+        ? THREE.MathUtils.clamp(binding.rotationWeight, 0, 1)
+        : 1;
+
+      qWeightedDelta
+        .identity()
+        .slerp(qDelta, rotationWeight)
+        .normalize();
+
+      qDesiredWorld.copy(qWeightedDelta)
         .multiply(drivenRest.worldQuaternion)
         .normalize();
 
       pRestOffset.copy(drivenRest.worldPosition)
         .sub(driverRest.worldPosition)
-        .applyQuaternion(qDelta);
+        .applyQuaternion(qWeightedDelta);
 
       pDesiredWorld.copy(pCurrent).add(pRestOffset);
 
