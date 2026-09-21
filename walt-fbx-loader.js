@@ -121,9 +121,18 @@ const CLOUDRIG_FK_ORDER = [
 ];
 
 const RIGIFY_BINDINGS = [
+  // Spine is a split deform chain. Drive the intermediate DEF segments too,
+  // but keep their local positions inherited from Rest via positionDriven.
+  // This fixes the chest tearing without reintroducing the limb .001 issue.
   { driver: 'spine_fk', driven: 'DEF-spine' },
+  { driver: 'spine_fk', driven: 'DEF-spine.001' },
+
   { driver: 'spine_fk.001', driven: 'DEF-spine.002' },
+  { driver: 'spine_fk.001', driven: 'DEF-spine.003' },
+
   { driver: 'spine_fk.002', driven: 'DEF-spine.004' },
+  { driver: 'spine_fk.002', driven: 'DEF-spine.005' },
+
   { driver: 'spine_fk.003', driven: 'DEF-spine.006' },
   { driver: 'neck', driven: 'DEF-neck' },
   { driver: 'head', driven: 'DEF-head' },
