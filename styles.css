@@ -292,3 +292,5 @@ h2,p{margin:0}
 @media(prefers-reduced-motion:reduce){
   .retarget-bridge.transfer-reveal{animation:none!important}
 }
+
+.feature-reveal-prep{opacity:0!important;transform:translateY(-15px) scale(.88);filter:blur(9px)}
