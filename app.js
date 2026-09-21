@@ -1,9 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik5';
-import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik5';
-import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik5';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260920-rigifyik6';
+import { injectAnimationsIntoOriginalFBX } from './walt-fbx-exact-export.js?v=20260920-rigifyik6';
+import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-rigifyik6';
 
 const $ = (id) => document.getElementById(id);
 const fbxLoader = new WaltFBXLoader();
@@ -616,7 +616,7 @@ async function loadPreset() {
     };
   } else {
     const response = await fetch(
-      definition.path + '?v=20260920-rigifyik5',
+      definition.path + '?v=20260920-rigifyik6',
       { cache: 'no-store' }
     );
     if (!response.ok) {
@@ -2551,7 +2551,8 @@ function encodeRigifyControlLocal(
   desiredWorld,
   functionalParentPose,
   functionalParentRest,
-  outMatrix
+  outMatrix,
+  noLocalLocation = false
 ) {
   const control = tgt.bones.get(controlName);
   if (!control) return null;
@@ -2570,7 +2571,9 @@ function encodeRigifyControlLocal(
     ? (originalObjectName(helper) || helper.name)
     : '';
 
-  let basis = null;
+  let parentPose = functionalParentPose.clone();
+  let parentRest = functionalParentRest.clone();
+  let ctrlRelRest = null;
 
   if (helper && /^MCH-.*\.parent$/i.test(helperOriginal)) {
     const helperRestWorld = composeRestWorldMatrix(
@@ -2579,45 +2582,103 @@ function encodeRigifyControlLocal(
 
     if (helperRestWorld) {
       // SwitchParentBuilder evaluates the root-level MCH proxy from the
-      // selected parent's pose delta. The exported FBX has the proxy but
-      // loses this ARMATURE constraint.
+      // selected parent's pose delta. Reconstruct that evaluated helper
+      // first; this is the ACTUAL direct parent frame of hand_ik / pole.
       const carrierDelta = functionalParentPose.clone()
         .multiply(functionalParentRest.clone().invert());
 
-      const helperPoseWorld = carrierDelta
-        .multiply(helperRestWorld);
+      parentPose = carrierDelta.multiply(helperRestWorld);
+      parentRest = helperRestWorld;
 
-      const controlRestRelative = helperRestWorld.clone()
+      ctrlRelRest = helperRestWorld.clone()
         .invert()
         .multiply(controlRestWorld);
-
-      const basisIdentityWorld = helperPoseWorld
-        .multiply(controlRestRelative);
-
-      basis = basisIdentityWorld.clone()
-        .invert()
-        .multiply(desiredWorld);
     }
   }
 
-  if (!basis) {
-    const restRelative = functionalParentRest.clone()
+  if (!ctrlRelRest) {
+    ctrlRelRest = parentRest.clone()
       .invert()
       .multiply(controlRestWorld);
-
-    const desiredRelative = functionalParentPose.clone()
-      .invert()
-      .multiply(desiredWorld);
-
-    basis = restRelative.clone()
-      .invert()
-      .multiply(desiredRelative);
   }
 
+  const poseIdentity = parentPose.clone().multiply(ctrlRelRest);
+  const basisFull = poseIdentity.clone()
+    .invert()
+    .multiply(desiredWorld);
+
+  const basisQ = new THREE.Quaternion();
+  const basisS = new THREE.Vector3();
+  const basisLocalT = new THREE.Vector3();
+  basisFull.decompose(basisLocalT, basisQ, basisS);
+  basisQ.normalize();
+
+  let basisT = basisLocalT;
+
+  if (noLocalLocation) {
+    // Exact BlendCap / Blender BONE_NO_LOCAL_LOCATION back-solve:
+    //
+    // pose.translation =
+    //   parentPose * ctrlRelRest.translation
+    //   + (parentPose.rot * inverse(parentRest.rot)) * basis_loc
+    //
+    // Therefore:
+    // basis_loc =
+    //   inverse(parentPose.rot * inverse(parentRest.rot))
+    //   * (desired.translation - restHeadAtPose)
+    //
+    // Rigify's standard human metarig explicitly sets
+    // ik_local_location=False for arm IK controls. This is particularly
+    // visible on arms because their parent frame is strongly rotated.
+    const restOffset = new THREE.Vector3();
+    ctrlRelRest.decompose(
+      restOffset,
+      new THREE.Quaternion(),
+      new THREE.Vector3()
+    );
+
+    const restHeadAtPose = restOffset.clone()
+      .applyMatrix4(parentPose);
+
+    const desiredT = new THREE.Vector3();
+    desiredWorld.decompose(
+      desiredT,
+      new THREE.Quaternion(),
+      new THREE.Vector3()
+    );
+
+    const delta = desiredT.sub(restHeadAtPose);
+
+    const parentPoseQ = new THREE.Quaternion();
+    parentPose.decompose(
+      new THREE.Vector3(),
+      parentPoseQ,
+      new THREE.Vector3()
+    );
+    parentPoseQ.normalize();
+
+    const parentRestQ = new THREE.Quaternion();
+    parentRest.decompose(
+      new THREE.Vector3(),
+      parentRestQ,
+      new THREE.Vector3()
+    );
+    parentRestQ.normalize();
+
+    const frameQ = parentPoseQ.clone()
+      .multiply(parentRestQ.clone().invert())
+      .normalize();
+
+    basisT = delta.applyQuaternion(frameQ.invert());
+  }
+
+  const basis = new THREE.Matrix4().compose(
+    basisT,
+    basisQ,
+    basisS
+  );
+
   // Exact-FBX carrier convention: raw rest local * Blender matrix_basis.
-  // Because desiredWorld and parentWorld share the displayRoot scale, the
-  // matrix inverse cancels metersPerUnit here; translation stays in FBX
-  // local units, matching Lcl Translation.
   return outMatrix.copy(rawRestLocal).multiply(basis);
 }
 
@@ -2717,7 +2778,8 @@ function bakeRigifyIkFromFk() {
           desiredIkWorld,
           parentPose,
           parentRest,
-          encodedLocal
+          encodedLocal,
+          chain.kind === 'ARM'
         );
         if (!encoded) continue;
 
@@ -2766,7 +2828,8 @@ function bakeRigifyIkFromFk() {
           desiredPoleWorld,
           parentPose,
           parentRest,
-          encodedLocal
+          encodedLocal,
+          chain.kind === 'ARM'
         );
         if (!encoded) continue;
 
@@ -2810,8 +2873,8 @@ function bakeRigifyIkFromFk() {
 
   log(
     'FK→IK Rigify original-evaluated: fuente=FK Action portable; ' +
-    'reconstruye root→torso + shoulder COPY_TRANSFORMS; ' +
-    'hand/foot parent=root; pole parent=shoulder/lower-spine.'
+    'piernas conservadas; brazos usan BlendCap no-local-location; ' +
+    'hand parent=root; arm pole parent=shoulder.'
   );
 
   return new THREE.AnimationClip(
