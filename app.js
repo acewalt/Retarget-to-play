@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifysplit1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifyauxdef1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -2707,6 +2707,12 @@ function collectRigifyViewportDefBindings() {
   add('spine_fk.002', 'DEF-spine.005');
 
   add('spine_fk.003', 'DEF-spine.006');
+
+  // Auxiliary weighted deform bones from the real Rigify hierarchy.
+  add('spine_fk', 'DEF-pelvis.L');
+  add('spine_fk', 'DEF-pelvis.R');
+  add('spine_fk.003', 'DEF-breast.L');
+  add('spine_fk.003', 'DEF-breast.R');
 
   add('neck', 'DEF-neck');
   add('head', 'DEF-head');
