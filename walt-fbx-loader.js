@@ -172,12 +172,12 @@ const RIGIFY_FK_PARENT = {
 
   // In the shipped Mixamo → Rigify preset Hips rotation drives spine_fk.
   // Treat that as the lower/pelvis frame so planted legs inherit pelvis turn.
-  'thigh_fk.L': 'spine_fk',
+  'thigh_fk.L': '@PELVIS',
   'shin_fk.L': 'thigh_fk.L',
   'foot_fk.L': 'shin_fk.L',
   'toe_fk.L': 'foot_fk.L',
 
-  'thigh_fk.R': 'spine_fk',
+  'thigh_fk.R': '@PELVIS',
   'shin_fk.R': 'thigh_fk.R',
   'foot_fk.R': 'shin_fk.R',
   'toe_fk.R': 'foot_fk.R'
@@ -988,12 +988,31 @@ export class WaltRigifyRuntime {
       const parentVirtual = parentName
         ? this.virtualFk.get(parentName)
         : null;
-      const parentBone = parentName
-        ? this.rig.get(parentName)
-        : null;
-      const parentRest = parentBone
-        ? this.rest.get(parentBone)
-        : null;
+
+      let parentRest = null;
+
+      if (parentName === '@PELVIS') {
+        const torsoBone = this.rig.get('torso');
+        const spineBone = this.rig.get('spine_fk');
+        const torsoRest = torsoBone ? this.rest.get(torsoBone) : null;
+        const spineRest = spineBone ? this.rest.get(spineBone) : null;
+
+        if (torsoRest && spineRest) {
+          // Mixamo Hips translation and rotation are split over two Rigify
+          // controls by the preset. Recreate one pelvis rest frame from them.
+          parentRest = {
+            worldPosition: torsoRest.worldPosition,
+            worldQuaternion: spineRest.worldQuaternion
+          };
+        }
+      } else {
+        const parentBone = parentName
+          ? this.rig.get(parentName)
+          : null;
+        parentRest = parentBone
+          ? this.rest.get(parentBone)
+          : null;
+      }
 
       if (parentVirtual && parentRest) {
         // Portable FK clip stores restLocal * poseBasis. Recompose the same
@@ -1041,6 +1060,21 @@ export class WaltRigifyRuntime {
       this.virtualFk.set(name, entry);
       this.virtualFk.set(originalName(bone), entry);
       this.virtualFk.set(bone.name, entry);
+
+      if (name === 'spine_fk') {
+        const torsoVirtual = this.virtualFk.get('torso');
+        if (torsoVirtual) {
+          this.virtualFk.set('@PELVIS', {
+            // Critical difference from the previous build:
+            // DO NOT use spine_fk.position as the leg pivot. In Rigify that
+            // control belongs to the spine/MCH layout. The preset deliberately
+            // stores Hips LOC on torso and Hips ROT on spine_fk.
+            position: torsoVirtual.position.clone(),
+            quaternion: entry.quaternion.clone(),
+            deltaQuaternion: entry.deltaQuaternion.clone()
+          });
+        }
+      }
     }
 
     // DEF follows the virtual FK frame. Position and rotation are reconstructed;
