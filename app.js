@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-presetguard1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-autopreset1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -302,7 +302,7 @@ const state = {
   source: makeSlot('source'),
   target: makeSlot('target'),
   boneMap: [],
-  activePresetId: 'none',
+  activePresetId: 'auto',
   activePreset: null,
   fkClip: null,
   fkRawClip: null,
@@ -1568,14 +1568,143 @@ function findSemanticBone(slot, semantic) {
   return null;
 }
 
+async function fetchPresetDefinitionData(id, definition) {
+  if (definition.inline) {
+    return {
+      name: definition.label,
+      source_prefix: definition.sourceFamily === 'mixamo' ? 'mixamorig:' : '',
+      pairs: definition.inline
+    };
+  }
+
+  const response = await fetch(
+    definition.path + '?v=20260922-autopreset1',
+    { cache: 'no-store' }
+  );
+
+  if (!response.ok) {
+    throw new Error(
+      `No pude cargar ${definition.label}: HTTP ${response.status}`
+    );
+  }
+
+  return response.json();
+}
+
+function resolvePresetTargetBone(definition, spec) {
+  const candidates = Array.isArray(spec) ? [...spec] : [spec];
+
+  if (definition.targetFamily === 'cloudrig') {
+    if (candidates.includes('HIP-Spine') && !candidates.includes('HTP-Spine')) {
+      candidates.push('HTP-Spine');
+    }
+    if (candidates.includes('HTP-Spine') && !candidates.includes('HIP-Spine')) {
+      candidates.push('HIP-Spine');
+    }
+  }
+
+  return candidates
+    .map(name =>
+      findBoneByOriginalExact(state.target, [name]) ||
+      findSemanticBone(state.target, name)
+    )
+    .find(Boolean) || '';
+}
+
+function scorePresetAgainstLoadedRigs(definition, presetData) {
+  const pairs = presetData?.pairs || [];
+  if (!pairs.length) {
+    return {
+      resolvedBoth: 0,
+      resolvedSource: 0,
+      resolvedTarget: 0,
+      ratio: 0,
+      score: 0
+    };
+  }
+
+  let resolvedSource = 0;
+  let resolvedTarget = 0;
+  let resolvedBoth = 0;
+
+  for (const entry of pairs) {
+    const source = findSemanticBone(state.source, entry.source) || '';
+    const target = resolvePresetTargetBone(definition, entry.target);
+
+    if (source) resolvedSource++;
+    if (target) resolvedTarget++;
+    if (source && target) resolvedBoth++;
+  }
+
+  const ratio = resolvedBoth / pairs.length;
+
+  // Pair matches dominate. Target coverage is the tie-breaker that lets
+  // Auto-preset distinguish variants such as Rigify New vs Old.
+  const score =
+    ratio * 1_000_000 +
+    resolvedBoth * 1_000 +
+    resolvedTarget * 10 +
+    resolvedSource;
+
+  return {
+    resolvedBoth,
+    resolvedSource,
+    resolvedTarget,
+    ratio,
+    score
+  };
+}
+
+async function detectAutoPreset() {
+  if (!state.source.root || !state.target.root) return null;
+
+  const candidates = Object.entries(BLENDCAP_PRESET_REGISTRY)
+    .filter(([, definition]) =>
+      sourceMatchesPresetFamily(definition.sourceFamily) &&
+      targetMatchesPresetFamily(definition.targetFamily)
+    );
+
+  if (!candidates.length) return null;
+
+  const scored = [];
+
+  for (const [id, definition] of candidates) {
+    try {
+      const data = await fetchPresetDefinitionData(id, definition);
+      const metrics = scorePresetAgainstLoadedRigs(definition, data);
+
+      scored.push({
+        id,
+        definition,
+        data,
+        ...metrics
+      });
+    } catch (error) {
+      log(`Auto-preset omitió ${definition.label}: ${error.message}`);
+    }
+  }
+
+  scored.sort((a, b) =>
+    b.score - a.score ||
+    b.resolvedBoth - a.resolvedBoth ||
+    a.id.localeCompare(b.id)
+  );
+
+  const best = scored[0] || null;
+  if (!best || best.resolvedBoth <= 0) return null;
+
+  return best;
+}
+
 async function loadPreset() {
   if (!state.source.root || !state.target.root) {
     log('Preset pendiente: primero carga Source y Target.');
     return;
   }
 
-  const id = $('preset').value;
-  if (id === 'none') {
+  const requestedId = $('preset').value;
+
+  if (requestedId === 'none') {
     state.activePresetId = 'none';
     state.activePreset = null;
     state.boneMap = [];
@@ -1586,34 +1715,51 @@ async function loadPreset() {
     return;
   }
 
-  const definition = BLENDCAP_PRESET_REGISTRY[id];
-  if (!definition) {
-    throw new Error(`Preset desconocido: ${id}`);
-  }
+  let id = requestedId;
+  let definition = null;
+  let presetData = null;
+  let autoMetrics = null;
 
-  let presetData;
-  if (definition.inline) {
-    presetData = {
-      name: definition.label,
-      source_prefix: 'mixamorig:',
-      pairs: definition.inline
-    };
-  } else {
-    const response = await fetch(
-      definition.path + '?v=20260920-preview1',
-      { cache: 'no-store' }
-    );
-    if (!response.ok) {
-      throw new Error(
-        `No pude cargar ${definition.label}: HTTP ${response.status}`
-      );
+  if (requestedId === 'auto') {
+    const detected = await detectAutoPreset();
+
+    if (!detected) {
+      state.activePresetId = 'none';
+      state.activePreset = null;
+      state.boneMap = [];
+      refreshMapUi();
+      updateButtons();
+      updateStats();
+      updateTransferBridgeVisibility(false);
+      setStatus('Auto-preset · sin coincidencia', 'bad');
+      log('Auto-preset: no encontré un preset compatible con las dos armaduras cargadas.');
+      return;
     }
-    presetData = await response.json();
+
+    id = detected.id;
+    definition = detected.definition;
+    presetData = detected.data;
+    autoMetrics = detected;
+
+    log(
+      `Auto-preset → ${definition.label} · ` +
+      `${detected.resolvedBoth}/${presetData.pairs?.length || 0} pares detectados.`
+    );
+  } else {
+    definition = BLENDCAP_PRESET_REGISTRY[id];
+
+    if (!definition) {
+      throw new Error(`Preset desconocido: ${id}`);
+    }
+
+    presetData = await fetchPresetDefinitionData(id, definition);
   }
 
   state.activePresetId = id;
   state.activePreset = {
     id,
+    autoDetected: requestedId === 'auto',
+    autoMetrics,
     ...definition,
     data: presetData
   };
@@ -1635,31 +1781,10 @@ async function loadPreset() {
       '';
   }
 
-  const resolveTarget = (spec) => {
-    const candidates = Array.isArray(spec) ? [...spec] : [spec];
-
-    // Sintel/CloudRig variants may expose HIP-Spine or HTP-Spine.
-    if (definition.targetFamily === 'cloudrig') {
-      if (candidates.includes('HIP-Spine') && !candidates.includes('HTP-Spine')) {
-        candidates.push('HTP-Spine');
-      }
-      if (candidates.includes('HTP-Spine') && !candidates.includes('HIP-Spine')) {
-        candidates.push('HIP-Spine');
-      }
-    }
-
-    return candidates
-      .map(name =>
-        findBoneByOriginalExact(state.target, [name]) ||
-        findSemanticBone(state.target, name)
-      )
-      .find(Boolean) || '';
-  };
-
   const pairs = presetData.pairs || [];
   state.boneMap = pairs.map(entry => ({
     source: findSemanticBone(state.source, entry.source) || '',
-    target: resolveTarget(entry.target),
+    target: resolvePresetTargetBone(definition, entry.target),
     sourceSpec: entry.source,
     targetSpec: entry.target,
     channels: entry.channels || 'ROT',
@@ -1693,10 +1818,15 @@ async function loadPreset() {
   const headLocal = state.boneMap.filter(p => p.locSpace === 'head_local').length;
 
   log(
-    `Preset ${definition.label}: ${resolved}/${pairs.length} pares resueltos` +
+    `${requestedId === 'auto' ? 'Auto-preset' : 'Preset'} ${definition.label}: ` +
+    `${resolved}/${pairs.length} pares resueltos` +
     (headLocal ? ` · face head_local=${headLocal}` : '') +
-    ` · Target=${definition.targetFamily}.`
+    ` · ${definition.sourceFamily} → ${definition.targetFamily}.`
   );
+
+  if (requestedId === 'auto') {
+    setStatus(`Auto-preset · ${definition.label}`, 'good');
+  }
 }
 
 function normalizeName(name) {
@@ -6794,7 +6924,21 @@ $('targetButton').onclick = () => $('targetFile').click();
 $('fitSource').onclick = () => fitView(sourceView, state.source.displayRoot || state.source.root);
 $('fitTarget').onclick = () => fitView(targetView, state.target.displayRoot || state.target.root);
 $('sourceClip').onchange = () => setSourceClip(Number($('sourceClip').value));
-$('loadPreset').onclick = () => void loadPreset();
+$('loadPreset').onclick = () => {
+  $('preset').value = 'auto';
+  state.activePreset = null;
+  state.activePresetId = 'auto';
+  updateTransferBridgeVisibility(false);
+
+  void loadPreset()
+    .then(() => {
+      updateTransferBridgeVisibility(presetMatchesLoadedRigs());
+    })
+    .catch(error => {
+      updateTransferBridgeVisibility(false);
+      log(`ERROR Auto-preset: ${error.message}`);
+    });
+};
 $('preset').onchange = () => {
   const id = $('preset').value;
   state.activePresetId = id;
