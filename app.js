@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
+import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-touchguard1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-restoverlay1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -327,6 +328,9 @@ const state = {
     undoStack: [],
     sensitivity: 0.5,
     showFullGimbal: false,
+    targetOverlayEnabled: false,
+    targetOverlayOpacity: 0.28,
+    targetOverlayRoot: null,
     dragBaseQuaternion: null,
     applyingSensitivity: false
   }
@@ -585,18 +589,22 @@ function installRestPoseGizmoThickness(helper) {
     const curve = new THREE.CatmullRomCurve3(points, closed, 'centripetal');
     const materialSource = Array.isArray(line.material) ? line.material[0] : line.material;
 
+    // Only the compact yellow E ring gets a real tube. Native WebGL line
+    // widths are unreliable, especially on mobile/Safari.
+    if (line.name !== 'E') continue;
+
     const tube = new THREE.Mesh(
       new THREE.TubeGeometry(
         curve,
-        Math.max(16, Math.min(128, points.length * 2)),
-        0.022,
-        8,
+        Math.max(24, Math.min(144, points.length * 2)),
+        0.042,
+        10,
         closed
       ),
       new THREE.MeshBasicMaterial({
-        color: materialSource?.color?.clone?.() || new THREE.Color(0xffffff),
-        transparent: true,
-        opacity: materialSource?.opacity ?? 1,
+        color: 0xffd21a,
+        transparent: false,
+        opacity: 1,
         depthTest: false,
         depthWrite: false,
         toneMapped: false
@@ -677,14 +685,14 @@ function compactRestPoseGizmoGeometry(transform) {
 
   if (visualE?.geometry && !visualE.userData.restPoseCompactGeometry) {
     visualE.geometry = visualE.geometry.clone();
-    visualE.geometry.scale(0.72, 0.72, 0.72);
-    thickenRestPoseRingGeometry(visualE.geometry, 0.032);
+    visualE.geometry.scale(0.60, 0.60, 0.60);
+    thickenRestPoseRingGeometry(visualE.geometry, 0.040);
     visualE.userData.restPoseCompactGeometry = true;
   }
 
   if (pickerE?.geometry && !pickerE.userData.restPoseCompactGeometry) {
     pickerE.geometry = pickerE.geometry.clone();
-    pickerE.geometry.scale(0.72, 0.72, 0.72);
+    pickerE.geometry.scale(0.60, 0.60, 0.60);
     pickerE.userData.restPoseCompactGeometry = true;
   }
 }
@@ -726,6 +734,16 @@ function updateRestPoseGizmoMode() {
   for (const handle of gizmo?.gizmo?.rotate?.children || []) {
     if (handle.name === 'E') {
       setRestPoseHandleMaterialVisible(handle, true);
+      const materials = Array.isArray(handle.material) ? handle.material : [handle.material];
+      for (const material of materials) {
+        if (!material) continue;
+        material.color?.setHex?.(0xffd21a);
+        material.transparent = false;
+        material.opacity = 1;
+        material.depthTest = false;
+        material.depthWrite = false;
+        material.needsUpdate = true;
+      }
     } else if (['X', 'Y', 'Z', 'XYZE'].includes(handle.name)) {
       setRestPoseHandleMaterialVisible(handle, full);
     }
@@ -760,11 +778,19 @@ function syncRestPoseGizmoThickness() {
       ? sourceLine.material[0]
       : sourceLine.material;
 
-    if (sourceMaterial?.color && object.material.color) {
-      object.material.color.copy(sourceMaterial.color);
-    }
-    if (Number.isFinite(sourceMaterial?.opacity)) {
-      object.material.opacity = sourceMaterial.opacity;
+    if (sourceLine.name === 'E') {
+      object.material.color?.setHex?.(0xffd21a);
+      object.material.transparent = false;
+      object.material.opacity = 1;
+      object.material.depthTest = false;
+      object.material.depthWrite = false;
+    } else {
+      if (sourceMaterial?.color && object.material.color) {
+        object.material.color.copy(sourceMaterial.color);
+      }
+      if (Number.isFinite(sourceMaterial?.opacity)) {
+        object.material.opacity = sourceMaterial.opacity;
+      }
     }
   });
 }
@@ -775,7 +801,7 @@ function ensureRestPoseTransformControls() {
   const transform = new TransformControls(sourceView.camera, sourceView.renderer.domElement);
   transform.setMode('rotate');
   transform.setSpace('local');
-  transform.setSize(0.56);
+  transform.setSize(0.44);
 
   const helper = transform.getHelper();
   helper.visible = false;
@@ -795,6 +821,7 @@ function ensureRestPoseTransformControls() {
   // Bring the yellow E ring closer to the bone instead of leaving the
   // default TransformControls outer ring floating far away.
   compactRestPoseGizmoGeometry(transform);
+  installRestPoseGizmoThickness(helper);
 
   updateRestPoseGizmoMode();
 
@@ -834,6 +861,147 @@ function detachRestPoseTransform() {
   sourceView.controls.enabled = true;
 }
 
+function disposeRestPoseTargetOverlay() {
+  const overlay = state.restEditor.targetOverlayRoot;
+  if (!overlay) return;
+
+  sourceView.scene.remove(overlay);
+
+  overlay.traverse(object => {
+    const materials = Array.isArray(object.material)
+      ? object.material
+      : object.material
+        ? [object.material]
+        : [];
+
+    for (const material of materials) {
+      if (material?.userData?.restPoseTargetOverlayMaterial) {
+        material.dispose?.();
+      }
+    }
+  });
+
+  state.restEditor.targetOverlayRoot = null;
+}
+
+function setRestPoseTargetOverlayOpacity(value) {
+  const opacity = THREE.MathUtils.clamp(Number(value) || 0.28, 0.05, 0.75);
+  state.restEditor.targetOverlayOpacity = opacity;
+
+  const overlay = state.restEditor.targetOverlayRoot;
+  if (overlay) {
+    overlay.traverse(object => {
+      if (!object.isMesh && !object.isSkinnedMesh) return;
+      const materials = Array.isArray(object.material) ? object.material : [object.material];
+      for (const material of materials) {
+        if (!material?.userData?.restPoseTargetOverlayMaterial) continue;
+        material.opacity = opacity;
+        material.needsUpdate = true;
+      }
+    });
+  }
+
+  const slider = $('restTargetOverlayOpacity');
+  if (slider && document.activeElement !== slider) slider.value = String(opacity);
+  const valueLabel = $('restTargetOverlayOpacityValue');
+  if (valueLabel) valueLabel.textContent = `${Math.round(opacity * 100)}%`;
+}
+
+function alignRestPoseTargetOverlay(overlay) {
+  const sourceRoot = state.source.displayRoot || state.source.root;
+  if (!sourceRoot || !overlay) return;
+
+  sourceRoot.updateMatrixWorld(true);
+  overlay.updateMatrixWorld(true);
+
+  const sourceBox = new THREE.Box3().setFromObject(sourceRoot);
+  const targetBox = new THREE.Box3().setFromObject(overlay);
+  if (sourceBox.isEmpty() || targetBox.isEmpty()) return;
+
+  const sourceCenter = sourceBox.getCenter(new THREE.Vector3());
+  const targetCenter = targetBox.getCenter(new THREE.Vector3());
+
+  // Preserve the Target's real scale. Only align floor + horizontal center so
+  // pose differences are easy to compare and proportions are not falsified.
+  overlay.position.x += sourceCenter.x - targetCenter.x;
+  overlay.position.z += sourceCenter.z - targetCenter.z;
+  overlay.position.y += sourceBox.min.y - targetBox.min.y;
+  overlay.updateMatrixWorld(true);
+}
+
+function rebuildRestPoseTargetOverlay() {
+  disposeRestPoseTargetOverlay();
+
+  if (
+    !state.restEditor.targetOverlayEnabled ||
+    !state.source.root ||
+    !state.target.root ||
+    state.workspaceView !== 'restpose'
+  ) {
+    return;
+  }
+
+  // Target is already restored to neutral Rest when entering this workspace.
+  updateSlotWorld(state.target);
+
+  const targetVisual = state.target.displayRoot || state.target.root;
+  const overlay = cloneSkeleton(targetVisual);
+  overlay.name = 'RestPose_Target_Overlay';
+  overlay.userData.restPoseTargetOverlay = true;
+
+  overlay.traverse(object => {
+    if (object.isMesh || object.isSkinnedMesh) {
+      const material = new THREE.MeshBasicMaterial({
+        color: 0x63a7ff,
+        transparent: true,
+        opacity: state.restEditor.targetOverlayOpacity,
+        depthTest: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1
+      });
+      material.userData.restPoseTargetOverlayMaterial = true;
+      object.material = material;
+      object.renderOrder = 35;
+      object.frustumCulled = false;
+      object.raycast = () => {};
+    } else if (object.isLine || object.isLineSegments || object.isPoints) {
+      // Do not bring any FBX line/helper artifacts into the overlay.
+      object.visible = false;
+    }
+  });
+
+  sourceView.scene.add(overlay);
+  alignRestPoseTargetOverlay(overlay);
+  state.restEditor.targetOverlayRoot = overlay;
+  setRestPoseTargetOverlayOpacity(state.restEditor.targetOverlayOpacity);
+}
+
+function setRestPoseTargetOverlayEnabled(enabled) {
+  state.restEditor.targetOverlayEnabled = !!enabled;
+
+  if (state.restEditor.targetOverlayEnabled) {
+    rebuildRestPoseTargetOverlay();
+  } else {
+    disposeRestPoseTargetOverlay();
+  }
+
+  const button = $('toggleRestTargetOverlay');
+  if (button) {
+    button.classList.toggle('active', state.restEditor.targetOverlayEnabled);
+    button.setAttribute('aria-pressed', state.restEditor.targetOverlayEnabled ? 'true' : 'false');
+    button.textContent = state.restEditor.targetOverlayEnabled
+      ? 'Target Overlay · ON'
+      : 'Target Overlay';
+  }
+
+  const slider = $('restTargetOverlayOpacity');
+  if (slider) slider.disabled = !state.restEditor.targetOverlayEnabled || !state.target.root;
+}
+
 function updateRestPoseUi() {
   const select = $('restBoneSelect');
   const entries = availableRestPoseBones();
@@ -869,6 +1037,30 @@ function updateRestPoseUi() {
   if ($('resetRestBone')) $('resetRestBone').disabled = !hasSelection;
   if ($('resetRestPose')) $('resetRestPose').disabled = !hasSource;
   if ($('commitRestPose')) $('commitRestPose').disabled = !hasSource;
+
+  const hasTarget = !!state.target.root;
+  const overlayButton = $('toggleRestTargetOverlay');
+  if (overlayButton) {
+    overlayButton.disabled = !(hasSource && hasTarget);
+    overlayButton.classList.toggle('active', !!state.restEditor.targetOverlayEnabled);
+    overlayButton.setAttribute('aria-pressed', state.restEditor.targetOverlayEnabled ? 'true' : 'false');
+    overlayButton.textContent = state.restEditor.targetOverlayEnabled
+      ? 'Target Overlay · ON'
+      : 'Target Overlay';
+  }
+
+  const overlayOpacity = $('restTargetOverlayOpacity');
+  if (overlayOpacity) {
+    overlayOpacity.disabled = !(hasSource && hasTarget && state.restEditor.targetOverlayEnabled);
+    if (document.activeElement !== overlayOpacity) {
+      overlayOpacity.value = String(state.restEditor.targetOverlayOpacity);
+    }
+  }
+  const overlayOpacityValue = $('restTargetOverlayOpacityValue');
+  if (overlayOpacityValue) {
+    overlayOpacityValue.textContent = `${Math.round(state.restEditor.targetOverlayOpacity * 100)}%`;
+  }
+
   updateRestPoseUndoUi();
 
   const sensitivityInput = $('restSensitivity');
@@ -1028,6 +1220,10 @@ function enterRestPoseWorkspace() {
     updateSlotWorld(state.target);
   }
 
+  if (state.restEditor.targetOverlayEnabled) {
+    rebuildRestPoseTargetOverlay();
+  }
+
   updateRestPoseUi();
   const entries = availableRestPoseBones();
   const selected = entries.some(entry => entry.name === state.restEditor.selectedBone)
@@ -1038,6 +1234,7 @@ function enterRestPoseWorkspace() {
 
 function leaveRestPoseWorkspace() {
   detachRestPoseTransform();
+  disposeRestPoseTargetOverlay();
   if (state.source.root) restoreRest(state.source);
 }
 
@@ -1286,6 +1483,10 @@ function disposeObject(root) {
 }
 
 function clearSlot(slot, view) {
+  if (state.restEditor?.targetOverlayRoot) {
+    disposeRestPoseTargetOverlay();
+  }
+
   if (slot.kind === 'target' && slot.displayRoot) {
     const baseY = slot.displayRoot.userData?.waltPreviewBaseY;
     if (Number.isFinite(baseY)) slot.displayRoot.position.y = baseY;
@@ -1459,6 +1660,15 @@ async function loadFbx(file, slot, view) {
   }
   updateRestPoseUi();
 
+  if (
+    state.workspaceView === 'restpose' &&
+    state.restEditor.targetOverlayEnabled &&
+    state.source.root &&
+    state.target.root
+  ) {
+    rebuildRestPoseTargetOverlay();
+  }
+
   setStatus('LOCAL · sin subida', 'good');
 
   const bothLoaded = !!state.source.root && !!state.target.root;
@@ -1578,7 +1788,7 @@ async function fetchPresetDefinitionData(id, definition) {
   }
 
   const response = await fetch(
-    definition.path + '?v=20260922-touchguard1',
+    definition.path + '?v=20260922-restoverlay1',
     { cache: 'no-store' }
   );
 
@@ -7076,6 +7286,13 @@ $('restSpaceToggle').onclick = () => {
 $('showFullRestGimbal').onchange = () => {
   state.restEditor.showFullGimbal = $('showFullRestGimbal').checked;
   updateRestPoseGizmoMode();
+};
+$('toggleRestTargetOverlay').onclick = () => {
+  setRestPoseTargetOverlayEnabled(!state.restEditor.targetOverlayEnabled);
+  updateRestPoseUi();
+};
+$('restTargetOverlayOpacity').oninput = () => {
+  setRestPoseTargetOverlayOpacity($('restTargetOverlayOpacity').value);
 };
 $('copyRestBone').onclick = copySelectedRestBone;
 $('undoRestPose').onclick = undoRestPoseEdit;
