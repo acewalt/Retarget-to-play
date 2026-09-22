@@ -7312,11 +7312,19 @@ function updateSidebarAutoPresetVisibility(view = state.workspaceView) {
   if (!wrap) return;
 
   const hide = view === 'mappings';
+
+  // Keep the shortcut physically present in Workspace. Only Mapping collapses
+  // it because Mapping already exposes the same Auto-preset action in its
+  // toolbar.
+  wrap.hidden = false;
   wrap.classList.toggle('workspace-hidden', hide);
   wrap.setAttribute('aria-hidden', hide ? 'true' : 'false');
 
   const button = $('sidebarAutoPreset');
-  if (button) button.tabIndex = hide ? -1 : 0;
+  if (button) {
+    button.hidden = false;
+    button.tabIndex = hide ? -1 : 0;
+  }
 }
 
 function setWorkspaceView(view) {
@@ -7332,7 +7340,6 @@ function setWorkspaceView(view) {
 
   if (previous === 'restpose' && next !== 'restpose') leaveRestPoseWorkspace();
   state.workspaceView = next;
-  updateSidebarAutoPresetVisibility(next);
 
   const workspace = $('mainWorkspace');
   if (workspace) workspace.dataset.view = next;
@@ -7349,6 +7356,8 @@ function setWorkspaceView(view) {
 
   shell?.classList.toggle('animations-focus', isAnimation);
   shell?.classList.toggle('restpose-focus', isRestPose);
+  shell?.classList.toggle('mappings-focus', next === 'mappings');
+  updateSidebarAutoPresetVisibility(next);
 
   if (mappingCard) mappingCard.hidden = next !== 'mappings';
   if (restToolbar) restToolbar.hidden = !isRestPose;
