@@ -331,6 +331,9 @@ const state = {
     targetOverlayEnabled: true,
     targetOverlayOpacity: 0.20,
     targetOverlayRoot: null,
+    jointMarkers: [],
+    jointMarkerTexture: null,
+    hoveredMarkerBone: null,
     dragBaseQuaternion: null,
     applyingSensitivity: false
   }
@@ -1002,6 +1005,225 @@ function setRestPoseTargetOverlayEnabled(enabled) {
   if (slider) slider.disabled = !state.restEditor.targetOverlayEnabled || !state.target.root;
 }
 
+function disposeRestPoseJointMarkers() {
+  for (const marker of state.restEditor.jointMarkers || []) {
+    sourceView.scene.remove(marker);
+    marker.material?.dispose?.();
+  }
+
+  state.restEditor.jointMarkers = [];
+
+  if (state.restEditor.jointMarkerTexture) {
+    state.restEditor.jointMarkerTexture.dispose?.();
+    state.restEditor.jointMarkerTexture = null;
+  }
+
+  state.restEditor.hoveredMarkerBone = null;
+}
+
+function makeRestPoseJointMarkerTexture() {
+  const size = 128;
+  const canvas = document.createElement('canvas');
+  canvas.width = size;
+  canvas.height = size;
+
+  const context = canvas.getContext('2d');
+  if (!context) return null;
+
+  context.clearRect(0, 0, size, size);
+
+  // White artwork is tinted by SpriteMaterial.color.
+  context.beginPath();
+  context.arc(size / 2, size / 2, 36, 0, Math.PI * 2);
+  context.fillStyle = 'rgba(255,255,255,.12)';
+  context.fill();
+  context.lineWidth = 11;
+  context.strokeStyle = 'rgba(255,255,255,1)';
+  context.stroke();
+
+  context.beginPath();
+  context.arc(size / 2, size / 2, 7, 0, Math.PI * 2);
+  context.fillStyle = 'rgba(255,255,255,.95)';
+  context.fill();
+
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.needsUpdate = true;
+  return texture;
+}
+
+function updateRestPoseJointMarkerStyles() {
+  const selected = state.restEditor.selectedBone;
+  const hovered = state.restEditor.hoveredMarkerBone;
+
+  for (const marker of state.restEditor.jointMarkers || []) {
+    const boneName = marker.userData?.boneName;
+    const isSelected = boneName === selected;
+    const isHovered = !isSelected && boneName === hovered;
+
+    marker.material.color.setHex(
+      isSelected
+        ? 0xffd21a
+        : isHovered
+          ? 0x78d8ff
+          : 0x4b9dff
+    );
+
+    marker.material.opacity = isSelected ? 1 : isHovered ? 0.98 : 0.9;
+    marker.material.needsUpdate = true;
+  }
+}
+
+function buildRestPoseJointMarkers() {
+  disposeRestPoseJointMarkers();
+
+  if (state.workspaceView !== 'restpose' || !state.source.root) return;
+
+  const texture = makeRestPoseJointMarkerTexture();
+  if (!texture) return;
+
+  state.restEditor.jointMarkerTexture = texture;
+
+  for (const entry of availableRestPoseBones()) {
+    const bone = state.source.bones.get(entry.name);
+    if (!bone) continue;
+
+    const material = new THREE.SpriteMaterial({
+      map: texture,
+      color: 0x4b9dff,
+      transparent: true,
+      opacity: 0.9,
+      depthTest: false,
+      depthWrite: false,
+      toneMapped: false,
+      sizeAttenuation: true
+    });
+
+    const marker = new THREE.Sprite(material);
+    marker.name = `RestPoseJointMarker:${entry.role}`;
+    marker.renderOrder = 1400;
+    marker.frustumCulled = false;
+    marker.userData.restPoseJointMarker = true;
+    marker.userData.boneName = entry.name;
+    marker.userData.role = entry.role;
+    marker.userData.label = entry.label;
+
+    // Selection uses screen-space hit testing below, so the sprite itself
+    // never steals TransformControls raycasts.
+    marker.raycast = () => {};
+
+    sourceView.scene.add(marker);
+    state.restEditor.jointMarkers.push(marker);
+  }
+
+  updateRestPoseJointMarkers();
+  updateRestPoseJointMarkerStyles();
+}
+
+function updateRestPoseJointMarkers() {
+  if (state.workspaceView !== 'restpose' || !state.source.root) return;
+  if (!state.restEditor.jointMarkers?.length) return;
+
+  updateSlotWorld(state.source);
+
+  const cameraWorld = sourceView.camera.getWorldPosition(new THREE.Vector3());
+  const viewportHeight = Math.max(1, sourceView.renderer.domElement.clientHeight);
+  const fovRadians = THREE.MathUtils.degToRad(sourceView.camera.fov);
+
+  for (const marker of state.restEditor.jointMarkers) {
+    const bone = state.source.bones.get(marker.userData?.boneName);
+    if (!bone) {
+      marker.visible = false;
+      continue;
+    }
+
+    marker.visible = true;
+
+    const world = bone.getWorldPosition(new THREE.Vector3());
+    marker.position.copy(world);
+
+    // Keep the visual marker at a near-constant pixel size while zooming.
+    const distance = Math.max(0.01, cameraWorld.distanceTo(world));
+    const worldHeight = 2 * distance * Math.tan(fovRadians * 0.5);
+    const isSelected = marker.userData.boneName === state.restEditor.selectedBone;
+    const pixels = isSelected
+      ? (window.innerWidth <= 760 ? 22 : 19)
+      : (window.innerWidth <= 760 ? 19 : 16);
+    const worldSize = worldHeight * (pixels / viewportHeight);
+
+    marker.scale.set(worldSize, worldSize, 1);
+  }
+}
+
+function pickRestPoseJointMarker(clientX, clientY, hover = false) {
+  if (state.workspaceView !== 'restpose' || !state.source.root) return null;
+  if (!state.restEditor.jointMarkers?.length) return null;
+
+  const rect = sourceView.renderer.domElement.getBoundingClientRect();
+  if (!rect.width || !rect.height) return null;
+
+  const point = {
+    x: clientX - rect.left,
+    y: clientY - rect.top
+  };
+
+  const coarsePointer =
+    window.matchMedia?.('(pointer: coarse)')?.matches ||
+    navigator.maxTouchPoints > 0;
+
+  const radius = hover
+    ? 19
+    : coarsePointer
+      ? 32
+      : 25;
+
+  let best = null;
+
+  for (const marker of state.restEditor.jointMarkers) {
+    if (!marker.visible) continue;
+
+    const world = marker.getWorldPosition(new THREE.Vector3());
+    const projected = projectRestPosePoint(world, rect);
+    const distance = Math.hypot(
+      point.x - projected.x,
+      point.y - projected.y
+    );
+
+    if (distance <= radius && (!best || distance < best.distance)) {
+      best = { marker, distance };
+    }
+  }
+
+  return best?.marker || null;
+}
+
+function handleRestPoseJointMarkerHover(event) {
+  if (state.workspaceView !== 'restpose') return;
+  if (event.pointerType === 'touch') return;
+  if (state.restEditor.transform?.dragging) return;
+
+  const marker = pickRestPoseJointMarker(event.clientX, event.clientY, true);
+  const boneName = marker?.userData?.boneName || null;
+
+  if (boneName !== state.restEditor.hoveredMarkerBone) {
+    state.restEditor.hoveredMarkerBone = boneName;
+    updateRestPoseJointMarkerStyles();
+  }
+
+  sourceView.renderer.domElement.style.cursor = marker ? 'pointer' : 'crosshair';
+}
+
+function clearRestPoseJointMarkerHover() {
+  if (state.restEditor.hoveredMarkerBone) {
+    state.restEditor.hoveredMarkerBone = null;
+    updateRestPoseJointMarkerStyles();
+  }
+
+  if (state.workspaceView === 'restpose') {
+    sourceView.renderer.domElement.style.cursor = 'crosshair';
+  }
+}
+
 function updateRestPoseUi() {
   const select = $('restBoneSelect');
   const entries = availableRestPoseBones();
@@ -1083,6 +1305,8 @@ function updateRestPoseUi() {
         ? `Rest personalizada activa para el próximo Transfer${selectedText}.`
         : `Rota brazos, codos, muslos o rodillas${selectedText}.`;
   }
+
+  updateRestPoseJointMarkerStyles();
 }
 
 function selectRestPoseBone(name) {
@@ -1224,6 +1448,7 @@ function enterRestPoseWorkspace() {
     rebuildRestPoseTargetOverlay();
   }
 
+  buildRestPoseJointMarkers();
   updateRestPoseUi();
   const entries = availableRestPoseBones();
   const selected = entries.some(entry => entry.name === state.restEditor.selectedBone)
@@ -1235,6 +1460,7 @@ function enterRestPoseWorkspace() {
 function leaveRestPoseWorkspace() {
   detachRestPoseTransform();
   disposeRestPoseTargetOverlay();
+  disposeRestPoseJointMarkers();
   if (state.source.root) restoreRest(state.source);
 }
 
@@ -1263,6 +1489,12 @@ function projectRestPosePoint(world, rect) {
 function pickRestPoseBoneFromViewport(event) {
   if (state.workspaceView !== 'restpose' || !state.source.root) return;
   if (state.restEditor.transform?.dragging) return;
+
+  const marker = pickRestPoseJointMarker(event.clientX, event.clientY, false);
+  if (marker?.userData?.boneName) {
+    selectRestPoseBone(marker.userData.boneName);
+    return;
+  }
 
   const rect = sourceView.renderer.domElement.getBoundingClientRect();
   const click = { x: event.clientX - rect.left, y: event.clientY - rect.top };
@@ -1293,6 +1525,8 @@ function pickRestPoseBoneFromViewport(event) {
 }
 
 sourceView.renderer.domElement.addEventListener('click', pickRestPoseBoneFromViewport);
+sourceView.renderer.domElement.addEventListener('pointermove', handleRestPoseJointMarkerHover);
+sourceView.renderer.domElement.addEventListener('pointerleave', clearRestPoseJointMarkerHover);
 
 function applyViewportTheme(view, theme = currentTheme()) {
   const palette = viewportPalette(theme);
@@ -1486,6 +1720,9 @@ function clearSlot(slot, view) {
   if (state.restEditor?.targetOverlayRoot) {
     disposeRestPoseTargetOverlay();
   }
+  if (state.restEditor?.jointMarkers?.length) {
+    disposeRestPoseJointMarkers();
+  }
 
   if (slot.kind === 'target' && slot.displayRoot) {
     const baseY = slot.displayRoot.userData?.waltPreviewBaseY;
@@ -1660,13 +1897,15 @@ async function loadFbx(file, slot, view) {
   }
   updateRestPoseUi();
 
-  if (
-    state.workspaceView === 'restpose' &&
-    state.restEditor.targetOverlayEnabled &&
-    state.source.root &&
-    state.target.root
-  ) {
-    rebuildRestPoseTargetOverlay();
+  if (state.workspaceView === 'restpose' && state.source.root) {
+    buildRestPoseJointMarkers();
+
+    if (
+      state.restEditor.targetOverlayEnabled &&
+      state.target.root
+    ) {
+      rebuildRestPoseTargetOverlay();
+    }
   }
 
   setStatus('LOCAL · sin subida', 'good');
@@ -7416,6 +7655,7 @@ function animate(now) {
   applyTargetRigRuntime();
   updateRigOverlays();
   syncRestPoseGizmoThickness();
+  updateRestPoseJointMarkers();
 
   sourceView.controls.update();
   targetView.controls.update();
