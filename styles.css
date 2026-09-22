@@ -682,3 +682,66 @@ h2,p{margin:0}
   .restpose-overlay-opacity{flex:1 1 140px;min-width:140px}
   .restpose-overlay-opacity input[type="range"]{width:100%}
 }
+
+
+/* Sidebar Auto-preset shortcut.
+   It is useful from Workspace, but Mapping already has the same action in its
+   own toolbar. Collapse it there with a real transition instead of display:none. */
+.mapping-settings-heading{
+  display:flex;
+  align-items:center;
+  justify-content:space-between;
+  gap:10px;
+}
+.mapping-settings-heading>div:first-child{
+  min-width:0;
+}
+.sidebar-auto-preset-wrap{
+  width:126px;
+  max-width:126px;
+  min-width:0;
+  overflow:hidden;
+  opacity:1;
+  transform:translateX(0) scale(1);
+  transform-origin:right center;
+  transition:
+    width .36s cubic-bezier(.16,.84,.22,1),
+    max-width .36s cubic-bezier(.16,.84,.22,1),
+    opacity .22s ease,
+    transform .36s cubic-bezier(.16,.84,.22,1);
+  will-change:width,max-width,opacity,transform;
+}
+.sidebar-auto-preset{
+  width:126px;
+  min-height:32px;
+  padding:6px 10px;
+  white-space:nowrap;
+  font-size:9px;
+  font-weight:800;
+}
+.sidebar-auto-preset.is-busy{
+  cursor:progress;
+}
+.sidebar-auto-preset-wrap.workspace-hidden{
+  width:0;
+  max-width:0;
+  opacity:0;
+  transform:translateX(12px) scale(.9);
+  pointer-events:none;
+}
+
+@media(prefers-reduced-motion:reduce){
+  .sidebar-auto-preset-wrap{transition:none}
+}
+
+@media(max-width:760px){
+  .sidebar-auto-preset-wrap{
+    width:118px;
+    max-width:118px;
+  }
+  .sidebar-auto-preset{width:118px}
+  .sidebar-auto-preset-wrap.workspace-hidden{
+    width:0;
+    max-width:0;
+  }
+}
