@@ -225,11 +225,62 @@ const LOGICAL_CHAINS = {
     ['DEF-Hips', 'DEF-Thigh_1.R', 'DEF-Knee_1.R', 'DEF-Foot.R', 'DEF-Toes.R']
   ],
   rigify: [
-    ['torso', 'spine_fk', 'spine_fk.001', 'spine_fk.002', 'spine_fk.003', 'neck', 'head'],
-    ['spine_fk.003', 'shoulder.L', 'upper_arm_fk.L', 'forearm_fk.L', 'hand_fk.L'],
-    ['spine_fk.003', 'shoulder.R', 'upper_arm_fk.R', 'forearm_fk.R', 'hand_fk.R'],
-    ['torso', 'thigh_fk.L', 'shin_fk.L', 'foot_fk.L', 'toe_fk.L'],
-    ['torso', 'thigh_fk.R', 'shin_fk.R', 'foot_fk.R', 'toe_fk.R']
+    // The viewport mesh is deformed by DEF bones, not by Rigify's controller
+    // hierarchy. Drawing the FK/MCH controls made the blue skeleton appear
+    // detached from an otherwise-correct preview. Follow the driven skeleton.
+    [
+      'DEF-spine',
+      'DEF-spine.001',
+      'DEF-spine.002',
+      'DEF-spine.003',
+      'DEF-spine.004',
+      'DEF-spine.005',
+      'DEF-spine.006'
+    ],
+
+    [
+      'DEF-spine.006',
+      'DEF-shoulder.L',
+      'DEF-upper_arm.L',
+      'DEF-upper_arm.L.001',
+      'DEF-forearm.L',
+      'DEF-forearm.L.001',
+      'DEF-hand.L'
+    ],
+    [
+      'DEF-spine.006',
+      'DEF-shoulder.R',
+      'DEF-upper_arm.R',
+      'DEF-upper_arm.R.001',
+      'DEF-forearm.R',
+      'DEF-forearm.R.001',
+      'DEF-hand.R'
+    ],
+
+    [
+      'DEF-spine',
+      'DEF-thigh.L',
+      'DEF-thigh.L.001',
+      'DEF-shin.L',
+      'DEF-shin.L.001',
+      'DEF-foot.L',
+      'DEF-toe.L'
+    ],
+    [
+      'DEF-spine',
+      'DEF-thigh.R',
+      'DEF-thigh.R.001',
+      'DEF-shin.R',
+      'DEF-shin.R.001',
+      'DEF-foot.R',
+      'DEF-toe.R'
+    ],
+
+    // Small weighted pelvis/chest helpers are also part of the visible mesh.
+    ['DEF-spine', 'DEF-pelvis.L'],
+    ['DEF-spine', 'DEF-pelvis.R'],
+    ['DEF-spine.006', 'DEF-breast.L'],
+    ['DEF-spine.006', 'DEF-breast.R']
   ]
 };
 
