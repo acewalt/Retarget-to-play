@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260922-restoverlay2" />
+  <link rel="stylesheet" href="./styles.css?v=20260922-sideautopreset1" />
   <script type="importmap">
   {
     "imports": {
@@ -256,7 +256,12 @@
           </section>
 
           <section id="mappingSettingsSection" class="settings-section conditional-feature" hidden>
-            <div class="settings-heading"><div><span class="eyebrow">MAPPING</span><h2>Preset</h2></div></div>
+            <div class="settings-heading mapping-settings-heading">
+              <div><span class="eyebrow">MAPPING</span><h2>Preset</h2></div>
+              <div id="sidebarAutoPresetWrap" class="sidebar-auto-preset-wrap">
+                <button id="sidebarAutoPreset" class="soft-primary sidebar-auto-preset" type="button">✦ Auto-preset</button>
+              </div>
+            </div>
             <label class="field-label" for="preset">Skeleton preset</label>
             <select id="preset">
               <option value="none" selected>— Selecciona un preset —</option>
@@ -373,6 +378,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260922-transferresize1"></script>
+  <script type="module" src="./app.js?v=20260922-sideautopreset1"></script>
 </body>
 </html>
