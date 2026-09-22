@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-autopresetbutton1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-touchguard1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -1578,7 +1578,7 @@ async function fetchPresetDefinitionData(id, definition) {
   }
 
   const response = await fetch(
-    definition.path + '?v=20260922-autopresetbutton1',
+    definition.path + '?v=20260922-touchguard1',
     { cache: 'no-store' }
   );
 
@@ -6918,6 +6918,21 @@ const loadTargetFile = file =>
 // Todo el módulo es zona de drop: cabecera, viewport y footer.
 bindDropModule($('sourceModule'), $('sourceFile'), loadSourceFile, 'Source');
 bindDropModule($('targetModule'), $('targetFile'), loadTargetFile, 'Target');
+
+// Safari/iOS can enter text-selection mode from an imprecise long press or
+// drag over the editor. Block selection in UI chrome, but keep it available
+// inside fields/logs where selecting text is intentional.
+const appRoot = document.querySelector('.app');
+appRoot?.addEventListener('selectstart', event => {
+  const target = event.target instanceof Element ? event.target : null;
+  if (!target) return;
+
+  const editable = target.closest(
+    'input, textarea, select, .diagnostics pre, .stats, [contenteditable="true"]'
+  );
+
+  if (!editable) event.preventDefault();
+});
 
 $('sourceButton').onclick = () => $('sourceFile').click();
 $('targetButton').onclick = () => $('targetFile').click();
