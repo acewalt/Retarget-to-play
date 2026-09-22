@@ -3,7 +3,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { clone as cloneSkeleton } from 'three/addons/utils/SkeletonUtils.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-restoverlay1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-restoverlay2';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -328,8 +328,8 @@ const state = {
     undoStack: [],
     sensitivity: 0.5,
     showFullGimbal: false,
-    targetOverlayEnabled: false,
-    targetOverlayOpacity: 0.28,
+    targetOverlayEnabled: true,
+    targetOverlayOpacity: 0.20,
     targetOverlayRoot: null,
     dragBaseQuaternion: null,
     applyingSensitivity: false
@@ -885,7 +885,7 @@ function disposeRestPoseTargetOverlay() {
 }
 
 function setRestPoseTargetOverlayOpacity(value) {
-  const opacity = THREE.MathUtils.clamp(Number(value) || 0.28, 0.05, 0.75);
+  const opacity = THREE.MathUtils.clamp(Number(value) || 0.20, 0.05, 0.75);
   state.restEditor.targetOverlayOpacity = opacity;
 
   const overlay = state.restEditor.targetOverlayRoot;
@@ -1788,7 +1788,7 @@ async function fetchPresetDefinitionData(id, definition) {
   }
 
   const response = await fetch(
-    definition.path + '?v=20260922-restoverlay1',
+    definition.path + '?v=20260922-restoverlay2',
     { cache: 'no-store' }
   );
 
