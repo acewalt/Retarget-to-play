@@ -383,3 +383,206 @@ h2,p{margin:0}
 @media(prefers-reduced-motion:reduce){
   .quick-ik-step{animation:none!important}
 }
+
+
+/* -------------------------------------------------------------------------
+   Mobile workspace
+   Keep phone layouts readable and touch-first. These rules intentionally live
+   at the end of the stylesheet so they win over the desktop workspace-specific
+   selectors declared after the original mobile breakpoint.
+   ------------------------------------------------------------------------- */
+@media (max-width:760px){
+  html,body{width:100%;max-width:100%;overflow-x:hidden}
+  body{overflow-y:auto}
+  .app{height:auto;min-height:100vh;display:block}
+
+  .topbar{
+    display:flex;
+    flex-wrap:wrap;
+    align-items:center;
+    gap:8px 10px;
+    min-height:0;
+    padding:10px 12px 8px;
+  }
+  .brand{flex:1 1 auto;gap:9px}
+  .brand-mark{width:34px;height:30px}
+  .brand-mark span{width:9px;height:24px}
+  .brand-mark span:nth-child(2){height:18px}
+  .brand-mark span:nth-child(3){height:12px}
+  .brand-copy strong{font-size:15px;line-height:1.2}
+  .brand-copy small{font-size:9px}
+  .top-actions{flex:0 0 auto;gap:6px}
+  .status-pill{height:30px;padding:0 9px;font-size:9px}
+  .theme-toggle{width:34px;height:34px;min-height:34px}
+
+  /* Mobile still needs access to the workbenches. */
+  .topnav{
+    order:3;
+    display:flex;
+    width:100%;
+    height:auto;
+    justify-content:flex-start;
+    gap:4px;
+    overflow-x:auto;
+    overscroll-behavior-x:contain;
+    scrollbar-width:none;
+    padding-top:4px;
+  }
+  .topnav::-webkit-scrollbar{display:none}
+  .nav-item{
+    flex:0 0 auto;
+    height:38px;
+    min-height:38px;
+    padding:0 11px;
+    border-radius:9px;
+    font-size:10px;
+  }
+  .nav-item.active{background:var(--primary-soft)}
+  .nav-item.active:after{left:9px;right:9px;height:2px}
+
+  .workspace-shell{display:block;min-width:0}
+  .workflow-sidebar{display:none}
+  .main-workspace{
+    width:100%;
+    min-width:0;
+    padding:10px;
+    gap:10px;
+    overflow:visible;
+  }
+
+  /* Source and Target must never be squeezed side-by-side on a phone. */
+  .retarget-stage,
+  .main-workspace[data-view="workspace"] .retarget-stage,
+  .main-workspace[data-view="workspace"] .retarget-stage.no-transfer-bridge,
+  .main-workspace[data-view="animations"] .retarget-stage,
+  .main-workspace[data-view="restpose"] .retarget-stage,
+  .main-workspace[data-view="export"] .retarget-stage{
+    grid-template-columns:minmax(0,1fr)!important;
+    gap:10px;
+    width:100%;
+  }
+  .retarget-stage.no-transfer-bridge .source-card,
+  .retarget-stage.no-transfer-bridge .target-card{min-width:0;width:100%}
+
+  .viewport-card{grid-template-rows:48px auto auto;border-radius:14px}
+  .card-head{padding:9px 11px}
+  .card-head h2{font-size:13px;line-height:1.2}
+  .eyebrow{font-size:8px}
+  .format-badge{font-size:8px;padding:3px 6px}
+  .viewport-wrap,
+  .main-workspace[data-view="animations"] .viewport-wrap,
+  .main-workspace[data-view="restpose"] .viewport-wrap,
+  .main-workspace[data-view="export"] .viewport-wrap{
+    min-height:0;
+    height:auto;
+    aspect-ratio:4/3;
+  }
+  .viewport-tools{top:9px;left:9px}
+  .viewport-tool{width:32px;height:32px;min-height:32px}
+  .viewport-label{left:9px;right:9px;bottom:9px;padding:7px 9px;font-size:9px}
+
+  .viewport-foot{
+    grid-template-columns:1fr;
+    gap:6px;
+    padding:7px 9px 9px;
+  }
+  .viewport-foot .secondary-button{width:100%;min-height:42px}
+  /* Drag/drop copy is desktop-oriented and wastes scarce phone width. */
+  .viewport-foot .dropzone.compact{display:none}
+
+  .retarget-bridge{
+    width:100%;
+    padding:2px 0 4px;
+    gap:6px;
+  }
+  .bridge-arrow{font-size:18px;transform:rotate(90deg)}
+  .retarget-button{width:min(100%,320px);min-height:46px;border-radius:11px}
+  .retarget-bridge>small{font-size:8px}
+
+  .timeline-card{padding-bottom:10px;border-radius:14px}
+  .timeline-title{padding:10px 11px 5px;align-items:flex-end}
+  .timeline-title h2{font-size:13px}
+  .timeline-title>span{font-size:9px}
+  .timeline{
+    display:grid;
+    grid-template-columns:40px minmax(0,1fr) auto;
+    grid-template-areas:
+      "play range range"
+      "mirror mirror fps";
+    gap:8px 9px;
+    padding:4px 11px 2px;
+    align-items:center;
+  }
+  .play-button{grid-area:play;width:40px;height:40px;min-height:40px}
+  .timeline>input[type="range"]{grid-area:range;min-width:0;width:100%}
+  .inline-control{
+    grid-area:mirror;
+    min-width:0;
+    white-space:normal;
+    font-size:9px;
+    gap:6px;
+  }
+  .fps-control{grid-area:fps;font-size:9px;gap:5px}
+  .fps-control input{width:54px;height:34px;min-width:54px}
+
+  /* Settings become a normal document section instead of a sticky desktop rail. */
+  .settings-panel{
+    width:100%;
+    min-height:0;
+    border-left:0;
+    border-top:1px solid var(--border);
+    display:block;
+  }
+  .settings-scroll{display:block;overflow:visible}
+  .settings-section{padding:14px 12px}
+  .export-sticky{
+    position:static;
+    padding:12px;
+    box-shadow:none;
+  }
+  .export-sticky-copy{align-items:center;margin-bottom:7px}
+  .export-sticky-copy strong{font-size:9px;max-width:55%}
+  .export-button{min-height:42px;font-size:11px;padding:8px 10px}
+  .stats{max-height:64px;font-size:8px}
+
+  .mapping-card{border-radius:14px}
+  .section-head{padding:10px 11px;min-height:54px}
+  .mapping-summary{gap:6px}
+  .mapping-toolbar{
+    grid-template-columns:1fr 1fr;
+    gap:7px;
+    padding:9px 10px;
+  }
+  .mapping-toolbar .search-field{grid-column:1/-1}
+  .mapping-toolbar button{min-width:0;padding:8px 9px;font-size:9px}
+  .mapping-table-head{grid-template-columns:minmax(0,1fr) 18px minmax(0,1fr) 30px;padding:7px 10px}
+  .mapping-content{padding:0 6px}
+  .map-row{grid-template-columns:minmax(0,1fr) 18px minmax(0,1fr) 30px;gap:4px;padding:6px 3px}
+  .map-row select{font-size:9px;padding:0 7px}
+  .mapping-footer{padding:8px 10px;flex-wrap:wrap}
+
+  .main-workspace[data-view="mappings"] .mapping-card{min-height:0}
+  .main-workspace[data-view="mappings"] .bone-map{max-height:none}
+  .main-workspace[data-view="animations"]{padding:10px;overflow:visible}
+  .main-workspace[data-view="animations"] .viewport-card{height:auto;grid-template-rows:48px auto}
+  .main-workspace[data-view="animations"] .viewport-wrap{height:auto;aspect-ratio:4/3}
+  .main-workspace[data-view="restpose"]{padding:10px;overflow:visible}
+}
+
+@media (max-width:430px){
+  .topbar{padding-left:10px;padding-right:10px}
+  .brand-copy strong{font-size:14px}
+  .brand-copy small{font-size:8.5px}
+  .status-pill{max-width:138px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .main-workspace{padding:8px}
+  .viewport-wrap,
+  .main-workspace[data-view="animations"] .viewport-wrap,
+  .main-workspace[data-view="restpose"] .viewport-wrap,
+  .main-workspace[data-view="export"] .viewport-wrap{aspect-ratio:1/1}
+  .mapping-toolbar{grid-template-columns:1fr}
+  .mapping-toolbar .search-field{grid-column:1}
+  .mapping-toolbar button{width:100%}
+  .timeline{grid-template-columns:40px minmax(0,1fr) auto}
+  .inline-control span{line-height:1.2}
+  .export-sticky-copy{gap:6px}
+}
