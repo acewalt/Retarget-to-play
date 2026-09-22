@@ -7014,6 +7014,78 @@ function updateStats() {
 }
 
 
+function captureTransferStageLayout(stage) {
+  const sourceCard = stage.querySelector('.source-card');
+  const targetCard = stage.querySelector('.target-card');
+  const timeline = stage.parentElement?.querySelector('.timeline-card');
+
+  const capture = element => element && !element.hidden
+    ? { element, rect: element.getBoundingClientRect() }
+    : null;
+
+  return [
+    capture(sourceCard),
+    capture(targetCard),
+    capture(timeline)
+  ].filter(Boolean);
+}
+
+function animateTransferStageLayout(beforeLayout) {
+  const duration = 560;
+  const easing = 'cubic-bezier(.16,.84,.22,1)';
+
+  for (const item of beforeLayout) {
+    const element = item.element;
+    const before = item.rect;
+    const after = element.getBoundingClientRect();
+
+    if (!after.width || !after.height) continue;
+
+    const dx = before.left - after.left;
+    const dy = before.top - after.top;
+
+    const isViewportCard =
+      element.classList.contains('source-card') ||
+      element.classList.contains('target-card');
+
+    const sx = isViewportCard ? before.width / after.width : 1;
+    const sy = isViewportCard ? before.height / after.height : 1;
+
+    const effectivelySame =
+      Math.abs(dx) < 0.5 &&
+      Math.abs(dy) < 0.5 &&
+      Math.abs(sx - 1) < 0.002 &&
+      Math.abs(sy - 1) < 0.002;
+
+    if (effectivelySame) continue;
+
+    for (const animation of element.getAnimations()) {
+      if (animation.id === 'transfer-layout-flip') animation.cancel();
+    }
+
+    const animation = element.animate(
+      [
+        {
+          transformOrigin: '0 0',
+          transform: `translate(${dx}px,${dy}px) scale(${sx},${sy})`
+        },
+        {
+          transformOrigin: '0 0',
+          transform: 'translate(0,0) scale(1,1)'
+        }
+      ],
+      {
+        duration,
+        easing,
+        fill: 'both'
+      }
+    );
+
+    animation.id = 'transfer-layout-flip';
+    animation.addEventListener('finish', () => animation.cancel(), { once: true });
+  }
+}
+
 function updateTransferBridgeVisibility(animate = false) {
   const bridge = $('retargetBridge') || document.querySelector('.retarget-bridge');
   const stage = bridge?.closest('.retarget-stage') || document.querySelector('.retarget-stage');
@@ -7029,21 +7101,49 @@ function updateTransferBridgeVisibility(animate = false) {
     hasPreset &&
     rigsMatchPreset;
 
+  const initialized = stage.dataset.transferLayoutInitialized === 'true';
+  const previousShown = initialized
+    ? stage.dataset.transferBridgeShown === 'true'
+    : (!stage.classList.contains('no-transfer-bridge') && !bridge.hidden);
+
+  const layoutChanged = previousShown !== shouldShow;
+  const reducedMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches;
+  const canAnimateLayout =
+    initialized &&
+    layoutChanged &&
+    state.workspaceView === 'workspace' &&
+    window.innerWidth > 760 &&
+    !reducedMotion;
+
+  const beforeLayout = canAnimateLayout
+    ? captureTransferStageLayout(stage)
+    : null;
+
+  // For show, make the bridge participate in layout before removing the
+  // no-bridge grid. For hide, remove it from layout in the same frame.
+  if (shouldShow) bridge.hidden = false;
   stage.classList.toggle('no-transfer-bridge', !shouldShow);
+  if (!shouldShow) bridge.hidden = true;
+
+  stage.dataset.transferLayoutInitialized = 'true';
+  stage.dataset.transferBridgeShown = shouldShow ? 'true' : 'false';
+
+  // The DOM is now at its final geometry. FLIP animates Source/Target from the
+  // previous geometry to this one, so the viewports smoothly resize instead
+  // of snapping when Transfer/FK→IK appears or disappears.
+  if (beforeLayout?.length) {
+    resizeViewports();
+    animateTransferStageLayout(beforeLayout);
+  }
 
   if (!shouldShow) {
     bridge.classList.remove('transfer-reveal');
-    bridge.hidden = true;
-  } else {
-    bridge.hidden = false;
-
-    if (animate) {
-      bridge.classList.remove('transfer-reveal');
-      requestAnimationFrame(() => {
-        requestAnimationFrame(() => bridge.classList.add('transfer-reveal'));
-      });
-      window.setTimeout(() => bridge.classList.remove('transfer-reveal'), 900);
-    }
+  } else if (animate || layoutChanged) {
+    bridge.classList.remove('transfer-reveal');
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => bridge.classList.add('transfer-reveal'));
+    });
+    window.setTimeout(() => bridge.classList.remove('transfer-reveal'), 900);
   }
 
   requestAnimationFrame(() => {
