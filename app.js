@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260921-rigifydefoverlay1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-presetguard1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -211,6 +211,91 @@ function usesRigifyPipeline() {
 
 function supportsFkToIk() {
   return usesCloudRigPipeline() || usesRigifyPipeline();
+}
+
+function sourceLooksBlendCap() {
+  const src = state.source;
+  if (!src?.root) return false;
+
+  return !!(
+    findBoneByOriginalExact(src, ['LeftBrow']) &&
+    findBoneByOriginalExact(src, ['RightBrow']) &&
+    findBoneByOriginalExact(src, ['LeftEye']) &&
+    findBoneByOriginalExact(src, ['RightEye'])
+  );
+}
+
+function targetLooksAutoRigPro() {
+  const tgt = state.target;
+  if (!tgt?.root) return false;
+
+  return !!(
+    findBoneByOriginalExact(tgt, ['c_arm_fk.l']) &&
+    findBoneByOriginalExact(tgt, ['c_forearm_fk.l']) &&
+    findBoneByOriginalExact(tgt, ['c_hand_fk.l']) &&
+    findBoneByOriginalExact(tgt, ['c_thigh_fk.l'])
+  );
+}
+
+function targetLooksMixamoControlRig() {
+  const tgt = state.target;
+  if (!tgt?.root) return false;
+
+  return !!(
+    findBoneByOriginalExact(tgt, ['Ctrl_Arm_FK_Left']) &&
+    findBoneByOriginalExact(tgt, ['Ctrl_ForeArm_FK_Left']) &&
+    findBoneByOriginalExact(tgt, ['Ctrl_Hand_FK_Left']) &&
+    findBoneByOriginalExact(tgt, ['Ctrl_Thigh_FK_Left'])
+  );
+}
+
+function loadedRigProfile(slot) {
+  return slot?.asset?.rig?.profile || '';
+}
+
+function sourceMatchesPresetFamily(family) {
+  if (!state.source.root) return false;
+
+  switch (family) {
+    case 'mixamo':
+      return loadedRigProfile(state.source) === 'mixamo';
+    case 'ue':
+      return loadedRigProfile(state.source) === 'ue';
+    case 'blendcap':
+      return sourceLooksBlendCap();
+    default:
+      return true;
+  }
+}
+
+function targetMatchesPresetFamily(family) {
+  if (!state.target.root) return false;
+
+  switch (family) {
+    case 'cloudrig':
+      return targetLooksCloudRig();
+    case 'rigify':
+      return targetLooksRigify();
+    case 'mixamo':
+      return loadedRigProfile(state.target) === 'mixamo';
+    case 'arp':
+      return targetLooksAutoRigPro();
+    case 'mixamo-ctrl':
+      return targetLooksMixamoControlRig();
+    default:
+      return true;
+  }
+}
+
+function presetMatchesLoadedRigs() {
+  const preset = state.activePreset;
+  if (!preset || state.activePresetId === 'none') return false;
+  if (!state.source.root || !state.target.root) return false;
+
+  return (
+    sourceMatchesPresetFamily(preset.sourceFamily) &&
+    targetMatchesPresetFamily(preset.targetFamily)
+  );
 }
 
 const state = {
@@ -1391,7 +1476,10 @@ async function loadFbx(file, slot, view) {
   if (bothLoaded && $('preset').value !== 'none') {
     state.activePreset = null;
     updateTransferBridgeVisibility(false);
-    void loadPreset().then(() => updateTransferBridgeVisibility(true));
+    void loadPreset().then(() => {
+      const compatible = presetMatchesLoadedRigs();
+      updateTransferBridgeVisibility(compatible);
+    });
   } else {
     updateTransferBridgeVisibility(false);
   }
@@ -1599,6 +1687,7 @@ async function loadPreset() {
   refreshMapUi();
   updateButtons();
   updateStats();
+  updateTransferBridgeVisibility(false);
 
   const resolved = state.boneMap.filter(isPairValid).length;
   const headLocal = state.boneMap.filter(p => p.locSpace === 'head_local').length;
@@ -6353,10 +6442,13 @@ function updateTransferBridgeVisibility(animate = false) {
 
   const hasBoth = !!state.source.root && !!state.target.root;
   const hasPreset = !!state.activePreset && state.activePresetId !== 'none';
+  const rigsMatchPreset = hasBoth && hasPreset && presetMatchesLoadedRigs();
+
   const shouldShow =
     state.workspaceView === 'workspace' &&
     hasBoth &&
-    hasPreset;
+    hasPreset &&
+    rigsMatchPreset;
 
   stage.classList.toggle('no-transfer-bridge', !shouldShow);
 
@@ -6720,7 +6812,18 @@ $('preset').onchange = () => {
     state.activePreset = null;
     updateTransferBridgeVisibility(false);
     void loadPreset()
-      .then(() => updateTransferBridgeVisibility(true))
+      .then(() => {
+        const compatible = presetMatchesLoadedRigs();
+        updateTransferBridgeVisibility(compatible);
+
+        if (!compatible) {
+          const preset = state.activePreset;
+          log(
+            `Preset ${preset?.label || id}: oculto Transfer porque Source/Target no corresponden a ` +
+            `${preset?.sourceFamily || '?'} → ${preset?.targetFamily || '?'}.`
+          );
+        }
+      })
       .catch(error => {
         updateTransferBridgeVisibility(false);
         log(`ERROR preset: ${error.message}`);
