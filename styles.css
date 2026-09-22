@@ -176,12 +176,12 @@ h2,p{margin:0}
 .workspace-shell.restpose-focus{grid-template-columns:minmax(0,1fr)!important}.workspace-shell.restpose-focus>.workflow-sidebar,.workspace-shell.restpose-focus>.settings-panel{display:none!important}.workspace-shell.restpose-focus .main-workspace{grid-column:1/-1;width:100%;max-width:none}
 .main-workspace[data-view="restpose"]{padding:14px 20px;overflow:hidden;gap:10px}
 .main-workspace[data-view="restpose"] .mapping-card,.main-workspace[data-view="restpose"] .timeline-card,.main-workspace[data-view="restpose"] .export-workbench,.main-workspace[data-view="restpose"] .retarget-bridge{display:none!important}
-.main-workspace[data-view="restpose"] .retarget-stage{grid-template-columns:minmax(0,1.65fr) minmax(300px,.65fr);gap:14px;min-height:0;flex:1}
+.main-workspace[data-view="restpose"] .retarget-stage{grid-template-columns:minmax(0,1fr);gap:14px;min-height:0;flex:1}
 .main-workspace[data-view="restpose"] .viewport-card{height:100%;min-height:0;grid-template-rows:56px minmax(0,1fr)}
 .main-workspace[data-view="restpose"] .viewport-foot{display:none}
 .main-workspace[data-view="restpose"] .viewport-wrap{aspect-ratio:auto;min-height:0;height:100%}
-.main-workspace[data-view="restpose"] .source-card{border-color:color-mix(in srgb,var(--primary) 45%,var(--border));box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 12%,transparent),var(--shadow-soft)}
-.main-workspace[data-view="restpose"] .target-card{opacity:1}
+.main-workspace[data-view="restpose"] .source-card{grid-column:1/-1;border-color:color-mix(in srgb,var(--primary) 45%,var(--border));box-shadow:0 0 0 1px color-mix(in srgb,var(--primary) 12%,transparent),var(--shadow-soft)}
+.main-workspace[data-view="restpose"] .target-card{display:none!important}
 .main-workspace[data-view="restpose"] .target-card .card-head h2::after{content:" · Reference";color:var(--muted);font-weight:500}
 .main-workspace[data-view="restpose"] .source-card .card-head h2::after{content:" · Rest Editor";color:var(--primary);font-weight:600}
 @media(min-width:1081px){.main-workspace[data-view="restpose"] .retarget-stage{height:calc(100vh - 70px - 14px - 14px - 78px - 10px)}}
