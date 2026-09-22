@@ -586,3 +586,53 @@ h2,p{margin:0}
   .inline-control span{line-height:1.2}
   .export-sticky-copy{gap:6px}
 }
+
+
+/* -------------------------------------------------------------------------
+   Touch / selection guard
+   This is an editor UI, not a document. On iOS an imprecise drag/long-press
+   inside the viewport can otherwise create Safari text-selection handles and
+   the Copy/Lookup callout. Keep the chrome non-selectable while preserving
+   normal selection inside actual text fields and diagnostic text.
+   ------------------------------------------------------------------------- */
+.app,
+.app button,
+.app label,
+.app .viewport-card,
+.app .viewport-wrap,
+.app .viewport,
+.app .viewport canvas,
+.app .viewport-label,
+.app .card-head,
+.app .restpose-toolbar,
+.app .restpose-controls,
+.app .retarget-bridge,
+.app .timeline-card,
+.app .topbar,
+.app .workflow-sidebar,
+.app .settings-panel{
+  -webkit-user-select:none;
+  user-select:none;
+  -webkit-touch-callout:none;
+}
+
+.app input[type="text"],
+.app input[type="number"],
+.app input:not([type]),
+.app textarea,
+.app select,
+.app .diagnostics pre,
+.app .stats,
+.app [contenteditable="true"]{
+  -webkit-user-select:text;
+  user-select:text;
+  -webkit-touch-callout:default;
+}
+
+/* Three.js controls/gizmos own gestures inside the canvas. Prevent Safari from
+   interpreting them as page selection gestures while leaving page scrolling
+   available outside the viewport. */
+.app .viewport canvas{
+  touch-action:none;
+  -webkit-tap-highlight-color:transparent;
+}
