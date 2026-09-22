@@ -7238,6 +7238,87 @@ function resizeViewports() {
   }
 }
 
+function setAutoPresetButtonsBusy(busy) {
+  for (const button of [$('autoMatch'), $('sidebarAutoPreset')]) {
+    if (!button) continue;
+    button.disabled = !!busy;
+    button.classList.toggle('is-busy', !!busy);
+    button.textContent = busy ? '✦ Detectando…' : '✦ Auto-preset';
+  }
+}
+
+function runAutoPreset() {
+  if (!state.source.root || !state.target.root) {
+    updateTransferBridgeVisibility(false);
+    setStatus('Auto-preset · carga Source y Target', 'bad');
+    log('Auto-preset: primero carga Source y Target.');
+    return;
+  }
+
+  setAutoPresetButtonsBusy(true);
+  updateTransferBridgeVisibility(false);
+  setStatus('Auto-preset · detectando…');
+
+  void detectAutoPreset()
+    .then(detected => {
+      if (!detected) {
+        $('preset').value = 'none';
+        state.activePresetId = 'none';
+        state.activePreset = null;
+        state.boneMap = [];
+        refreshMapUi();
+        updateButtons();
+        updateStats();
+        updateTransferBridgeVisibility(false);
+        setStatus('Auto-preset · sin coincidencia', 'bad');
+        log('Auto-preset: no encontré un preset compatible con Source + Target.');
+        return;
+      }
+
+      // Select the actual preset in the existing selector so both the sidebar
+      // and Mapping workspace always reflect the same detected preset.
+      $('preset').value = detected.id;
+      state.activePresetId = detected.id;
+      state.activePreset = null;
+
+      log(
+        `Auto-preset detectó ${detected.definition.label} · ` +
+        `${detected.resolvedBoth}/${detected.data?.pairs?.length || 0} pares.`
+      );
+
+      return loadPreset().then(() => {
+        const compatible = presetMatchesLoadedRigs();
+        updateTransferBridgeVisibility(compatible);
+        setStatus(
+          compatible
+            ? `Auto-preset · ${detected.definition.label}`
+            : 'Auto-preset · preset incompatible',
+          compatible ? 'good' : 'bad'
+        );
+      });
+    })
+    .catch(error => {
+      updateTransferBridgeVisibility(false);
+      setStatus('Auto-preset · error', 'bad');
+      log(`ERROR Auto-preset: ${error.message}`);
+    })
+    .finally(() => {
+      setAutoPresetButtonsBusy(false);
+    });
+}
+
+function updateSidebarAutoPresetVisibility(view = state.workspaceView) {
+  const wrap = $('sidebarAutoPresetWrap');
+  if (!wrap) return;
+
+  const hide = view === 'mappings';
+  wrap.classList.toggle('workspace-hidden', hide);
+  wrap.setAttribute('aria-hidden', hide ? 'true' : 'false');
+
+  const button = $('sidebarAutoPreset');
+  if (button) button.tabIndex = hide ? -1 : 0;
+}
+
 function setWorkspaceView(view) {
   const allowed = new Set(['workspace', 'mappings', 'restpose', 'animations']);
   let next = allowed.has(view) ? view : 'workspace';
@@ -7251,6 +7332,7 @@ function setWorkspaceView(view) {
 
   if (previous === 'restpose' && next !== 'restpose') leaveRestPoseWorkspace();
   state.workspaceView = next;
+  updateSidebarAutoPresetVisibility(next);
 
   const workspace = $('mainWorkspace');
   if (workspace) workspace.dataset.view = next;
@@ -7543,61 +7625,9 @@ $('preset').onchange = () => {
       });
   }
 };
-$('autoMatch').onclick = () => {
-  if (!state.source.root || !state.target.root) {
-    updateTransferBridgeVisibility(false);
-    setStatus('Auto-preset · carga Source y Target', 'bad');
-    log('Auto-preset: primero carga Source y Target.');
-    return;
-  }
-
-  updateTransferBridgeVisibility(false);
-  setStatus('Auto-preset · detectando…');
-
-  void detectAutoPreset()
-    .then(detected => {
-      if (!detected) {
-        $('preset').value = 'none';
-        state.activePresetId = 'none';
-        state.activePreset = null;
-        state.boneMap = [];
-        refreshMapUi();
-        updateButtons();
-        updateStats();
-        updateTransferBridgeVisibility(false);
-        setStatus('Auto-preset · sin coincidencia', 'bad');
-        log('Auto-preset: no encontré un preset compatible con Source + Target.');
-        return;
-      }
-
-      // Select the actual preset in the existing selector so the user can see
-      // exactly what was detected and can still override it manually.
-      $('preset').value = detected.id;
-      state.activePresetId = detected.id;
-      state.activePreset = null;
-
-      log(
-        `Auto-preset detectó ${detected.definition.label} · ` +
-        `${detected.resolvedBoth}/${detected.data?.pairs?.length || 0} pares.`
-      );
-
-      return loadPreset().then(() => {
-        const compatible = presetMatchesLoadedRigs();
-        updateTransferBridgeVisibility(compatible);
-        setStatus(
-          compatible
-            ? `Auto-preset · ${detected.definition.label}`
-            : 'Auto-preset · preset incompatible',
-          compatible ? 'good' : 'bad'
-        );
-      });
-    })
-    .catch(error => {
-      updateTransferBridgeVisibility(false);
-      setStatus('Auto-preset · error', 'bad');
-      log(`ERROR Auto-preset: ${error.message}`);
-    });
-};
+$('autoMatch').onclick = runAutoPreset;
+$('sidebarAutoPreset').onclick = runAutoPreset;
+updateSidebarAutoPresetVisibility(state.workspaceView);
 $('addPair').onclick = () => {
   state.boneMap.push({ source: '', target: '' });
   refreshMapUi();
