@@ -205,8 +205,8 @@
           <div class="mapping-expandable">
             <div class="mapping-toolbar">
               <div class="search-field"><span>⌕</span><input id="mapSearch" placeholder="Buscar source o target…" /></div>
-              <button id="autoMatch" class="soft-primary" type="button">✦ Auto-Map All</button>
-              <button id="loadPreset" type="button">✦ Auto-preset</button>
+              <button id="autoMatch" class="soft-primary" type="button">✦ Auto-preset</button>
+              <button id="loadPreset" type="button">Cargar preset</button>
               <button id="addPair" type="button">+ Par</button>
               <button id="clearMap" class="danger-ghost" type="button">Clear</button>
             </div>
@@ -254,8 +254,7 @@
             <div class="settings-heading"><div><span class="eyebrow">MAPPING</span><h2>Preset</h2></div></div>
             <label class="field-label" for="preset">Skeleton preset</label>
             <select id="preset">
-              <option value="auto" selected>✦ Auto-preset · detectar por Source + Target</option>
-              <option value="none">— Sin preset —</option>
+              <option value="none" selected>— Selecciona un preset —</option>
               <optgroup label="Mixamo source">
                 <option value="mixamo_to_cloudrig">Mixamo → CloudRig / Sintel</option>
                 <option value="mixamo_to_rigify">Mixamo → Rigify</option>
@@ -369,6 +368,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260922-autopreset1"></script>
+  <script type="module" src="./app.js?v=20260922-autopresetbutton1"></script>
 </body>
 </html>
