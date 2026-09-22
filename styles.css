@@ -745,3 +745,49 @@ h2,p{margin:0}
     max-width:0;
   }
 }
+
+
+/* Sidebar Auto-preset visibility hardening */
+.mapping-settings-heading{
+  position:relative;
+  min-height:34px;
+  padding-right:132px;
+}
+.mapping-settings-heading .sidebar-auto-preset-wrap{
+  position:absolute;
+  top:0;
+  right:0;
+  width:122px;
+  max-width:122px;
+  z-index:2;
+}
+.mapping-settings-heading .sidebar-auto-preset{
+  width:122px;
+}
+.workspace-shell:not(.mappings-focus) .sidebar-auto-preset-wrap{
+  width:122px;
+  max-width:122px;
+  opacity:1;
+  transform:translateX(0) scale(1);
+  pointer-events:auto;
+}
+.workspace-shell.mappings-focus .sidebar-auto-preset-wrap{
+  width:0;
+  max-width:0;
+  opacity:0;
+  transform:translateX(12px) scale(.9);
+  pointer-events:none;
+}
+@media(max-width:760px){
+  .mapping-settings-heading{padding-right:118px}
+  .mapping-settings-heading .sidebar-auto-preset-wrap,
+  .mapping-settings-heading .sidebar-auto-preset,
+  .workspace-shell:not(.mappings-focus) .sidebar-auto-preset-wrap{
+    width:110px;
+    max-width:110px;
+  }
+  .workspace-shell.mappings-focus .sidebar-auto-preset-wrap{
+    width:0;
+    max-width:0;
+  }
+}
