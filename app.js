@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { TransformControls } from 'three/addons/controls/TransformControls.js';
 import { FBXExporter } from '@comfyorg/fbx-exporter-three';
-import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-autopreset1';
+import { WaltFBXLoader, WALT_FBX_VERSION } from './walt-fbx-loader.js?v=20260922-autopresetbutton1';
 import { injectAnimationsIntoOriginalFBX, rewriteTargetActionsToBindRest } from './walt-fbx-exact-export.js?v=20260921-restgizmo2';
 import { buildBlenderActionScript } from './blender-action-export.js?v=20260920-preview1';
 
@@ -302,7 +302,7 @@ const state = {
   source: makeSlot('source'),
   target: makeSlot('target'),
   boneMap: [],
-  activePresetId: 'auto',
+  activePresetId: 'none',
   activePreset: null,
   fkClip: null,
   fkRawClip: null,
@@ -1578,7 +1578,7 @@ async function fetchPresetDefinitionData(id, definition) {
   }
 
   const response = await fetch(
-    definition.path + '?v=20260922-autopreset1',
+    definition.path + '?v=20260922-autopresetbutton1',
     { cache: 'no-store' }
   );
 
@@ -6925,9 +6925,14 @@ $('fitSource').onclick = () => fitView(sourceView, state.source.displayRoot || s
 $('fitTarget').onclick = () => fitView(targetView, state.target.displayRoot || state.target.root);
 $('sourceClip').onchange = () => setSourceClip(Number($('sourceClip').value));
 $('loadPreset').onclick = () => {
-  $('preset').value = 'auto';
+  if ($('preset').value === 'none') {
+    updateTransferBridgeVisibility(false);
+    log('Selecciona un preset manual o usa Auto-preset.');
+    return;
+  }
+
   state.activePreset = null;
-  state.activePresetId = 'auto';
+  state.activePresetId = $('preset').value;
   updateTransferBridgeVisibility(false);
 
   void loadPreset()
@@ -6936,7 +6941,7 @@ $('loadPreset').onclick = () => {
     })
     .catch(error => {
       updateTransferBridgeVisibility(false);
-      log(`ERROR Auto-preset: ${error.message}`);
+      log(`ERROR preset: ${error.message}`);
     });
 };
 $('preset').onchange = () => {
@@ -6974,7 +6979,61 @@ $('preset').onchange = () => {
       });
   }
 };
-$('autoMatch').onclick = autoMatch;
+$('autoMatch').onclick = () => {
+  if (!state.source.root || !state.target.root) {
+    updateTransferBridgeVisibility(false);
+    setStatus('Auto-preset · carga Source y Target', 'bad');
+    log('Auto-preset: primero carga Source y Target.');
+    return;
+  }
+
+  updateTransferBridgeVisibility(false);
+  setStatus('Auto-preset · detectando…');
+
+  void detectAutoPreset()
+    .then(detected => {
+      if (!detected) {
+        $('preset').value = 'none';
+        state.activePresetId = 'none';
+        state.activePreset = null;
+        state.boneMap = [];
+        refreshMapUi();
+        updateButtons();
+        updateStats();
+        updateTransferBridgeVisibility(false);
+        setStatus('Auto-preset · sin coincidencia', 'bad');
+        log('Auto-preset: no encontré un preset compatible con Source + Target.');
+        return;
+      }
+
+      // Select the actual preset in the existing selector so the user can see
+      // exactly what was detected and can still override it manually.
+      $('preset').value = detected.id;
+      state.activePresetId = detected.id;
+      state.activePreset = null;
+
+      log(
+        `Auto-preset detectó ${detected.definition.label} · ` +
+        `${detected.resolvedBoth}/${detected.data?.pairs?.length || 0} pares.`
+      );
+
+      return loadPreset().then(() => {
+        const compatible = presetMatchesLoadedRigs();
+        updateTransferBridgeVisibility(compatible);
+        setStatus(
+          compatible
+            ? `Auto-preset · ${detected.definition.label}`
+            : 'Auto-preset · preset incompatible',
+          compatible ? 'good' : 'bad'
+        );
+      });
+    })
+    .catch(error => {
+      updateTransferBridgeVisibility(false);
+      setStatus('Auto-preset · error', 'bad');
+      log(`ERROR Auto-preset: ${error.message}`);
+    });
+};
 $('addPair').onclick = () => {
   state.boneMap.push({ source: '', target: '' });
   refreshMapUi();
