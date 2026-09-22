@@ -688,14 +688,14 @@ function compactRestPoseGizmoGeometry(transform) {
 
   if (visualE?.geometry && !visualE.userData.restPoseCompactGeometry) {
     visualE.geometry = visualE.geometry.clone();
-    visualE.geometry.scale(0.60, 0.60, 0.60);
+    visualE.geometry.scale(0.72, 0.72, 0.72);
     thickenRestPoseRingGeometry(visualE.geometry, 0.040);
     visualE.userData.restPoseCompactGeometry = true;
   }
 
   if (pickerE?.geometry && !pickerE.userData.restPoseCompactGeometry) {
     pickerE.geometry = pickerE.geometry.clone();
-    pickerE.geometry.scale(0.60, 0.60, 0.60);
+    pickerE.geometry.scale(0.72, 0.72, 0.72);
     pickerE.userData.restPoseCompactGeometry = true;
   }
 }
@@ -804,7 +804,7 @@ function ensureRestPoseTransformControls() {
   const transform = new TransformControls(sourceView.camera, sourceView.renderer.domElement);
   transform.setMode('rotate');
   transform.setSpace('local');
-  transform.setSize(0.44);
+  transform.setSize(0.56);
 
   const helper = transform.getHelper();
   helper.visible = false;
@@ -1032,19 +1032,19 @@ function makeRestPoseJointMarkerTexture() {
 
   context.clearRect(0, 0, size, size);
 
-  // White artwork is tinted by SpriteMaterial.color.
+  // Solid articulation dot. SpriteMaterial.color tints this white disc
+  // blue/cyan/yellow according to normal/hover/selected state.
   context.beginPath();
-  context.arc(size / 2, size / 2, 36, 0, Math.PI * 2);
-  context.fillStyle = 'rgba(255,255,255,.12)';
+  context.arc(size / 2, size / 2, 34, 0, Math.PI * 2);
+  context.fillStyle = 'rgba(255,255,255,1)';
   context.fill();
-  context.lineWidth = 11;
+
+  // Subtle crisp edge so the marker remains readable over white geometry.
+  context.beginPath();
+  context.arc(size / 2, size / 2, 34, 0, Math.PI * 2);
+  context.lineWidth = 5;
   context.strokeStyle = 'rgba(255,255,255,1)';
   context.stroke();
-
-  context.beginPath();
-  context.arc(size / 2, size / 2, 7, 0, Math.PI * 2);
-  context.fillStyle = 'rgba(255,255,255,.95)';
-  context.fill();
 
   const texture = new THREE.CanvasTexture(canvas);
   texture.colorSpace = THREE.SRGBColorSpace;
@@ -1069,7 +1069,7 @@ function updateRestPoseJointMarkerStyles() {
           : 0x4b9dff
     );
 
-    marker.material.opacity = isSelected ? 1 : isHovered ? 0.98 : 0.9;
+    marker.material.opacity = isSelected ? 1 : isHovered ? 1 : 0.96;
     marker.material.needsUpdate = true;
   }
 }
@@ -1147,8 +1147,8 @@ function updateRestPoseJointMarkers() {
     const worldHeight = 2 * distance * Math.tan(fovRadians * 0.5);
     const isSelected = marker.userData.boneName === state.restEditor.selectedBone;
     const pixels = isSelected
-      ? (window.innerWidth <= 760 ? 22 : 19)
-      : (window.innerWidth <= 760 ? 19 : 16);
+      ? (window.innerWidth <= 760 ? 28 : 24)
+      : (window.innerWidth <= 760 ? 24 : 21);
     const worldSize = worldHeight * (pixels / viewportHeight);
 
     marker.scale.set(worldSize, worldSize, 1);
