@@ -15,7 +15,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260923-ghost-header2" />
+  <link rel="stylesheet" href="./styles.css?v=20260923-restpose-header-actions1" />
   <script type="importmap">
   {
     "imports": {
@@ -118,18 +118,22 @@
               <span>Overlay <b id="restTargetOverlayOpacityValue">20%</b></span>
               <input id="restTargetOverlayOpacity" type="range" min="0.05" max="0.75" step="0.05" value="0.20" disabled />
             </label>
-            <button id="copyRestBone" type="button" class="soft-primary" disabled>Copy Selected Bone</button>
             <button id="undoRestPose" type="button" disabled>Undo · Ctrl+Z</button>
             <button id="resetRestBone" type="button" disabled>Reset Bone</button>
             <button id="resetRestPose" type="button" disabled>Reset Pose</button>
-            <button id="commitRestPose" type="button" class="restpose-commit" disabled>Use This Pose as Rest</button>
           </div>
         </section>
 
         <section class="retarget-stage no-transfer-bridge">
           <article id="sourceModule" class="viewport-card source-card">
-            <header class="card-head">
+            <header class="card-head source-card-head">
               <div><span class="eyebrow">SOURCE</span><h2>Source Animation</h2></div>
+
+              <div class="restpose-card-actions" aria-label="Acciones de Redefine Rest Pose">
+                <button id="copyRestBone" type="button" class="soft-primary restpose-card-action" disabled>Copy Selected Bone</button>
+                <button id="commitRestPose" type="button" class="restpose-commit restpose-card-action" disabled>Use This Pose as Rest</button>
+              </div>
+
               <span class="format-badge">FBX</span>
             </header>
 
