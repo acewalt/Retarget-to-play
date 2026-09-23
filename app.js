@@ -118,6 +118,12 @@ const BLENDCAP_PRESET_REGISTRY = {
     sourceFamily: 'mixamo',
     targetFamily: 'mixamo-ctrl'
   },
+  mixamo_to_ue: {
+    label: 'Mixamo → UE',
+    path: './presets/mixamo_to_ue.json',
+    sourceFamily: 'mixamo',
+    targetFamily: 'ue'
+  },
   ue_to_cloudrig: {
     label: 'UE → CloudRig / Sintel',
     path: './presets/ue_to_cloudrig.json',
@@ -365,6 +371,28 @@ function targetLooksMixamoControlRig() {
   );
 }
 
+function targetLooksUnrealEngine() {
+  const tgt = state.target;
+  if (!tgt?.root) return false;
+
+  const has = (...names) =>
+    !!findBoneByOriginalExact(tgt, names);
+
+  return !!(
+    has('root') &&
+    has('pelvis') &&
+    has('spine_01') &&
+    has('spine_05') &&
+    has('clavicle_l') &&
+    has('upperarm_l') &&
+    has('lowerarm_l') &&
+    has('hand_l') &&
+    has('thigh_l') &&
+    has('calf_l') &&
+    has('foot_l')
+  );
+}
+
 function loadedRigProfile(slot) {
   return slot?.asset?.rig?.profile || '';
 }
@@ -375,6 +403,7 @@ function displayRigProfile(slot) {
   if (slot.kind === 'target') {
     if (targetLooksMixamoControlRig()) return 'mixamo-control-rig';
     if (targetLooksAutoRigPro()) return 'auto-rig-pro';
+    if (targetLooksUnrealEngine()) return 'ue';
   }
 
   return loadedRigProfile(slot) || 'generic';
@@ -412,6 +441,11 @@ function targetMatchesPresetFamily(family) {
       return targetLooksAutoRigPro();
     case 'mixamo-ctrl':
       return targetLooksMixamoControlRig();
+    case 'ue':
+      return (
+        loadedRigProfile(state.target) === 'ue' ||
+        targetLooksUnrealEngine()
+      );
     default:
       return true;
   }
@@ -2573,6 +2607,13 @@ async function detectAutoPreset() {
       'Auto-preset: Target reconocido como Auto-Rig Pro por firma de controles ' +
       '(c_root / c_spine / FK / IK), aunque el perfil base sea ' +
       `"${loadedRigProfile(state.target) || 'desconocido'}".`
+    );
+  }
+
+  if (targetLooksUnrealEngine()) {
+    log(
+      'Auto-preset: Target reconocido como Unreal Engine por firma ' +
+      '(root / pelvis / spine / upperarm / calf / foot).'
     );
   }
 
