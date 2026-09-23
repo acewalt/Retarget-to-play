@@ -218,7 +218,11 @@ function usesMixamoControlRigPipeline() {
 }
 
 function supportsFkToIk() {
-  return usesCloudRigPipeline() || usesRigifyPipeline();
+  return (
+    usesCloudRigPipeline() ||
+    usesRigifyPipeline() ||
+    usesMixamoControlRigPipeline()
+  );
 }
 
 function sourceLooksBlendCap() {
@@ -5776,6 +5780,338 @@ function bakeRigifyIkFromFk() {
 }
 
 
+const MIXAMO_CONTROL_RIG_IK_CHAINS = [
+  {
+    kind: 'ARM', side: 'L',
+    a: 'Ctrl_Arm_FK_Left',
+    b: 'Ctrl_ForeArm_FK_Left',
+    c: 'Ctrl_Hand_FK_Left',
+    ik: 'Ctrl_Hand_IK_Left',
+    pole: 'Ctrl_ArmPole_IK_Left'
+  },
+  {
+    kind: 'ARM', side: 'R',
+    a: 'Ctrl_Arm_FK_Right',
+    b: 'Ctrl_ForeArm_FK_Right',
+    c: 'Ctrl_Hand_FK_Right',
+    ik: 'Ctrl_Hand_IK_Right',
+    pole: 'Ctrl_ArmPole_IK_Right'
+  },
+  {
+    kind: 'LEG', side: 'L',
+    a: 'Ctrl_UpLeg_FK_Left',
+    b: 'Ctrl_Leg_FK_Left',
+    c: 'Ctrl_Foot_FK_Left',
+    ik: 'Ctrl_Foot_IK_Left',
+    pole: 'Ctrl_LegPole_IK_Left'
+  },
+  {
+    kind: 'LEG', side: 'R',
+    a: 'Ctrl_UpLeg_FK_Right',
+    b: 'Ctrl_Leg_FK_Right',
+    c: 'Ctrl_Foot_FK_Right',
+    ik: 'Ctrl_Foot_IK_Right',
+    pole: 'Ctrl_LegPole_IK_Right'
+  }
+];
+
+function resolveMixamoControlRigIkChains(tgt) {
+  return MIXAMO_CONTROL_RIG_IK_CHAINS.map(def => {
+    const resolved = { ...def };
+
+    for (const key of ['a', 'b', 'c', 'ik', 'pole']) {
+      const runtimeName =
+        findBoneByOriginalExact(tgt, [def[key]]) ||
+        findSemanticBone(tgt, def[key]);
+
+      if (!runtimeName) return null;
+      resolved[key] = runtimeName;
+    }
+
+    return resolved;
+  }).filter(Boolean);
+}
+
+function mixamoControlRigChainSnapshot(tgt, chain) {
+  const read = runtimeName => {
+    const bone = tgt.bones.get(runtimeName);
+    if (!bone) return null;
+
+    return {
+      bone,
+      position: bone.getWorldPosition(new THREE.Vector3()),
+      quaternion: bone.getWorldQuaternion(new THREE.Quaternion()).normalize(),
+      scale: bone.getWorldScale(new THREE.Vector3())
+    };
+  };
+
+  const a = read(chain.a);
+  const b = read(chain.b);
+  const c = read(chain.c);
+
+  return a && b && c ? { a, b, c } : null;
+}
+
+function scanMixamoControlRigPoleAnchor(tgt, mixer, chain, times) {
+  let bestLen = 0;
+  let bestLocal = null;
+  const step = Math.max(1, Math.floor(times.length / 60));
+
+  for (let i = 0; i < times.length; i += step) {
+    restoreRest(tgt);
+    mixer.setTime(Number(times[i]));
+    updateSlotWorld(tgt);
+
+    const snap = mixamoControlRigChainSnapshot(tgt, chain);
+    if (!snap) continue;
+
+    const upper = snap.b.position.clone().sub(snap.a.position);
+    const lower = snap.c.position.clone().sub(snap.b.position);
+    const bendAxisWorld = upper.clone().cross(lower);
+    const len = bendAxisWorld.length();
+
+    if (len <= bestLen || len < 1e-6) continue;
+
+    const local = bendAxisWorld
+      .clone()
+      .applyQuaternion(snap.b.quaternion.clone().invert());
+
+    if (local.lengthSq() < 1e-10) continue;
+
+    bestLen = len;
+    bestLocal = local.normalize();
+  }
+
+  restoreRest(tgt);
+  return bestLocal;
+}
+
+function mixamoControlRigWorldToLocalMatrix(
+  tgt,
+  runtimeName,
+  desiredWorld,
+  out = new THREE.Matrix4()
+) {
+  const bone = tgt.bones.get(runtimeName);
+  if (!bone) return null;
+
+  const parent = bone.parent;
+
+  if (parent) {
+    parent.updateMatrixWorld(true);
+    return out.copy(parent.matrixWorld)
+      .invert()
+      .multiply(desiredWorld);
+  }
+
+  return out.copy(desiredWorld);
+}
+
+function bakeMixamoControlRigIkFromFk() {
+  if (!state.fkClip) {
+    throw new Error('Primero aplica el retargeting FK.');
+  }
+
+  const tgt = state.target;
+  const solveClip = state.fkClip;
+
+  const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
+  const frameCount = Math.max(2, Math.ceil(solveClip.duration * fps) + 1);
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(solveClip.duration, i / fps)
+  );
+
+  const chains = resolveMixamoControlRigIkChains(tgt);
+
+  if (chains.length !== 4) {
+    throw new Error(
+      `FK→IK Mixamo Control Rig incompleto: encontré ${chains.length}/4 cadenas IK.`
+    );
+  }
+
+  restoreRest(tgt);
+  tgt.mixer?.stopAllAction();
+
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(solveClip).play();
+
+  // Pick a stable bend-side from the most bent sample. This prevents the pole
+  // from flipping when an elbow/knee becomes nearly straight.
+  const poleAnchors = new Map();
+
+  for (const chain of chains) {
+    poleAnchors.set(
+      chain.pole,
+      scanMixamoControlRigPoleAnchor(tgt, mixer, chain, times)
+    );
+  }
+
+  const data = new Map();
+
+  for (const chain of chains) {
+    data.set(chain.ik, { p: [], q: [], s: [], lastQ: null });
+    data.set(chain.pole, { p: [], q: [], s: [], lastQ: null });
+  }
+
+  const fkPoseWorld = new THREE.Matrix4();
+  const fkRestWorld = new THREE.Matrix4();
+  const ikRestWorld = new THREE.Matrix4();
+  const desiredIkWorld = new THREE.Matrix4();
+  const desiredPoleWorld = new THREE.Matrix4();
+  const encodedLocal = new THREE.Matrix4();
+
+  const p = new THREE.Vector3();
+  const q = new THREE.Quaternion();
+  const s = new THREE.Vector3();
+
+  try {
+    for (const time of times) {
+      restoreRest(tgt);
+      mixer.setTime(Number(time));
+      updateSlotWorld(tgt);
+
+      for (const chain of chains) {
+        const snap = mixamoControlRigChainSnapshot(tgt, chain);
+        if (!snap) continue;
+
+        const fkRest = tgt.rest.get(chain.c);
+        const ikRest = tgt.rest.get(chain.ik);
+
+        if (!fkRest || !ikRest) continue;
+
+        fkPoseWorld.compose(
+          snap.c.position,
+          snap.c.quaternion,
+          snap.c.scale
+        );
+
+        fkRestWorld.compose(
+          fkRest.worldPos.clone(),
+          fkRest.worldQuat.clone(),
+          fkRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+        );
+
+        ikRestWorld.compose(
+          ikRest.worldPos.clone(),
+          ikRest.worldQuat.clone(),
+          ikRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+        );
+
+        // Same snap principle used by the proven CloudRig path:
+        // IK_pose = FK_pose * inverse(FK_rest) * IK_rest
+        desiredIkWorld.copy(fkPoseWorld)
+          .multiply(fkRestWorld.clone().invert())
+          .multiply(ikRestWorld);
+
+        const ikLocal = mixamoControlRigWorldToLocalMatrix(
+          tgt,
+          chain.ik,
+          desiredIkWorld,
+          encodedLocal
+        );
+
+        if (ikLocal) {
+          ikLocal.decompose(p, q, s);
+          q.normalize();
+
+          const d = data.get(chain.ik);
+          if (d.lastQ && d.lastQ.dot(q) < 0) {
+            q.x *= -1; q.y *= -1; q.z *= -1; q.w *= -1;
+          }
+          d.lastQ = q.clone();
+
+          d.p.push(p.x, p.y, p.z);
+          d.q.push(q.x, q.y, q.z, q.w);
+          d.s.push(s.x, s.y, s.z);
+        }
+
+        const poleRest = tgt.rest.get(chain.pole);
+        if (!poleRest) continue;
+
+        const poleWorldPos = computeBlendCapPolePointFromSnapshot(
+          snap,
+          poleAnchors.get(chain.pole)
+        );
+
+        desiredPoleWorld.compose(
+          poleWorldPos,
+          poleRest.worldQuat.clone(),
+          poleRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
+        );
+
+        const poleLocal = mixamoControlRigWorldToLocalMatrix(
+          tgt,
+          chain.pole,
+          desiredPoleWorld,
+          encodedLocal
+        );
+
+        if (!poleLocal) continue;
+
+        poleLocal.decompose(p, q, s);
+        q.normalize();
+
+        const d = data.get(chain.pole);
+        if (d.lastQ && d.lastQ.dot(q) < 0) {
+          q.x *= -1; q.y *= -1; q.z *= -1; q.w *= -1;
+        }
+        d.lastQ = q.clone();
+
+        d.p.push(p.x, p.y, p.z);
+        d.q.push(q.x, q.y, q.z, q.w);
+        d.s.push(s.x, s.y, s.z);
+      }
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    restoreRest(tgt);
+  }
+
+  const tracks = [];
+
+  for (const [name, d] of data) {
+    if (d.p.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(`${name}.position`, times, d.p)
+      );
+    }
+
+    if (d.q.length === times.length * 4) {
+      tracks.push(
+        new THREE.QuaternionKeyframeTrack(`${name}.quaternion`, times, d.q)
+      );
+    }
+
+    if (d.s.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(`${name}.scale`, times, d.s)
+      );
+    }
+  }
+
+  if (tracks.length < 24) {
+    log(
+      `FK→IK Mixamo Control Rig aviso: se generaron ${tracks.length}/24 curvas esperadas ` +
+      '(4 IK + 4 POLE × TRS).'
+    );
+  }
+
+  log(
+    'FK→IK Mixamo Control Rig: Ctrl_Hand_IK / Ctrl_Foot_IK hacen snap ' +
+    'a la pose FK; Ctrl_ArmPole_IK / Ctrl_LegPole_IK usan el plano real ' +
+    'de codo/rodilla con estabilización para miembros casi rectos.'
+  );
+
+  return new THREE.AnimationClip(
+    'Retargeted_IK_Controls',
+    solveClip.duration,
+    tracks
+  );
+}
+
+
 function buildConvertedOutputClip(keepLimbFk) {
   const fk = state.fkClip;
   const ik = state.ikOnlyClip;
@@ -5795,12 +6131,19 @@ function buildConvertedOutputClip(keepLimbFk) {
           'thigh_fk.L', 'shin_fk.L', 'foot_fk.L',
           'thigh_fk.R', 'shin_fk.R', 'foot_fk.R'
         ]
-      : [
-          'FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L',
-          'FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R',
-          'FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L',
-          'FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R'
-        ]
+      : usesMixamoControlRigPipeline()
+        ? [
+            'Ctrl_Arm_FK_Left', 'Ctrl_ForeArm_FK_Left', 'Ctrl_Hand_FK_Left',
+            'Ctrl_Arm_FK_Right', 'Ctrl_ForeArm_FK_Right', 'Ctrl_Hand_FK_Right',
+            'Ctrl_UpLeg_FK_Left', 'Ctrl_Leg_FK_Left', 'Ctrl_Foot_FK_Left',
+            'Ctrl_UpLeg_FK_Right', 'Ctrl_Leg_FK_Right', 'Ctrl_Foot_FK_Right'
+          ]
+        : [
+            'FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L',
+            'FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R',
+            'FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L',
+            'FK-Thigh.R', 'FK-Knee.R', 'FK-Foot.R'
+          ]
   );
 
   const retained = fk.tracks.filter(track => {
@@ -6053,7 +6396,9 @@ function convertFkToIk() {
 
     state.ikOnlyClip = usesRigifyPipeline()
       ? bakeRigifyIkFromFk()
-      : bakeIkFromFk();
+      : usesMixamoControlRigPipeline()
+        ? bakeMixamoControlRigIkFromFk()
+        : bakeIkFromFk();
     state.exportClip = buildConvertedOutputClip($('keepFk').checked);
     state.exported = false;
 
