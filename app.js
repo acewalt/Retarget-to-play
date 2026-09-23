@@ -3194,7 +3194,6 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
 
       d.q.push(q.x, q.y, q.z, q.w);
     }
-
   }
 
   restoreRest(src);
