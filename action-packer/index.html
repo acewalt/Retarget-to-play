@@ -8,7 +8,35 @@
   <meta http-equiv="Pragma" content="no-cache" />
   <meta http-equiv="Expires" content="0" />
   <title>Action Packer — FBX Animation Merger</title>
-  <link rel="stylesheet" href="./styles.css?v=20260922-50" />
+  <script>
+    (() => {
+      const readTheme = () => {
+        try {
+          const parentTheme = window.parent?.document?.documentElement?.dataset?.theme;
+          if (parentTheme) return parentTheme;
+        } catch {}
+        return localStorage.getItem('retarget-theme') || 'light';
+      };
+
+      const applyTheme = () => {
+        document.documentElement.dataset.theme =
+          readTheme() === 'dark' ? 'dark' : 'light';
+      };
+
+      applyTheme();
+
+      try {
+        if (window.parent && window.parent !== window) {
+          const observer = new MutationObserver(applyTheme);
+          observer.observe(window.parent.document.documentElement, {
+            attributes: true,
+            attributeFilter: ['data-theme']
+          });
+        }
+      } catch {}
+    })();
+  </script>
+  <link rel="stylesheet" href="./styles.css?v=20260922-retarget-theme1" />
   <script type="importmap">
   {
     "imports": {
@@ -402,6 +430,6 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260922-50"></script>
+  <script type="module" src="./app.js?v=20260922-retarget-theme1"></script>
 </body>
 </html>
