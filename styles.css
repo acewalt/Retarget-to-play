@@ -68,59 +68,140 @@ h2,p{margin:0}
   opacity:1;
 }
 .source-transfer-progress[hidden]{display:none}
-.source-transfer-progress-frame{
+.source-transfer-route{
   position:absolute;
   inset:0;
-  width:100%;
+  overflow:hidden;
+  contain:layout paint;
+}
+.source-transfer-segment{
+  position:absolute;
+  display:block;
+  background:var(--success);
+  box-shadow:0 0 7px color-mix(in srgb,var(--success) 72%,transparent);
+  will-change:transform;
+  backface-visibility:hidden;
+  transform:translateZ(0);
+}
+.source-transfer-segment.top-right,
+.source-transfer-segment.top-left,
+.source-transfer-segment.bottom-right,
+.source-transfer-segment.bottom-left{
+  height:3px;
+  width:50%;
+}
+.source-transfer-segment.right-side,
+.source-transfer-segment.left-side{
+  width:3px;
   height:100%;
-  overflow:visible;
 }
-.source-transfer-progress-path{
-  fill:none;
-  stroke:var(--success);
-  stroke-width:3px;
-  vector-effect:non-scaling-stroke;
-  stroke-linecap:butt;
-  stroke-linejoin:round;
-  stroke-dasharray:0 100;
-  filter:drop-shadow(0 0 4px color-mix(in srgb,var(--success) 68%,transparent));
+
+/* A -> top corners */
+.source-transfer-segment.top-right{
+  top:0;
+  left:50%;
+  transform-origin:left center;
+  transform:translateZ(0) scaleX(0);
 }
-.source-transfer-progress.running .source-transfer-progress-path{
-  animation:source-transfer-ab-grow 1.8s cubic-bezier(.2,.72,.2,1) forwards;
+.source-transfer-segment.top-left{
+  top:0;
+  right:50%;
+  transform-origin:right center;
+  transform:translateZ(0) scaleX(0);
 }
-.source-transfer-progress.complete .source-transfer-progress-path{
-  animation:none;
-  stroke-dasharray:100 100;
-  filter:drop-shadow(0 0 7px color-mix(in srgb,var(--success) 85%,transparent));
+
+/* top corners -> bottom corners */
+.source-transfer-segment.right-side{
+  top:0;
+  right:0;
+  transform-origin:center top;
+  transform:translateZ(0) scaleY(0);
 }
+.source-transfer-segment.left-side{
+  top:0;
+  left:0;
+  transform-origin:center top;
+  transform:translateZ(0) scaleY(0);
+}
+
+/* bottom corners -> B */
+.source-transfer-segment.bottom-right{
+  right:0;
+  bottom:0;
+  transform-origin:right center;
+  transform:translateZ(0) scaleX(0);
+}
+.source-transfer-segment.bottom-left{
+  left:0;
+  bottom:0;
+  transform-origin:left center;
+  transform:translateZ(0) scaleX(0);
+}
+
+.source-transfer-progress.running .top-right,
+.source-transfer-progress.running .top-left{
+  animation:transfer-grow-x .72s linear forwards;
+}
+.source-transfer-progress.running .right-side,
+.source-transfer-progress.running .left-side{
+  animation:transfer-grow-y 1.44s linear .72s forwards;
+}
+.source-transfer-progress.running .bottom-right,
+.source-transfer-progress.running .bottom-left{
+  /* Intentionally stops short of B while the synchronous retarget is busy.
+     The real Transfer completion snaps the final few percent to B. */
+  animation:transfer-grow-x-hold 1.08s cubic-bezier(.18,.7,.2,1) 2.16s forwards;
+}
+
+.source-transfer-progress.complete .source-transfer-segment{
+  animation:none!important;
+}
+.source-transfer-progress.complete .top-right,
+.source-transfer-progress.complete .top-left,
+.source-transfer-progress.complete .bottom-right,
+.source-transfer-progress.complete .bottom-left{
+  transform:translateZ(0) scaleX(1);
+}
+.source-transfer-progress.complete .right-side,
+.source-transfer-progress.complete .left-side{
+  transform:translateZ(0) scaleY(1);
+}
+
 .source-transfer-point{
-  vector-effect:non-scaling-stroke;
-  stroke:var(--success);
-  stroke-width:1.2px;
+  position:absolute;
+  z-index:2;
+  width:9px;
+  height:9px;
+  margin:-4.5px 0 0 -4.5px;
+  border-radius:50%;
+  border:2px solid var(--success);
+  background:var(--surface);
+  box-shadow:0 0 7px color-mix(in srgb,var(--success) 62%,transparent);
 }
-.source-transfer-point-a{
-  fill:var(--success);
-  filter:drop-shadow(0 0 4px color-mix(in srgb,var(--success) 72%,transparent));
+.source-transfer-point.point-a{
+  top:0;
+  left:50%;
+  background:var(--success);
 }
-.source-transfer-point-b{
-  fill:var(--surface);
-  opacity:.45;
+.source-transfer-point.point-b{
+  top:100%;
+  left:50%;
+  opacity:.48;
 }
-.source-transfer-progress.complete .source-transfer-point-b{
-  fill:var(--success);
+.source-transfer-progress.complete .point-b{
+  background:var(--success);
   opacity:1;
-  filter:drop-shadow(0 0 5px color-mix(in srgb,var(--success) 78%,transparent));
 }
+
 .source-transfer-progress-badge{
   position:absolute;
   top:10px;
   left:50%;
-  transform:translateX(-50%);
+  transform:translate3d(-50%,0,0);
   display:flex;
   align-items:center;
-  gap:7px;
   min-height:25px;
-  padding:4px 9px;
+  padding:4px 10px;
   border:1px solid color-mix(in srgb,var(--success) 38%,var(--border));
   border-radius:999px;
   background:color-mix(in srgb,var(--surface) 88%,transparent);
@@ -130,30 +211,38 @@ h2,p{margin:0}
   font-weight:800;
   box-shadow:0 4px 16px color-mix(in srgb,var(--success) 12%,transparent);
 }
-.source-transfer-progress-badge b{font-size:10px}
 .source-transfer-progress.complete{
-  animation:source-transfer-progress-finish .68s ease .18s forwards;
+  animation:source-transfer-progress-finish .62s ease .22s forwards;
 }
 .retarget-button.is-loading{
   cursor:progress;
   transform:none!important;
 }
 .retarget-button.is-loading .spark{
+  will-change:transform,opacity;
   animation:transfer-spark-pulse .8s ease-in-out infinite alternate;
 }
-@keyframes source-transfer-ab-grow{
-  0%{stroke-dasharray:0 100}
-  72%{stroke-dasharray:72 100}
-  100%{stroke-dasharray:92 100}
+@keyframes transfer-grow-x{
+  from{transform:translateZ(0) scaleX(0)}
+  to{transform:translateZ(0) scaleX(1)}
+}
+@keyframes transfer-grow-y{
+  from{transform:translateZ(0) scaleY(0)}
+  to{transform:translateZ(0) scaleY(1)}
+}
+@keyframes transfer-grow-x-hold{
+  from{transform:translateZ(0) scaleX(0)}
+  to{transform:translateZ(0) scaleX(.84)}
 }
 @keyframes transfer-spark-pulse{
-  from{opacity:.45;transform:scale(.86)}
-  to{opacity:1;transform:scale(1.12)}
+  from{opacity:.45;transform:translateZ(0) scale(.86)}
+  to{opacity:1;transform:translateZ(0) scale(1.12)}
 }
 @keyframes source-transfer-progress-finish{
-  0%,48%{opacity:1}
+  0%,45%{opacity:1}
   100%{opacity:0}
 }
+
 
 .viewport-tools{position:absolute;top:12px;left:12px;z-index:3}.viewport-tool{width:34px;height:34px;min-height:34px;padding:0;background:color-mix(in srgb,var(--surface) 90%,transparent);backdrop-filter:blur(10px)}
 .viewport-label{position:absolute;left:12px;right:12px;bottom:12px;z-index:3;display:flex;align-items:center;gap:7px;padding:8px 10px;border:1px solid color-mix(in srgb,var(--border) 75%,transparent);border-radius:9px;background:color-mix(in srgb,var(--surface) 84%,transparent);backdrop-filter:blur(12px);font-size:10px;color:var(--muted);white-space:nowrap;overflow:hidden}
