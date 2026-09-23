@@ -6,7 +6,6 @@
 function installTransferUi() {
   const button = document.getElementById('applyRetarget');
   const overlay = document.getElementById('sourceTransferProgress');
-  const percent = document.getElementById('sourceTransferPercent');
 
   if (!button || !overlay || typeof button.onclick !== 'function') {
     requestAnimationFrame(installTransferUi);
@@ -32,7 +31,6 @@ function installTransferUi() {
     // Restart CSS animations from A on every Transfer.
     void overlay.getBoundingClientRect();
 
-    if (percent) percent.textContent = '…';
     overlay.classList.add('running');
     button.classList.add('is-loading');
 
@@ -43,8 +41,6 @@ function installTransferUi() {
   function finishOverlay() {
     overlay.classList.remove('running');
     overlay.classList.add('complete');
-
-    if (percent) percent.textContent = '100%';
 
     button.classList.remove('is-loading');
     const label = button.querySelector('b');
@@ -63,16 +59,19 @@ function installTransferUi() {
     uiBusy = true;
     resetOverlay();
 
-    // Two RAFs guarantee that point A + the first border frame are actually
-    // painted before the original synchronous Transfer begins.
+    // The retarget core is synchronous and blocks the main JS thread.
+    // Start the border on compositor-friendly transform layers first, let
+    // the browser commit them, and only then call the untouched core logic.
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        try {
-          coreTransfer.call(button, event);
-        } finally {
-          finishOverlay();
-          uiBusy = false;
-        }
+        window.setTimeout(() => {
+          try {
+            coreTransfer.call(button, event);
+          } finally {
+            finishOverlay();
+            uiBusy = false;
+          }
+        }, 0);
       });
     });
   };
