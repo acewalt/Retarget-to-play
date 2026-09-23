@@ -4597,14 +4597,26 @@ function rebuildTargetPreviewClip() {
     return;
   }
 
-  if (usesEmbeddedDeformControlRigPipeline() && state.deformPreviewClip) {
-    // Mixamo Control Rig and Auto-Rig Pro both lose live Blender constraints
-    // in FBX. Keep animator-control tracks for export and merge a deform-only
-    // companion clip for the viewport.
+  if (usesAutoRigProPipeline() && state.deformPreviewClip) {
+    // ARP's deform bones are interleaved with the control hierarchy.
+    // Replaying Ctrl_* / c_* and deform tracks together reproduces missing
+    // Blender constraints twice. The page preview therefore uses the clean
+    // deform bake only; generated IK controls may be overlaid safely because
+    // they are independent root-level controls in the exported FBX.
+    state.targetPreviewClip = state.ikOnlyClip
+      ? mergeClips(
+          'AutoRigPro_Viewport_Preview',
+          [state.deformPreviewClip, state.ikOnlyClip]
+        )
+      : state.deformPreviewClip;
+    return;
+  }
+
+  if (usesMixamoControlRigPipeline() && state.deformPreviewClip) {
+    // Mixamo Control Rig has a separate mixamorig deform branch, so the
+    // control and deform clips can coexist in the viewport.
     state.targetPreviewClip = mergeClips(
-      usesAutoRigProPipeline()
-        ? 'AutoRigPro_Viewport_Preview'
-        : 'MixamoControlRig_Viewport_Preview',
+      'MixamoControlRig_Viewport_Preview',
       [
         state.fkRawClip || state.fkClip,
         state.deformPreviewClip,
@@ -4729,26 +4741,55 @@ function applyRetarget() {
     let bakedRaw;
     state.deformPreviewClip = null;
 
-    if (usesEmbeddedDeformControlRigPipeline()) {
-      const isArp = usesAutoRigProPipeline();
-      const deformMap = buildCurrentEmbeddedDeformPreviewMap();
-      const rigLabel = isArp ? 'Auto-Rig Pro' : 'Mixamo Control Rig';
+    if (usesAutoRigProPipeline()) {
+      const deformMap = buildAutoRigProDeformPreviewMap();
 
       if (!deformMap.length) {
         throw new Error(
-          `${rigLabel} detectado, pero no encontré su esqueleto deform embebido.`
+          'Auto-Rig Pro detectado, pero no encontré su esqueleto deform embebido.'
         );
       }
 
-      // One sampling pass for both outputs:
-      //   A) animator controls = Action for the original control rig.
-      //   B) embedded deform skeleton = viewport / standalone preview.
+      // IMPORTANT:
+      // Bake the animator controls and the deform preview independently.
+      // ARP interleaves c_* controls and deform/helper bones in one hierarchy;
+      // combining both maps in one pass changes the parent frame used to encode
+      // the control Action. Keeping the bakes separate preserves both outputs.
+      state.fkRawClip = bakeRetarget(
+        map,
+        'Retargeted_AutoRigPro_RAW'
+      );
+
+      state.deformPreviewClip = bakeRetarget(
+        deformMap,
+        'Retargeted_DEF_Preview'
+      );
+
+      if (!state.fkRawClip?.tracks?.length) {
+        throw new Error(
+          'Auto-Rig Pro: el bake no produjo curvas de controles válidas.'
+        );
+      }
+
+      log(
+        `Auto-Rig Pro preview independiente: ${deformMap.length} mappings · ` +
+        `${state.deformPreviewClip?.tracks?.length || 0} tracks deform.`
+      );
+    } else if (usesMixamoControlRigPipeline()) {
+      const deformMap = buildMixamoControlRigDeformPreviewMap();
+
+      if (!deformMap.length) {
+        throw new Error(
+          'Mixamo Control Rig detectado, pero no encontré su esqueleto mixamorig deform.'
+        );
+      }
+
+      // Mixamo Control Rig keeps the deform skeleton as a separate branch,
+      // so one combined sampling pass is safe and faster.
       const combinedMap = [...map, ...deformMap];
       bakedRaw = bakeRetarget(
         combinedMap,
-        isArp
-          ? 'Retargeted_AutoRigPro_RAW'
-          : 'Retargeted_MixamoControlRig_RAW'
+        'Retargeted_MixamoControlRig_RAW'
       );
 
       const controlTargets = new Set(map.map(pair => pair.target));
@@ -4768,26 +4809,28 @@ function applyRetarget() {
 
       if (!state.fkRawClip?.tracks?.length) {
         throw new Error(
-          `${rigLabel}: el bake no produjo curvas de controles válidas.`
+          'Mixamo Control Rig: el bake no produjo curvas Ctrl_* válidas.'
         );
       }
 
       log(
-        `${rigLabel} preview: ${deformTargets.size} huesos deform detectados · ` +
+        `Mixamo Control Rig preview: ${deformTargets.size} huesos deform detectados · ` +
         `${state.deformPreviewClip?.tracks?.length || 0} tracks de preview.`
       );
     } else {
       state.fkRawClip = bakeRetarget(map, 'Retargeted_FK_RAW');
     }
 
-    // CloudRig loses several parenting/hinge constraints in FBX, so its
-    // already-proven path needs the portable pose-basis rewrite. Rigify,
-    // ARP, Mixamo and Mixamo Control Rig keep their target-control bake.
+    // CloudRig, Rigify and Auto-Rig Pro lose functional Blender parent /
+    // constraint relationships in FBX, so their export Action is recoded
+    // against the original-rig basis. Mixamo Control Rig keeps its raw bake.
     state.fkClip = usesCloudRigPipeline()
       ? buildOriginalRigTransferClip(state.fkRawClip)
       : usesRigifyPipeline()
         ? buildRigifyOriginalRigTransferClip(state.fkRawClip)
-        : state.fkRawClip.clone();
+        : usesAutoRigProPipeline()
+          ? buildAutoRigProOriginalRigTransferClip(state.fkRawClip)
+          : state.fkRawClip.clone();
 
     state.fkClip.name = 'Retargeted_FK';
     state.ikOnlyClip = null;
@@ -6059,33 +6102,33 @@ const MIXAMO_CONTROL_RIG_IK_CHAINS = [
 const AUTO_RIG_PRO_IK_CHAINS = [
   {
     kind: 'ARM', side: 'L',
-    a: 'c_arm_fk.l',
-    b: 'c_forearm_fk.l',
-    c: 'c_hand_fk.l',
+    a: 'arm.l',
+    b: 'forearm.l',
+    c: 'hand.l',
     ik: 'c_hand_ik.l',
     pole: 'c_arms_pole.l'
   },
   {
     kind: 'ARM', side: 'R',
-    a: 'c_arm_fk.r',
-    b: 'c_forearm_fk.r',
-    c: 'c_hand_fk.r',
+    a: 'arm.r',
+    b: 'forearm.r',
+    c: 'hand.r',
     ik: 'c_hand_ik.r',
     pole: 'c_arms_pole.r'
   },
   {
     kind: 'LEG', side: 'L',
-    a: 'c_thigh_fk.l',
-    b: 'c_leg_fk.l',
-    c: 'c_foot_fk.l',
+    a: 'thigh.l',
+    b: 'leg.l',
+    c: 'foot.l',
     ik: 'c_foot_ik.l',
     pole: 'c_leg_pole.l'
   },
   {
     kind: 'LEG', side: 'R',
-    a: 'c_thigh_fk.r',
-    b: 'c_leg_fk.r',
-    c: 'c_foot_fk.r',
+    a: 'thigh.r',
+    b: 'leg.r',
+    c: 'foot.r',
     ik: 'c_foot_ik.r',
     pole: 'c_leg_pole.r'
   }
@@ -6183,13 +6226,19 @@ function directControlWorldToLocalMatrix(
   return out.copy(desiredWorld);
 }
 
-function bakeDirectControlRigIkFromFk(definitions, label) {
-  if (!state.fkClip) {
+function bakeDirectControlRigIkFromFk(
+  definitions,
+  label,
+  solveClipOverride = null,
+  { preserveRestPoleDistance = false } = {}
+) {
+  const solveClip = solveClipOverride || state.fkClip;
+
+  if (!solveClip) {
     throw new Error('Primero aplica el retargeting FK.');
   }
 
   const tgt = state.target;
-  const solveClip = state.fkClip;
 
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
   const frameCount = Math.max(2, Math.ceil(solveClip.duration * fps) + 1);
@@ -6213,12 +6262,25 @@ function bakeDirectControlRigIkFromFk(definitions, label) {
   const action = mixer.clipAction(solveClip).play();
 
   const poleAnchors = new Map();
+  const poleRestDistances = new Map();
 
   for (const chain of chains) {
     poleAnchors.set(
       chain.pole,
       scanDirectControlPoleAnchor(tgt, mixer, chain, times)
     );
+
+    if (preserveRestPoleDistance) {
+      const bendRest = tgt.rest.get(chain.b);
+      const poleRest = tgt.rest.get(chain.pole);
+      const restDistance = bendRest && poleRest
+        ? bendRest.worldPos.distanceTo(poleRest.worldPos)
+        : NaN;
+
+      if (Number.isFinite(restDistance) && restDistance > 1e-5) {
+        poleRestDistances.set(chain.pole, restDistance);
+      }
+    }
   }
 
   const data = new Map();
@@ -6301,10 +6363,20 @@ function bakeDirectControlRigIkFromFk(definitions, label) {
         const poleRest = tgt.rest.get(chain.pole);
         if (!poleRest) continue;
 
-        const poleWorldPos = computeBlendCapPolePointFromSnapshot(
+        let poleWorldPos = computeBlendCapPolePointFromSnapshot(
           snap,
           poleAnchors.get(chain.pole)
         );
+
+        const restPoleDistance = poleRestDistances.get(chain.pole);
+        if (restPoleDistance) {
+          const direction = poleWorldPos.clone().sub(snap.b.position);
+          if (direction.lengthSq() > 1e-10) {
+            poleWorldPos = snap.b.position.clone().add(
+              direction.normalize().multiplyScalar(restPoleDistance)
+            );
+          }
+        }
 
         desiredPoleWorld.compose(
           poleWorldPos,
@@ -6392,7 +6464,9 @@ function bakeMixamoControlRigIkFromFk() {
 function bakeAutoRigProIkFromFk() {
   return bakeDirectControlRigIkFromFk(
     AUTO_RIG_PRO_IK_CHAINS,
-    'Auto-Rig Pro'
+    'Auto-Rig Pro',
+    state.deformPreviewClip || state.fkRawClip || state.fkClip,
+    { preserveRestPoleDistance: true }
   );
 }
 
@@ -7305,6 +7379,179 @@ function buildRigifyOriginalRigTransferClip(clip) {
     tracks
   );
 }
+
+const AUTO_RIG_PRO_LOGICAL_PARENT = {
+  'c_spine_01.x': 'c_root.x',
+  'c_spine_02.x': 'c_spine_01.x',
+
+  'c_neck.x': 'c_spine_02.x',
+  'c_head.x': 'c_neck.x',
+
+  'c_shoulder.l': 'c_spine_02.x',
+  'c_arm_fk.l': 'c_shoulder.l',
+  'c_forearm_fk.l': 'c_arm_fk.l',
+  'c_hand_fk.l': 'c_forearm_fk.l',
+
+  'c_shoulder.r': 'c_spine_02.x',
+  'c_arm_fk.r': 'c_shoulder.r',
+  'c_forearm_fk.r': 'c_arm_fk.r',
+  'c_hand_fk.r': 'c_forearm_fk.r',
+
+  'c_thigh_fk.l': 'c_root.x',
+  'c_leg_fk.l': 'c_thigh_fk.l',
+  'c_foot_fk.l': 'c_leg_fk.l',
+  'c_toes_fk.l': 'c_foot_fk.l',
+
+  'c_thigh_fk.r': 'c_root.x',
+  'c_leg_fk.r': 'c_thigh_fk.r',
+  'c_foot_fk.r': 'c_leg_fk.r',
+  'c_toes_fk.r': 'c_foot_fk.r'
+};
+
+for (const side of ['l', 'r']) {
+  for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
+    AUTO_RIG_PRO_LOGICAL_PARENT[`c_${finger}1.${side}`] =
+      `c_hand_fk.${side}`;
+    AUTO_RIG_PRO_LOGICAL_PARENT[`c_${finger}2.${side}`] =
+      `c_${finger}1.${side}`;
+    AUTO_RIG_PRO_LOGICAL_PARENT[`c_${finger}3.${side}`] =
+      `c_${finger}2.${side}`;
+  }
+}
+
+function buildAutoRigProOriginalRigTransferClip(clip) {
+  const tgt = state.target;
+  if (!clip || !tgt.root) return clip;
+
+  const sourceTracks = clip.tracks.map(track => track.clone());
+  const replacements = new Map();
+
+  const runtimeByOriginal = original =>
+    findBoneByOriginalExact(tgt, [original]) || '';
+
+  const findQuatTrack = runtimeName =>
+    sourceTracks.find(track => {
+      const parsed = parseTrackTarget(track.name);
+      return (
+        parsed?.nodeName === runtimeName &&
+        parsed.property === 'quaternion'
+      );
+    }) || null;
+
+  restoreRest(tgt);
+  tgt.mixer?.stopAllAction();
+
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(clip).play();
+
+  try {
+    for (const [childOriginal, parentOriginal] of Object.entries(
+      AUTO_RIG_PRO_LOGICAL_PARENT
+    )) {
+      const childName = runtimeByOriginal(childOriginal);
+      const parentName = runtimeByOriginal(parentOriginal);
+
+      if (!childName || !parentName) continue;
+
+      const child = tgt.bones.get(childName);
+      const parent = tgt.bones.get(parentName);
+      const childRest = tgt.rest.get(childName);
+      const parentRest = tgt.rest.get(parentName);
+      const track = findQuatTrack(childName);
+
+      if (
+        !child || !parent || !childRest || !parentRest || !track
+      ) {
+        continue;
+      }
+
+      // Rest relation in the ORIGINAL/functional hierarchy.
+      const restRelativeQ = parentRest.worldQuat.clone()
+        .invert()
+        .multiply(childRest.worldQuat)
+        .normalize();
+
+      const desiredWorldQ = new THREE.Quaternion();
+      const parentPoseQ = new THREE.Quaternion();
+      const functionalIdentityQ = new THREE.Quaternion();
+      const basisQ = new THREE.Quaternion();
+      const exportLocalQ = new THREE.Quaternion();
+
+      const values = [];
+      let previous = null;
+
+      for (const time of track.times) {
+        restoreRest(tgt);
+        mixer.setTime(Number(time));
+        updateSlotWorld(tgt);
+
+        // The raw control bake was produced against the exported FBX tree,
+        // so its WORLD pose is the desired animation pose.
+        child.getWorldQuaternion(desiredWorldQ).normalize();
+        parent.getWorldQuaternion(parentPoseQ).normalize();
+
+        // Re-encode that desired WORLD pose as Blender matrix_basis against
+        // ARP's functional parent, not against the incomplete FBX parent.
+        functionalIdentityQ.copy(parentPoseQ)
+          .multiply(restRelativeQ)
+          .normalize();
+
+        basisQ.copy(functionalIdentityQ)
+          .invert()
+          .multiply(desiredWorldQ)
+          .normalize();
+
+        exportLocalQ.copy(childRest.quaternion)
+          .multiply(basisQ)
+          .normalize();
+
+        if (previous && previous.dot(exportLocalQ) < 0) {
+          exportLocalQ.x *= -1;
+          exportLocalQ.y *= -1;
+          exportLocalQ.z *= -1;
+          exportLocalQ.w *= -1;
+        }
+
+        values.push(
+          exportLocalQ.x,
+          exportLocalQ.y,
+          exportLocalQ.z,
+          exportLocalQ.w
+        );
+        previous = exportLocalQ.clone();
+      }
+
+      replacements.set(
+        track.name,
+        new THREE.QuaternionKeyframeTrack(
+          track.name,
+          Array.from(track.times),
+          values
+        )
+      );
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    restoreRest(tgt);
+  }
+
+  const tracks = sourceTracks.map(
+    track => replacements.get(track.name) || track
+  );
+
+  log(
+    `Auto-Rig Pro OriginalRig basis: ${replacements.size} controles ` +
+    'recodificados contra parent funcional (spine/neck/head/shoulders/FK).'
+  );
+
+  return new THREE.AnimationClip(
+    clip.name || 'Retargeted_FK',
+    clip.duration,
+    tracks
+  );
+}
+
 
 function buildCloudRigCleanHierarchyPlan() {
   const tgt = state.target;
