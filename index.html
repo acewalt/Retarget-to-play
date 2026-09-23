@@ -3,6 +3,9 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
   <meta name="color-scheme" content="light dark" />
   <title>Retarget-to-play</title>
   <script>
@@ -12,7 +15,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260923-ghost-validation1" />
+  <link rel="stylesheet" href="./styles.css?v=20260923-ghost-header2" />
   <script type="importmap">
   {
     "imports": {
@@ -183,17 +186,19 @@
           </div>
 
           <article id="targetModule" class="viewport-card target-card">
-            <header class="card-head">
+            <header class="card-head target-card-head">
               <div><span class="eyebrow">TARGET</span><h2>Target Character</h2></div>
-              <span class="format-badge">FBX</span>
+              <div class="target-card-actions">
+                <button id="ghostMode" class="target-compare-button" type="button" title="Superponer el Source normalizado sobre el Target" aria-pressed="false" disabled>Ghost</button>
+                <button id="validateRetarget" class="target-compare-button" type="button" title="Medir precisión del retarget en este frame y copiar el reporte" disabled>Validar</button>
+                <span class="format-badge">FBX</span>
+              </div>
             </header>
 
             <div class="viewport-wrap">
               <div id="targetViewport" class="viewport"></div>
-              <div class="viewport-tools target-compare-tools">
+              <div class="viewport-tools">
                 <button id="fitTarget" class="viewport-tool" type="button" title="Encuadrar">⌗</button>
-                <button id="ghostMode" class="viewport-tool viewport-tool-label" type="button" title="Superponer el Source normalizado sobre el Target" aria-pressed="false" disabled>Ghost</button>
-                <button id="validateRetarget" class="viewport-tool viewport-tool-label" type="button" title="Medir precisión del retarget en este frame y copiar el reporte" disabled>Validar</button>
               </div>
               <div class="viewport-label"><span class="status-dot"></span><span id="targetLabel">Sin FBX</span></div>
             </div>
@@ -412,7 +417,7 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260923-ghost-validation1"></script>
+  <script type="module" src="./app.js?v=20260923-ghost-header2"></script>
   <script type="module" src="./transfer-ui.js?v=20260922-transfer-nodelay1"></script>
 </body>
 </html>
