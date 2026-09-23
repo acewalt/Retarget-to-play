@@ -869,6 +869,16 @@ function validationCoreNode(node) {
   return true;
 }
 
+function validationGroundNode(node) {
+  const sourceName = String(node?.sourceOriginal || '');
+  const targetName = String(node?.targetOriginal || '');
+
+  return (
+    /(leftfoot|rightfoot|lefttoebase|righttoebase|foot|toe)/i.test(sourceName) ||
+    /(foot|toe|ball)/i.test(targetName)
+  );
+}
+
 function validationMedian(values) {
   const finite = values.filter(Number.isFinite).sort((a, b) => a - b);
   if (!finite.length) return 0;
@@ -905,6 +915,8 @@ function validationRestAlignment(nodes = validationMappedNodes()) {
     return {
       scale: 1,
       rotation: new THREE.Quaternion(),
+      restGroundOffsetY: null,
+      groundSampleCount: 0,
       bodySpan: 1,
       samples,
       sourceCenter: new THREE.Vector3(),
@@ -955,6 +967,35 @@ function validationRestAlignment(nodes = validationMappedNodes()) {
           .normalize()
       : new THREE.Quaternion();
 
+  // The old Ghost matched the CURRENT hips vertically every frame. That made
+  // characters with different leg proportions look slightly sunk into, or
+  // floating above, the Target. Use the feet/toes in REST only to establish a
+  // static ground-plane offset. The offset does not change per frame, so jumps,
+  // crouches and vertical root-motion errors stay visible.
+  const groundSamples = samples.filter(sample =>
+    validationGroundNode(sample.node)
+  );
+
+  const sourceGroundY = validationMedian(
+    groundSamples.map(sample =>
+      sample.source.clone()
+        .multiplyScalar(scale)
+        .applyQuaternion(rotation)
+        .y
+    )
+  );
+
+  const targetGroundY = validationMedian(
+    groundSamples.map(sample => sample.target.y)
+  );
+
+  const restGroundOffsetY =
+    groundSamples.length >= 2 &&
+    Number.isFinite(sourceGroundY) &&
+    Number.isFinite(targetGroundY)
+      ? targetGroundY - sourceGroundY
+      : null;
+
   const box = new THREE.Box3();
   box.makeEmpty();
   for (const sample of scaleSamples) box.expandByPoint(sample.target);
@@ -975,6 +1016,8 @@ function validationRestAlignment(nodes = validationMappedNodes()) {
   return {
     scale,
     rotation,
+    restGroundOffsetY,
+    groundSampleCount: groundSamples.length,
     bodySpan,
     samples,
     sourceCenter,
@@ -1005,24 +1048,7 @@ function validationAnchorNode(nodes) {
   return candidates[0]?.node || nodes[0];
 }
 
-function updateGhostOverlayPose() {
-  const ghost = state.ghost;
-  if (!ghost?.enabled || !ghost.container || !ghost.mixer) return;
-  if (!state.source.root || !state.target.root || !state.targetPreviewClip) return;
-
-  ghost.mixer.setTime(state.playTime);
-  ghost.visual?.updateMatrixWorld?.(true);
-
-  updateSlotWorld(state.source);
-  updateSlotWorld(state.target);
-
-  const nodes = validationMappedNodes();
-  const alignment = validationRestAlignment(nodes);
-  const anchor = validationAnchorNode(nodes);
-
-  ghost.container.scale.setScalar(alignment.scale);
-  ghost.container.quaternion.copy(alignment.rotation);
-
+function validationGhostTranslation(alignment, anchor) {
   let sourceAnchor;
   let targetAnchor;
 
@@ -1041,17 +1067,53 @@ function updateGhostOverlayPose() {
     targetAnchor = targetBox.getCenter(new THREE.Vector3());
   }
 
-  // Container transform is:
-  //   P_target = T + R * (S * P_source)
-  // Solve T so the current root/hips anchor coincides exactly.
   const transformedSourceAnchor = sourceAnchor
     .clone()
     .multiplyScalar(alignment.scale)
     .applyQuaternion(alignment.rotation);
 
-  ghost.container.position.copy(targetAnchor)
+  const translation = targetAnchor.clone()
     .sub(transformedSourceAnchor);
 
+  // Horizontal/depth alignment follows the current hips/root so the models
+  // remain visually superposed while scrubbing. Vertical alignment is locked
+  // to the REST floor whenever feet/toes are available; this fixes the
+  // "Source slightly below Target" case without hiding vertical animation.
+  if (Number.isFinite(alignment.restGroundOffsetY)) {
+    translation.y = alignment.restGroundOffsetY;
+  }
+
+  return {
+    translation,
+    sourceAnchor,
+    targetAnchor
+  };
+}
+
+function updateGhostOverlayPose() {
+  const ghost = state.ghost;
+  if (!ghost?.enabled || !ghost.container || !ghost.mixer) return;
+  if (!state.source.root || !state.target.root || !state.targetPreviewClip) return;
+
+  ghost.mixer.setTime(state.playTime);
+  ghost.visual?.updateMatrixWorld?.(true);
+
+  updateSlotWorld(state.source);
+  updateSlotWorld(state.target);
+
+  const nodes = validationMappedNodes();
+  const alignment = validationRestAlignment(nodes);
+  const anchor = validationAnchorNode(nodes);
+
+  ghost.container.scale.setScalar(alignment.scale);
+  ghost.container.quaternion.copy(alignment.rotation);
+
+  const { translation } = validationGhostTranslation(
+    alignment,
+    anchor
+  );
+
+  ghost.container.position.copy(translation);
   ghost.container.updateMatrixWorld(true);
 }
 
@@ -1217,29 +1279,11 @@ function currentValidationSnapshot() {
   const alignment = validationRestAlignment(nodes);
   const anchor = validationAnchorNode(nodes);
 
-  let sourceAnchor = anchor
-    ? anchor.sourceBone.getWorldPosition(new THREE.Vector3())
-    : centroidOfPoints(
-        nodes.map(node =>
-          node.sourceBone.getWorldPosition(new THREE.Vector3())
-        )
-      );
-
-  let targetAnchor = anchor
-    ? anchor.targetBone.getWorldPosition(new THREE.Vector3())
-    : centroidOfPoints(
-        nodes.map(node =>
-          node.targetBone.getWorldPosition(new THREE.Vector3())
-        )
-      );
-
-  const transformedSourceAnchor = sourceAnchor
-    .clone()
-    .multiplyScalar(alignment.scale)
-    .applyQuaternion(alignment.rotation);
-
-  const translation = targetAnchor.clone()
-    .sub(transformedSourceAnchor);
+  const {
+    translation,
+    sourceAnchor,
+    targetAnchor
+  } = validationGhostTranslation(alignment, anchor);
 
   const jointErrors = [];
 
@@ -1335,7 +1379,10 @@ function buildRetargetValidationReport(snapshot) {
     'NORMALIZACIÓN',
     `Escala robusta Source→Target: ${snapshot.alignment.scale.toFixed(4)}x`,
     'Rotación: corrección estática Rest-space (no ajuste por frame)',
-    `Anchor: ${snapshot.anchor?.sourceOriginal || 'centroide'} ↔ ${snapshot.anchor?.targetOriginal || 'centroide'}`,
+    Number.isFinite(snapshot.alignment.restGroundOffsetY)
+      ? `Vertical: suelo REST por pies/toes (${snapshot.alignment.groundSampleCount} referencias) · offset ${snapshot.alignment.restGroundOffsetY.toFixed(4)}`
+      : 'Vertical: fallback al anchor actual',
+    `Anchor X/Z: ${snapshot.anchor?.sourceOriginal || 'centroide'} ↔ ${snapshot.anchor?.targetOriginal || 'centroide'}`,
     `Joints comparados: ${snapshot.nodes.length}`,
     `Segmentos comparados: ${snapshot.segments.length}`,
     '',
