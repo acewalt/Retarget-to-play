@@ -405,6 +405,8 @@ function makeSlot(kind) {
     rest: new Map(),
     animations: [],
     neutralBaseClip: null,
+    restSource: 'model-local',
+    restDetection: null,
     mixer: null,
     action: null,
     activeClip: null,
@@ -1662,6 +1664,247 @@ function restoreRest(slot) {
 }
 
 
+function humanoidRestSemantic(name) {
+  const n = canonicalSemantic(name);
+  const candidates = [
+    'hips',
+    'spine', 'spine1', 'spine2',
+    'neck', 'head',
+    'leftshoulder', 'rightshoulder',
+    'leftarm', 'rightarm',
+    'leftforearm', 'rightforearm',
+    'leftupleg', 'rightupleg',
+    'leftleg', 'rightleg',
+    'leftfoot', 'rightfoot'
+  ];
+  return candidates.find(candidate => n.endsWith(candidate)) || '';
+}
+
+function findBoneByRestSemantic(bones, semantic) {
+  if (!semantic) return null;
+
+  for (const [name, bone] of bones) {
+    const candidate = humanoidRestSemantic(originalObjectName(bone) || name);
+    if (candidate === semantic) return bone;
+  }
+
+  return null;
+}
+
+function compareSourceModelRestToBindRest(sourceSlot, bindBones) {
+  const samples = [];
+
+  for (const [name, sourceBone] of sourceSlot.bones) {
+    const semantic = humanoidRestSemantic(originalObjectName(sourceBone) || name);
+    if (!semantic) continue;
+
+    const bindBone =
+      bindBones.get(name) ||
+      findBoneByRestSemantic(bindBones, semantic);
+
+    if (!bindBone) continue;
+
+    samples.push({
+      name,
+      semantic,
+      angleDeg: THREE.MathUtils.radToDeg(
+        sourceBone.quaternion.angleTo(bindBone.quaternion)
+      )
+    });
+  }
+
+  const materiallyDifferent = samples.filter(sample => sample.angleDeg >= 12);
+  const stronglyDifferent = samples.filter(sample => sample.angleDeg >= 25);
+  const avgDeg = samples.length
+    ? samples.reduce((sum, sample) => sum + sample.angleDeg, 0) / samples.length
+    : 0;
+  const maxDeg = samples.length
+    ? Math.max(...samples.map(sample => sample.angleDeg))
+    : 0;
+
+  // Deliberately conservative. A normal FBX keeps its existing path.
+  // We only switch when several major humanoid bones disagree strongly with
+  // the explicit FBX BindPose, which is the "animation baked into Model pose"
+  // case seen in some Mixamo-style FBX files.
+  const useBindPose =
+    samples.length >= 8 &&
+    materiallyDifferent.length >= 4 &&
+    stronglyDifferent.length >= 2 &&
+    avgDeg >= 7 &&
+    maxDeg >= 35;
+
+  return {
+    useBindPose,
+    sampleCount: samples.length,
+    materiallyDifferent: materiallyDifferent.length,
+    stronglyDifferent: stronglyDifferent.length,
+    avgDeg,
+    maxDeg
+  };
+}
+
+function deriveConditionalSourceBindRest(originalBuffer, sourceSlot) {
+  if (!originalBuffer || !sourceSlot?.root || !sourceSlot.animations?.length) {
+    return null;
+  }
+
+  let neutralized;
+
+  try {
+    // This utility does not alter Model transforms. It only rewrites a
+    // temporary copy of the Action so frame 0 evaluates to the FBX BindPose.
+    // The original Source bytes and original Source Action remain untouched.
+    neutralized = rewriteTargetActionsToBindRest(originalBuffer);
+  } catch (error) {
+    return {
+      applied: false,
+      reason: 'bind-pose-unavailable',
+      error: error?.message || String(error)
+    };
+  }
+
+  const report = neutralized?.report;
+  if (
+    !report?.bindModels ||
+    !report?.curvesRewritten ||
+    !neutralized?.bytes?.byteLength
+  ) {
+    return {
+      applied: false,
+      reason: 'no-usable-bind-pose',
+      report
+    };
+  }
+
+  let candidateRoot = null;
+  let mixer = null;
+
+  try {
+    const bytes = neutralized.bytes;
+    const candidateBuffer = bytes.buffer.slice(
+      bytes.byteOffset,
+      bytes.byteOffset + bytes.byteLength
+    );
+
+    const candidateAsset = fbxLoader.parse(candidateBuffer, '');
+    candidateRoot = candidateAsset.root;
+    const candidateClips = [...candidateAsset.animations];
+
+    if (!candidateRoot || !candidateClips.length) {
+      return {
+        applied: false,
+        reason: 'bind-pose-no-candidate-action',
+        report
+      };
+    }
+
+    mixer = new THREE.AnimationMixer(candidateRoot);
+    const action = mixer.clipAction(candidateClips[0]);
+    action.setLoop(THREE.LoopOnce, 1);
+    action.clampWhenFinished = true;
+    action.play();
+    mixer.setTime(0);
+    candidateRoot.updateMatrixWorld(true);
+
+    const bindBones = collectBones(candidateRoot);
+    const detection = compareSourceModelRestToBindRest(sourceSlot, bindBones);
+
+    if (!detection.useBindPose) {
+      return {
+        applied: false,
+        reason: 'model-rest-matches-bind-pose',
+        report,
+        detection
+      };
+    }
+
+    const bindRest = new Map();
+
+    for (const [name, sourceBone] of sourceSlot.bones) {
+      const semantic = humanoidRestSemantic(originalObjectName(sourceBone) || name);
+      const candidateBone =
+        bindBones.get(name) ||
+        findBoneByRestSemantic(bindBones, semantic);
+
+      if (!candidateBone) continue;
+
+      bindRest.set(name, {
+        position: candidateBone.position.clone(),
+        quaternion: candidateBone.quaternion.clone(),
+        scale: candidateBone.scale.clone(),
+        worldPos: candidateBone.getWorldPosition(new THREE.Vector3()),
+        worldQuat: candidateBone.getWorldQuaternion(new THREE.Quaternion()),
+        worldScale: candidateBone.getWorldScale(new THREE.Vector3())
+      });
+    }
+
+    if (bindRest.size < Math.max(8, Math.floor(sourceSlot.bones.size * 0.4))) {
+      return {
+        applied: false,
+        reason: 'bind-pose-insufficient-bone-match',
+        report,
+        detection,
+        matchedBones: bindRest.size
+      };
+    }
+
+    // Any bone absent from the FBX BindPose falls back to the already captured
+    // Model-local rest, so the condition never destroys partial/custom rigs.
+    for (const [name, current] of sourceSlot.rest) {
+      if (bindRest.has(name)) continue;
+
+      bindRest.set(name, {
+        position: current.position.clone(),
+        quaternion: current.quaternion.clone(),
+        scale: current.scale.clone(),
+        worldPos: current.worldPos.clone(),
+        worldQuat: current.worldQuat.clone(),
+        worldScale: current.worldScale.clone()
+      });
+    }
+
+    sourceSlot.rest = bindRest;
+    sourceSlot.restSource = 'fbx-bind-pose';
+    sourceSlot.restDetection = {
+      ...detection,
+      bindModels: report.bindModels,
+      curvesRewritten: report.curvesRewritten
+    };
+
+    restoreRest(sourceSlot);
+    sourceSlot.rigRuntime?.captureRest?.();
+
+    return {
+      applied: true,
+      reason: 'model-rest-differs-from-bind-pose',
+      report,
+      detection,
+      matchedBones: bindRest.size
+    };
+  } catch (error) {
+    return {
+      applied: false,
+      reason: 'bind-pose-derivation-failed',
+      report,
+      error: error?.message || String(error)
+    };
+  } finally {
+    mixer?.stopAllAction?.();
+
+    if (candidateRoot) {
+      candidateRoot.traverse(object => {
+        object.geometry?.dispose?.();
+        if (Array.isArray(object.material)) {
+          object.material.forEach(material => material?.dispose?.());
+        } else {
+          object.material?.dispose?.();
+        }
+      });
+    }
+  }
+}
+
+
 function buildNeutralTargetBaselineClip(slot, clips) {
   if (!slot?.root || slot.kind !== 'target') return null;
 
@@ -1899,6 +2142,36 @@ async function loadFbx(file, slot, view) {
   } else {
     captureRest(slot);
 
+    if (slot.kind === 'source') {
+      const bindRestResult = deriveConditionalSourceBindRest(buffer, slot);
+
+      if (bindRestResult?.applied) {
+        const d = bindRestResult.detection;
+        log(
+          `Source Rest auto-detect: pose Model distinta de BindPose · usando BindPose FBX. ` +
+          `${d.materiallyDifferent}/${d.sampleCount} huesos principales ≥12°, ` +
+          `${d.stronglyDifferent} ≥25°, avg=${d.avgDeg.toFixed(1)}°, max=${d.maxDeg.toFixed(1)}°.`
+        );
+      } else if (bindRestResult?.detection) {
+        const d = bindRestResult.detection;
+        slot.restSource = 'model-local';
+        slot.restDetection = d;
+        log(
+          `Source Rest auto-detect: pose Model compatible con BindPose · sin corrección. ` +
+          `${d.materiallyDifferent}/${d.sampleCount} huesos ≥12°, ` +
+          `avg=${d.avgDeg.toFixed(1)}°, max=${d.maxDeg.toFixed(1)}°.`
+        );
+      } else if (
+        bindRestResult?.reason &&
+        bindRestResult.reason !== 'no-usable-bind-pose'
+      ) {
+        log(
+          `Source Rest auto-detect: fallback Model pose (${bindRestResult.reason}` +
+          `${bindRestResult.error ? ': ' + bindRestResult.error : ''}).`
+        );
+      }
+    }
+
     if (slot.kind === 'target') {
       slot.animations = [];
       root.animations = [];
@@ -1920,7 +2193,7 @@ async function loadFbx(file, slot, view) {
     const inferred = inferPrefix(slot);
     if (inferred) $('sourcePrefix').value = inferred;
     rememberSourceForActionPacker(file);
-    log(`WaltFBX v${WALT_FBX_VERSION} Source: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions; UpAxis=${asset.metadata.upAxis}; axis=${asset.metadata.axisNormalization}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}.`);
+    log(`WaltFBX v${WALT_FBX_VERSION} Source: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions; Rest=${slot.restSource}; UpAxis=${asset.metadata.upAxis}; axis=${asset.metadata.axisNormalization}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}.`);
   } else {
     $('targetLabel').textContent = `${file.name} · ${slot.bones.size} huesos · ${asset.rig.profile}`;
     const rewrittenCurves = targetRestActionReport?.curvesRewritten || 0;
