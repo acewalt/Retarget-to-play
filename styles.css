@@ -263,10 +263,41 @@ h2,p{margin:0}
   animation:source-transfer-progress-finish .62s ease .22s forwards;
 }
 .retarget-button.is-loading{
+  position:relative;
+  overflow:hidden;
   cursor:progress;
   transform:none!important;
+  padding-left:8px;
+  padding-right:8px;
+  gap:0;
+}
+.retarget-button.is-loading>span:not(.spark){
+  min-width:0;
+  max-width:100%;
+  overflow:hidden;
+  white-space:nowrap;
+  text-overflow:clip;
+}
+.retarget-button.is-loading b{
+  display:block;
+  max-width:100%;
+  overflow:hidden;
+  white-space:nowrap;
+  font-size:10px;
+  line-height:1;
 }
 .retarget-button.is-loading .spark{
+  position:absolute;
+  left:7px;
+  top:50%;
+  margin-top:-7px;
+  width:14px;
+  height:14px;
+  display:grid;
+  place-items:center;
+  font-size:12px;
+  line-height:14px;
+  pointer-events:none;
   will-change:transform,opacity;
   animation:transfer-spark-pulse .8s ease-in-out infinite alternate;
 }
@@ -339,7 +370,7 @@ h2,p{margin:0}
 .main-workspace[data-view="export"] .mapping-card,.main-workspace[data-view="export"] .timeline-card,.main-workspace[data-view="export"] .source-card,.main-workspace[data-view="export"] .retarget-bridge{display:none}.main-workspace[data-view="export"] .retarget-stage{grid-template-columns:minmax(0,1.25fr) minmax(300px,.75fr);align-items:stretch}.main-workspace[data-view="export"] .target-card{min-width:0}.main-workspace[data-view="export"] .export-workbench{display:flex}.main-workspace[data-view="export"] .viewport-wrap{min-height:500px}
 ::-webkit-scrollbar{width:9px;height:9px}::-webkit-scrollbar-thumb{background:var(--border-strong);border-radius:99px;border:2px solid transparent;background-clip:padding-box}::-webkit-scrollbar-track{background:transparent}
 @media(max-width:1350px){.workspace-shell{grid-template-columns:190px minmax(580px,1fr) 300px}.topbar{grid-template-columns:210px 1fr auto}.progress-shell{width:130px}.viewport-wrap{min-height:330px}}
-@media(max-width:1080px){body{overflow:auto}.app{height:auto;min-height:100vh}.topbar{grid-template-columns:1fr auto}.topnav{display:none}.workspace-shell{grid-template-columns:170px minmax(0,1fr)}.settings-panel{grid-column:1/-1;border-left:0;border-top:1px solid var(--border);min-height:560px}.settings-scroll{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}.diagnostics{grid-column:1/-1}.export-sticky{position:sticky;bottom:0}.retarget-stage{grid-template-columns:minmax(0,1fr) 90px minmax(0,1fr)}}
+@media(max-width:1080px){.retarget-button.is-loading b{font-size:9px}.retarget-button.is-loading .spark{left:5px;font-size:11px}body{overflow:auto}.app{height:auto;min-height:100vh}.topbar{grid-template-columns:1fr auto}.topnav{display:none}.workspace-shell{grid-template-columns:170px minmax(0,1fr)}.settings-panel{grid-column:1/-1;border-left:0;border-top:1px solid var(--border);min-height:560px}.settings-scroll{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));overflow:visible}.diagnostics{grid-column:1/-1}.export-sticky{position:sticky;bottom:0}.retarget-stage{grid-template-columns:minmax(0,1fr) 90px minmax(0,1fr)}}
 @media(max-width:760px){.topbar{height:auto;min-height:64px;padding:10px 12px}.engine-chip{display:none}.workspace-shell{display:block}.workflow-sidebar{display:none}.main-workspace{padding:10px}.retarget-stage,.main-workspace[data-view="animations"] .retarget-stage,.main-workspace[data-view="export"] .retarget-stage{grid-template-columns:1fr}.retarget-bridge{padding:4px 0}.bridge-arrow{transform:rotate(90deg)}.retarget-button{max-width:240px}.viewport-wrap,.main-workspace[data-view="animations"] .viewport-wrap,.main-workspace[data-view="export"] .viewport-wrap{min-height:0;aspect-ratio:1/1}.mapping-toolbar{grid-template-columns:1fr 1fr}.search-field{grid-column:1/-1}.mapping-summary{flex-wrap:wrap}.progress-shell{width:100px}.settings-scroll{display:block}.timeline{grid-template-columns:42px 1fr}.inline-control,.fps-control{grid-column:span 1}.stacked-fields{grid-template-columns:1fr}.main-workspace[data-view="export"] .source-card,.main-workspace[data-view="export"] .retarget-bridge{display:none}}
 
 .main-workspace[data-view="mappings"] .collapse-button{display:none}
