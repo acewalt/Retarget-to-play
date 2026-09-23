@@ -707,11 +707,90 @@ function disposeGhostOverlay({ keepEnabled = true } = {}) {
   if (!keepEnabled) ghost.enabled = false;
 }
 
+const CLOUDRIG_CONTROL_TO_DEFORM = {
+  'HIP-Spine': 'DEF-Hips',
+  'HTP-Spine': 'DEF-Hips',
+  'FK-Hips': 'DEF-Hips',
+  'FK-Spine': 'DEF-Spine',
+  'FK-Chest': 'DEF-Chest',
+  'FK-Neck': 'DEF-Neck',
+  'FK-Head': 'DEF-Head',
+
+  'FK-Shoulder.L': 'DEF-Shoulder.L',
+  'FK-UpperArm.L': 'DEF-UpperArm_1.L',
+  'FK-Forearm.L': 'DEF-Forearm_1.L',
+  'FK-Hand.L': 'DEF-Hand.L',
+
+  'FK-Shoulder.R': 'DEF-Shoulder.R',
+  'FK-UpperArm.R': 'DEF-UpperArm_1.R',
+  'FK-Forearm.R': 'DEF-Forearm_1.R',
+  'FK-Hand.R': 'DEF-Hand.R',
+
+  'FK-Thigh.L': 'DEF-Thigh_1.L',
+  'FK-Knee.L': 'DEF-Knee_1.L',
+  'FK-Foot.L': 'DEF-Foot.L',
+  'FK-Toes.L': 'DEF-Toes.L',
+
+  'FK-Thigh.R': 'DEF-Thigh_1.R',
+  'FK-Knee.R': 'DEF-Knee_1.R',
+  'FK-Foot.R': 'DEF-Foot.R',
+  'FK-Toes.R': 'DEF-Toes.R'
+};
+
+const RIGIFY_CONTROL_TO_DEFORM = {
+  'spine_fk': 'DEF-spine',
+  'spine_fk.001': 'DEF-spine.002',
+  'spine_fk.002': 'DEF-spine.004',
+  'spine_fk.003': 'DEF-spine.006',
+  'neck': 'DEF-neck',
+  'head': 'DEF-head',
+
+  'shoulder.L': 'DEF-shoulder.L',
+  'upper_arm_fk.L': 'DEF-upper_arm.L',
+  'forearm_fk.L': 'DEF-forearm.L',
+  'hand_fk.L': 'DEF-hand.L',
+
+  'shoulder.R': 'DEF-shoulder.R',
+  'upper_arm_fk.R': 'DEF-upper_arm.R',
+  'forearm_fk.R': 'DEF-forearm.R',
+  'hand_fk.R': 'DEF-hand.R',
+
+  'thigh_fk.L': 'DEF-thigh.L',
+  'shin_fk.L': 'DEF-shin.L',
+  'foot_fk.L': 'DEF-foot.L',
+  'toe_fk.L': 'DEF-toe.L',
+
+  'thigh_fk.R': 'DEF-thigh.R',
+  'shin_fk.R': 'DEF-shin.R',
+  'foot_fk.R': 'DEF-foot.R',
+  'toe_fk.R': 'DEF-toe.R'
+};
+
 function validationTargetBoneName(pair) {
   const targetBone = state.target.bones.get(pair?.target);
   if (!targetBone) return '';
 
   const original = originalObjectName(targetBone) || pair.target;
+
+  if (usesCloudRigPipeline()) {
+    const deformOriginal = CLOUDRIG_CONTROL_TO_DEFORM[original];
+    if (deformOriginal) {
+      return (
+        findBoneByOriginalExact(state.target, [deformOriginal]) ||
+        pair.target
+      );
+    }
+  }
+
+  if (usesRigifyPipeline()) {
+    const deformOriginal = RIGIFY_CONTROL_TO_DEFORM[original];
+    if (deformOriginal) {
+      return (
+        findBoneByOriginalExact(state.target, [deformOriginal]) ||
+        pair.target
+      );
+    }
+  }
 
   if (usesMixamoControlRigPipeline()) {
     const deformSemantic = MIXAMO_CONTROL_TO_DEFORM[original];
@@ -783,6 +862,22 @@ function centroidOfPoints(points) {
   return out.multiplyScalar(1 / points.length);
 }
 
+function validationCoreNode(node) {
+  const name = String(node?.sourceOriginal || '');
+  if (RETARGET_VALIDATION_FINGER_RE.test(name)) return false;
+  if (/(toe|end|eye|jaw|brow|lip|nose|cheek)/i.test(name)) return false;
+  return true;
+}
+
+function validationMedian(values) {
+  const finite = values.filter(Number.isFinite).sort((a, b) => a - b);
+  if (!finite.length) return 0;
+  const mid = Math.floor(finite.length / 2);
+  return finite.length % 2
+    ? finite[mid]
+    : (finite[mid - 1] + finite[mid]) * 0.5;
+}
+
 function validationRestAlignment(nodes = validationMappedNodes()) {
   const samples = [];
 
@@ -798,9 +893,18 @@ function validationRestAlignment(nodes = validationMappedNodes()) {
     });
   }
 
-  if (samples.length < 2) {
+  const coreSamples = samples.filter(sample =>
+    validationCoreNode(sample.node)
+  );
+
+  const scaleSamples = coreSamples.length >= 4
+    ? coreSamples
+    : samples;
+
+  if (scaleSamples.length < 2) {
     return {
       scale: 1,
+      rotation: new THREE.Quaternion(),
       bodySpan: 1,
       samples,
       sourceCenter: new THREE.Vector3(),
@@ -808,41 +912,76 @@ function validationRestAlignment(nodes = validationMappedNodes()) {
     };
   }
 
-  const sourceCenter = centroidOfPoints(samples.map(x => x.source));
-  const targetCenter = centroidOfPoints(samples.map(x => x.target));
+  const sourceCenter = centroidOfPoints(
+    scaleSamples.map(x => x.source)
+  );
+  const targetCenter = centroidOfPoints(
+    scaleSamples.map(x => x.target)
+  );
 
-  let sourceSq = 0;
-  let targetSq = 0;
+  // Median radius-ratio is much more robust than a global RMS when one
+  // character has short legs, long arms, oversized hands, etc.
+  const ratios = [];
 
-  for (const sample of samples) {
-    sourceSq += sample.source.distanceToSquared(sourceCenter);
-    targetSq += sample.target.distanceToSquared(targetCenter);
+  for (const sample of scaleSamples) {
+    const sourceRadius = sample.source.distanceTo(sourceCenter);
+    const targetRadius = sample.target.distanceTo(targetCenter);
+
+    if (sourceRadius > 1e-6 && targetRadius > 1e-6) {
+      ratios.push(targetRadius / sourceRadius);
+    }
   }
 
-  const sourceRms = Math.sqrt(sourceSq / samples.length);
-  const targetRms = Math.sqrt(targetSq / samples.length);
+  const medianScale = validationMedian(ratios);
+  const scale = medianScale > 0
+    ? THREE.MathUtils.clamp(medianScale, 0.05, 20)
+    : 1;
 
-  const scale =
-    sourceRms > 1e-7 && targetRms > 1e-7
-      ? THREE.MathUtils.clamp(targetRms / sourceRms, 0.05, 20)
-      : 1;
+  const anchor = validationAnchorNode(nodes);
+  const sourceAnchorRest = anchor
+    ? state.source.rest.get(anchor.source)
+    : null;
+  const targetAnchorRest = anchor
+    ? state.target.rest.get(anchor.target)
+    : null;
+
+  // Static coordinate-system correction. This is NOT a per-frame fit:
+  // it only reconciles the two rigs' Rest orientation, so animation errors
+  // remain visible instead of being hidden by the Ghost.
+  const rotation =
+    sourceAnchorRest && targetAnchorRest
+      ? targetAnchorRest.worldQuat.clone()
+          .multiply(sourceAnchorRest.worldQuat.clone().invert())
+          .normalize()
+      : new THREE.Quaternion();
 
   const box = new THREE.Box3();
   box.makeEmpty();
-  for (const sample of samples) box.expandByPoint(sample.target);
+  for (const sample of scaleSamples) box.expandByPoint(sample.target);
+
+  const targetRadii = scaleSamples.map(sample =>
+    sample.target.distanceTo(targetCenter)
+  );
+  const targetMedianRadius = validationMedian(targetRadii);
 
   const bodySpan = box.isEmpty()
-    ? Math.max(targetRms * 2, 1e-4)
-    : Math.max(box.min.distanceTo(box.max), targetRms * 2, 1e-4);
+    ? Math.max(targetMedianRadius * 2, 1e-4)
+    : Math.max(
+        box.min.distanceTo(box.max),
+        targetMedianRadius * 2,
+        1e-4
+      );
 
   return {
     scale,
+    rotation,
     bodySpan,
     samples,
     sourceCenter,
     targetCenter
   };
 }
+
 
 function validationAnchorNode(nodes) {
   if (!nodes.length) return null;
@@ -882,6 +1021,7 @@ function updateGhostOverlayPose() {
   const anchor = validationAnchorNode(nodes);
 
   ghost.container.scale.setScalar(alignment.scale);
+  ghost.container.quaternion.copy(alignment.rotation);
 
   let sourceAnchor;
   let targetAnchor;
@@ -901,8 +1041,16 @@ function updateGhostOverlayPose() {
     targetAnchor = targetBox.getCenter(new THREE.Vector3());
   }
 
+  // Container transform is:
+  //   P_target = T + R * (S * P_source)
+  // Solve T so the current root/hips anchor coincides exactly.
+  const transformedSourceAnchor = sourceAnchor
+    .clone()
+    .multiplyScalar(alignment.scale)
+    .applyQuaternion(alignment.rotation);
+
   ghost.container.position.copy(targetAnchor)
-    .sub(sourceAnchor.multiplyScalar(alignment.scale));
+    .sub(transformedSourceAnchor);
 
   ghost.container.updateMatrixWorld(true);
 }
@@ -1085,8 +1233,13 @@ function currentValidationSnapshot() {
         )
       );
 
+  const transformedSourceAnchor = sourceAnchor
+    .clone()
+    .multiplyScalar(alignment.scale)
+    .applyQuaternion(alignment.rotation);
+
   const translation = targetAnchor.clone()
-    .sub(sourceAnchor.clone().multiplyScalar(alignment.scale));
+    .sub(transformedSourceAnchor);
 
   const jointErrors = [];
 
@@ -1094,6 +1247,7 @@ function currentValidationSnapshot() {
     const sourceWorld = node.sourceBone
       .getWorldPosition(new THREE.Vector3())
       .multiplyScalar(alignment.scale)
+      .applyQuaternion(alignment.rotation)
       .add(translation);
 
     const targetWorld = node.targetBone.getWorldPosition(
@@ -1119,7 +1273,8 @@ function currentValidationSnapshot() {
     if (sourceRest && targetRest) {
       const sourceDelta = sourceAnchor.clone()
         .sub(sourceRest.worldPos)
-        .multiplyScalar(alignment.scale);
+        .multiplyScalar(alignment.scale)
+        .applyQuaternion(alignment.rotation);
 
       const targetDelta = targetAnchor.clone()
         .sub(targetRest.worldPos);
@@ -1178,7 +1333,8 @@ function buildRetargetValidationReport(snapshot) {
     `Target: ${state.target.fileName || '—'}`,
     '',
     'NORMALIZACIÓN',
-    `Escala uniforme Source→Target: ${snapshot.alignment.scale.toFixed(4)}x`,
+    `Escala robusta Source→Target: ${snapshot.alignment.scale.toFixed(4)}x`,
+    'Rotación: corrección estática Rest-space (no ajuste por frame)',
     `Anchor: ${snapshot.anchor?.sourceOriginal || 'centroide'} ↔ ${snapshot.anchor?.targetOriginal || 'centroide'}`,
     `Joints comparados: ${snapshot.nodes.length}`,
     `Segmentos comparados: ${snapshot.segments.length}`,
