@@ -481,6 +481,7 @@ const state = {
   exported: false,
   workspaceView: 'workspace',
   workspaceMappingCollapsed: true,
+  mappingPreviewSelectedIndex: null,
   dualFbxReady: false,
   actionPackerSourceFiles: [],
   ghost: {
@@ -3791,6 +3792,276 @@ function validMap() {
   });
 }
 
+function mappingPreviewBoneSet(slot, side) {
+  if (!slot?.root) return new Set();
+
+  const reverse = new Map();
+  for (const [name, bone] of slot.bones) reverse.set(bone, name);
+
+  const selected = new Set();
+
+  for (const pair of state.boneMap) {
+    const name = side === 'source' ? pair.source : pair.target;
+    if (name && slot.bones.has(name)) selected.add(name);
+  }
+
+  // If Mapping is still empty, show the rig itself. For very large control
+  // rigs we avoid drawing hundreds of helper branches until a map exists.
+  if (!selected.size) {
+    const all = [...slot.bones.keys()];
+    if (all.length <= 160) return new Set(all);
+
+    for (const [name, bone] of slot.bones) {
+      const original = originalObjectName(bone) || name;
+      if (
+        /(^|[:._-])(root|hips|pelvis|spine|chest|neck|head|shoulder|clavicle|arm|forearm|hand|thigh|upleg|leg|calf|knee|foot|toe)([.:_-]|$)/i.test(original) &&
+        !/(pole|mch|str-|helper|twist|roll|mechanism)/i.test(original)
+      ) {
+        selected.add(name);
+      }
+    }
+  }
+
+  // Keep the path to the rig root so the spatial relationship remains clear.
+  for (const name of [...selected]) {
+    let bone = slot.bones.get(name)?.parent;
+    let guard = 0;
+
+    while (bone && guard++ < 64) {
+      const parentName = reverse.get(bone);
+      if (parentName) selected.add(parentName);
+      bone = bone.parent;
+    }
+  }
+
+  return selected;
+}
+
+function mappingPreviewRestPosition(slot, name) {
+  const rest = slot?.rest?.get(name);
+  if (rest?.worldPos) return rest.worldPos.clone();
+
+  const bone = slot?.bones?.get(name);
+  return bone
+    ? bone.getWorldPosition(new THREE.Vector3())
+    : null;
+}
+
+function drawMappingSkeleton(canvas, slot, side, selectedName) {
+  if (!canvas) return;
+
+  const rect = canvas.getBoundingClientRect();
+  const width = Math.max(1, Math.round(rect.width));
+  const height = Math.max(1, Math.round(rect.height));
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+  const pixelWidth = Math.max(1, Math.round(width * dpr));
+  const pixelHeight = Math.max(1, Math.round(height * dpr));
+
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth;
+    canvas.height = pixelHeight;
+  }
+
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+
+  const styles = getComputedStyle(document.documentElement);
+  const lineColor =
+    styles.getPropertyValue('--border-strong').trim() ||
+    'rgba(130,150,180,.72)';
+  const nodeColor =
+    styles.getPropertyValue('--muted').trim() ||
+    'rgba(150,165,190,.9)';
+  const textColor =
+    styles.getPropertyValue('--muted').trim() ||
+    '#94a3b8';
+  const selectedColor = '#facc15';
+
+  if (!slot?.root) {
+    ctx.fillStyle = textColor;
+    ctx.font = '11px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(
+      side === 'source' ? 'Carga un Source' : 'Carga un Target',
+      width * 0.5,
+      height * 0.5
+    );
+    return;
+  }
+
+  const visible = mappingPreviewBoneSet(slot, side);
+  const reverse = new Map();
+  for (const [name, bone] of slot.bones) reverse.set(bone, name);
+
+  const points = new Map();
+
+  for (const name of visible) {
+    const p = mappingPreviewRestPosition(slot, name);
+    if (p) points.set(name, p);
+  }
+
+  if (!points.size) return;
+
+  let minX=Infinity, maxX=-Infinity, minY=Infinity, maxY=-Infinity;
+
+  for (const p of points.values()) {
+    minX=Math.min(minX,p.x);
+    maxX=Math.max(maxX,p.x);
+    minY=Math.min(minY,p.y);
+    maxY=Math.max(maxY,p.y);
+  }
+
+  const spanX=Math.max(maxX-minX,1e-4);
+  const spanY=Math.max(maxY-minY,1e-4);
+  const padding=18;
+  const usableW=Math.max(1,width-padding*2);
+  const usableH=Math.max(1,height-padding*2);
+  const scale=Math.min(usableW/spanX,usableH/spanY);
+  const centerX=(minX+maxX)*0.5;
+  const centerY=(minY+maxY)*0.5;
+
+  const project = p => ({
+    x: width*0.5 + (p.x-centerX)*scale,
+    y: height*0.5 - (p.y-centerY)*scale
+  });
+
+  // First pass: regular hierarchy.
+  ctx.lineCap='round';
+  ctx.lineJoin='round';
+
+  for (const [name,p] of points) {
+    const bone=slot.bones.get(name);
+    if(!bone) continue;
+
+    let parent=bone.parent;
+    let parentName='';
+
+    while(parent) {
+      const candidate=reverse.get(parent);
+      if(candidate && points.has(candidate)) {
+        parentName=candidate;
+        break;
+      }
+      parent=parent.parent;
+    }
+
+    if(!parentName) continue;
+
+    const a=project(points.get(parentName));
+    const b=project(p);
+    const highlighted=name===selectedName;
+
+    ctx.beginPath();
+    ctx.moveTo(a.x,a.y);
+    ctx.lineTo(b.x,b.y);
+    ctx.strokeStyle=highlighted ? selectedColor : lineColor;
+    ctx.lineWidth=highlighted ? 3 : 1.35;
+    ctx.globalAlpha=highlighted ? 1 : 0.74;
+    ctx.stroke();
+  }
+
+  // Bone joints.
+  for (const [name,p] of points) {
+    const q=project(p);
+    const highlighted=name===selectedName;
+
+    ctx.beginPath();
+    ctx.arc(q.x,q.y,highlighted ? 5 : 2.15,0,Math.PI*2);
+    ctx.fillStyle=highlighted ? selectedColor : nodeColor;
+    ctx.globalAlpha=highlighted ? 1 : 0.88;
+    ctx.fill();
+
+    if(highlighted) {
+      ctx.beginPath();
+      ctx.arc(q.x,q.y,8,0,Math.PI*2);
+      ctx.strokeStyle='rgba(250,204,21,.32)';
+      ctx.lineWidth=4;
+      ctx.stroke();
+    }
+  }
+
+  ctx.globalAlpha=1;
+}
+
+function renderMappingSkeletonPreview() {
+  const sourceCanvas=$('mappingSourceSkeleton');
+  const targetCanvas=$('mappingTargetSkeleton');
+  if(!sourceCanvas || !targetCanvas) return;
+
+  let index=state.mappingPreviewSelectedIndex;
+
+  if(
+    index == null ||
+    index < 0 ||
+    index >= state.boneMap.length
+  ) {
+    index=null;
+    state.mappingPreviewSelectedIndex=null;
+  }
+
+  const pair=index == null ? null : state.boneMap[index];
+  const sourceName=pair?.source || '';
+  const targetName=pair?.target || '';
+
+  drawMappingSkeleton(
+    sourceCanvas,
+    state.source,
+    'source',
+    sourceName
+  );
+
+  drawMappingSkeleton(
+    targetCanvas,
+    state.target,
+    'target',
+    targetName
+  );
+
+  const sourceLabel=$('mappingSourceBoneLabel');
+  const targetLabel=$('mappingTargetBoneLabel');
+  const hint=$('mappingPreviewHint');
+
+  if(sourceLabel) {
+    sourceLabel.textContent=sourceName
+      ? (originalObjectName(state.source.bones.get(sourceName)) || sourceName)
+      : '—';
+  }
+
+  if(targetLabel) {
+    targetLabel.textContent=targetName
+      ? (originalObjectName(state.target.bones.get(targetName)) || targetName)
+      : '—';
+  }
+
+  if(hint) {
+    if(pair) {
+      const s=sourceLabel?.textContent || sourceName || '—';
+      const t=targetLabel?.textContent || targetName || '—';
+      hint.textContent=`${s} → ${t}`;
+    } else {
+      hint.textContent='Selecciona una fila para comparar ambos huesos.';
+    }
+  }
+}
+
+function selectMappingPreviewPair(index) {
+  state.mappingPreviewSelectedIndex=index;
+
+  document.querySelectorAll('#boneMap .map-row').forEach(row => {
+    row.classList.toggle(
+      'selected',
+      Number(row.dataset.mapIndex)===index
+    );
+  });
+
+  renderMappingSkeletonPreview();
+}
+
 function refreshMapUi() {
   const host = $('boneMap');
   const sourceNames = [...state.source.bones.keys()].sort();
@@ -3799,7 +4070,16 @@ function refreshMapUi() {
     host.className = 'bone-map empty';
     host.textContent = 'Carga ambos FBX.';
     $('mapCount').textContent = '0 / 0 válidos';
+    state.mappingPreviewSelectedIndex = null;
+    renderMappingSkeletonPreview();
     return;
+  }
+
+  if (
+    state.mappingPreviewSelectedIndex != null &&
+    state.mappingPreviewSelectedIndex >= state.boneMap.length
+  ) {
+    state.mappingPreviewSelectedIndex = null;
   }
 
   host.className = 'bone-map';
@@ -3811,13 +4091,27 @@ function refreshMapUi() {
     if (q && !`${pair.source} ${pair.target}`.toLowerCase().includes(q)) return;
     const duplicate = conflicts.has(index);
     const row = document.createElement('div');
-    row.className = `map-row ${(!isPairValid(pair) || duplicate) ? 'invalid' : ''}`;
+    row.dataset.mapIndex = String(index);
+    row.className =
+      `map-row ${(!isPairValid(pair) || duplicate) ? 'invalid' : ''} ` +
+      `${state.mappingPreviewSelectedIndex === index ? 'selected' : ''}`;
+
+    row.onclick = event => {
+      if (event.target instanceof HTMLButtonElement) return;
+      selectMappingPreviewPair(index);
+    };
 
     const s = document.createElement('select');
     s.append(new Option('— Source —', ''));
     sourceNames.forEach(n => s.add(new Option(originalObjectName(state.source.bones.get(n)) || n, n)));
     s.value = pair.source;
-    s.onchange = () => { state.boneMap[index].source = s.value; refreshMapUi(); updateButtons(); };
+    s.onfocus = () => selectMappingPreviewPair(index);
+    s.onchange = () => {
+      state.mappingPreviewSelectedIndex = index;
+      state.boneMap[index].source = s.value;
+      refreshMapUi();
+      updateButtons();
+    };
 
     const arrow = document.createElement('span');
     arrow.className = 'arrow';
@@ -3832,19 +4126,41 @@ function refreshMapUi() {
     t.append(new Option('— Target —', ''));
     targetNames.forEach(n => t.add(new Option(originalObjectName(state.target.bones.get(n)) || n, n)));
     t.value = pair.target;
-    t.onchange = () => { state.boneMap[index].target = t.value; refreshMapUi(); updateButtons(); };
+    t.onfocus = () => selectMappingPreviewPair(index);
+    t.onchange = () => {
+      state.mappingPreviewSelectedIndex = index;
+      state.boneMap[index].target = t.value;
+      refreshMapUi();
+      updateButtons();
+    };
 
     const remove = document.createElement('button');
     remove.className = 'row-remove';
     remove.textContent = '×';
     remove.title = 'Quitar par';
-    remove.onclick = () => { state.boneMap.splice(index, 1); refreshMapUi(); updateButtons(); };
+    remove.onclick = event => {
+      event.stopPropagation();
+
+      if (state.mappingPreviewSelectedIndex === index) {
+        state.mappingPreviewSelectedIndex = null;
+      } else if (
+        state.mappingPreviewSelectedIndex != null &&
+        state.mappingPreviewSelectedIndex > index
+      ) {
+        state.mappingPreviewSelectedIndex--;
+      }
+
+      state.boneMap.splice(index, 1);
+      refreshMapUi();
+      updateButtons();
+    };
 
     row.append(s, arrow, t, remove);
     host.appendChild(row);
   });
 
   $('mapCount').textContent = `${validMap().length} / ${state.boneMap.length} válidos`;
+  renderMappingSkeletonPreview();
   updateButtons();
 }
 
@@ -9723,6 +10039,10 @@ function setWorkspaceView(view) {
   if (next === 'mappings') {
     if (mappingCard) mappingCard.hidden = false;
     setMappingCollapsed(false, false);
+    requestAnimationFrame(() => {
+      renderMappingSkeletonPreview();
+      requestAnimationFrame(renderMappingSkeletonPreview);
+    });
   } else if (next === 'workspace') {
     setMappingCollapsed(true, false);
   }
@@ -10014,12 +10334,23 @@ $('sidebarAutoPreset').onclick = runAutoPreset;
 updateSidebarAutoPresetVisibility(state.workspaceView);
 $('addPair').onclick = () => {
   state.boneMap.push({ source: '', target: '' });
+  state.mappingPreviewSelectedIndex = state.boneMap.length - 1;
   refreshMapUi();
 };
 $('clearMap').onclick = () => {
   state.boneMap = [];
+  state.mappingPreviewSelectedIndex = null;
   refreshMapUi();
 };
+const mappingPreviewResizeObserver = new ResizeObserver(() => {
+  if (state.workspaceView === 'mappings') {
+    renderMappingSkeletonPreview();
+  }
+});
+if ($('mappingSkeletonPreview')) {
+  mappingPreviewResizeObserver.observe($('mappingSkeletonPreview'));
+}
+
 $('mapSearch').oninput = refreshMapUi;
 $('sourcePrefix').onchange = () => {
   if ($('preset').value !== 'none' && state.source.root && state.target.root) void loadPreset();
