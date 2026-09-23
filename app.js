@@ -483,6 +483,14 @@ const state = {
   workspaceMappingCollapsed: true,
   dualFbxReady: false,
   actionPackerSourceFiles: [],
+  ghost: {
+    enabled: false,
+    container: null,
+    visual: null,
+    mixer: null,
+    action: null,
+    opacity: 0.16
+  },
   restEditor: {
     selectedBone: null,
     selectedRole: null,
@@ -663,6 +671,621 @@ function createViewport(container) {
 
 const sourceView = createViewport($('sourceViewport'));
 const targetView = createViewport($('targetViewport'));
+
+const RETARGET_VALIDATION_FINGER_RE = /(thumb|index|middle|ring|pinky)/i;
+
+function disposeGhostOverlay({ keepEnabled = true } = {}) {
+  const ghost = state.ghost;
+  if (!ghost) return;
+
+  ghost.action?.stop?.();
+  ghost.mixer?.stopAllAction?.();
+
+  if (ghost.container) {
+    targetView.scene.remove(ghost.container);
+  }
+
+  ghost.visual?.traverse?.(object => {
+    const materials = Array.isArray(object.material)
+      ? object.material
+      : object.material
+        ? [object.material]
+        : [];
+
+    for (const material of materials) {
+      if (material?.userData?.retargetGhostMaterial) {
+        material.dispose?.();
+      }
+    }
+  });
+
+  ghost.container = null;
+  ghost.visual = null;
+  ghost.mixer = null;
+  ghost.action = null;
+
+  if (!keepEnabled) ghost.enabled = false;
+}
+
+function validationTargetBoneName(pair) {
+  const targetBone = state.target.bones.get(pair?.target);
+  if (!targetBone) return '';
+
+  const original = originalObjectName(targetBone) || pair.target;
+
+  if (usesMixamoControlRigPipeline()) {
+    const deformSemantic = MIXAMO_CONTROL_TO_DEFORM[original];
+    if (deformSemantic) {
+      return (
+        findMixamoControlRigDeformBone(state.target, deformSemantic) ||
+        pair.target
+      );
+    }
+  }
+
+  if (usesAutoRigProPipeline()) {
+    const deformOriginal = ARP_CONTROL_TO_DEFORM[original];
+    if (deformOriginal) {
+      return (
+        findBoneByOriginalExact(state.target, [deformOriginal]) ||
+        findSemanticBone(state.target, deformOriginal) ||
+        pair.target
+      );
+    }
+  }
+
+  return pair.target;
+}
+
+function validationMappedNodes() {
+  if (!state.source.root || !state.target.root) return [];
+
+  const bestBySource = new Map();
+
+  for (const pair of validMap()) {
+    const sourceBone = state.source.bones.get(pair.source);
+    const targetName = validationTargetBoneName(pair);
+    const targetBone = targetName
+      ? state.target.bones.get(targetName)
+      : null;
+
+    if (!sourceBone || !targetBone) continue;
+
+    const channels = String(pair.channels || 'ROT').toUpperCase();
+    const priority =
+      channels.includes('ROT') ? 30 :
+      channels.includes('LOC') ? 10 :
+      1;
+
+    const existing = bestBySource.get(pair.source);
+    if (existing && existing.priority >= priority) continue;
+
+    bestBySource.set(pair.source, {
+      pair,
+      priority,
+      source: pair.source,
+      target: targetName,
+      sourceBone,
+      targetBone,
+      sourceOriginal: originalObjectName(sourceBone) || pair.source,
+      targetOriginal: originalObjectName(targetBone) || targetName
+    });
+  }
+
+  return [...bestBySource.values()];
+}
+
+function centroidOfPoints(points) {
+  const out = new THREE.Vector3();
+  if (!points.length) return out;
+
+  for (const point of points) out.add(point);
+  return out.multiplyScalar(1 / points.length);
+}
+
+function validationRestAlignment(nodes = validationMappedNodes()) {
+  const samples = [];
+
+  for (const node of nodes) {
+    const sr = state.source.rest.get(node.source);
+    const tr = state.target.rest.get(node.target);
+    if (!sr || !tr) continue;
+
+    samples.push({
+      node,
+      source: sr.worldPos.clone(),
+      target: tr.worldPos.clone()
+    });
+  }
+
+  if (samples.length < 2) {
+    return {
+      scale: 1,
+      bodySpan: 1,
+      samples,
+      sourceCenter: new THREE.Vector3(),
+      targetCenter: new THREE.Vector3()
+    };
+  }
+
+  const sourceCenter = centroidOfPoints(samples.map(x => x.source));
+  const targetCenter = centroidOfPoints(samples.map(x => x.target));
+
+  let sourceSq = 0;
+  let targetSq = 0;
+
+  for (const sample of samples) {
+    sourceSq += sample.source.distanceToSquared(sourceCenter);
+    targetSq += sample.target.distanceToSquared(targetCenter);
+  }
+
+  const sourceRms = Math.sqrt(sourceSq / samples.length);
+  const targetRms = Math.sqrt(targetSq / samples.length);
+
+  const scale =
+    sourceRms > 1e-7 && targetRms > 1e-7
+      ? THREE.MathUtils.clamp(targetRms / sourceRms, 0.05, 20)
+      : 1;
+
+  const box = new THREE.Box3();
+  box.makeEmpty();
+  for (const sample of samples) box.expandByPoint(sample.target);
+
+  const bodySpan = box.isEmpty()
+    ? Math.max(targetRms * 2, 1e-4)
+    : Math.max(box.min.distanceTo(box.max), targetRms * 2, 1e-4);
+
+  return {
+    scale,
+    bodySpan,
+    samples,
+    sourceCenter,
+    targetCenter
+  };
+}
+
+function validationAnchorNode(nodes) {
+  if (!nodes.length) return null;
+
+  const sourceObjectToName = new Map();
+  for (const [name, bone] of state.source.bones) {
+    sourceObjectToName.set(bone, name);
+  }
+
+  const candidates = nodes
+    .map(node => ({
+      node,
+      depth: boneDepth(node.sourceBone),
+      rootLike: /(root|hips|pelvis)/i.test(node.sourceOriginal) ? 0 : 1
+    }))
+    .sort((a, b) =>
+      a.rootLike - b.rootLike ||
+      a.depth - b.depth
+    );
+
+  return candidates[0]?.node || nodes[0];
+}
+
+function updateGhostOverlayPose() {
+  const ghost = state.ghost;
+  if (!ghost?.enabled || !ghost.container || !ghost.mixer) return;
+  if (!state.source.root || !state.target.root || !state.targetPreviewClip) return;
+
+  ghost.mixer.setTime(state.playTime);
+  ghost.visual?.updateMatrixWorld?.(true);
+
+  updateSlotWorld(state.source);
+  updateSlotWorld(state.target);
+
+  const nodes = validationMappedNodes();
+  const alignment = validationRestAlignment(nodes);
+  const anchor = validationAnchorNode(nodes);
+
+  ghost.container.scale.setScalar(alignment.scale);
+
+  let sourceAnchor;
+  let targetAnchor;
+
+  if (anchor) {
+    sourceAnchor = anchor.sourceBone.getWorldPosition(new THREE.Vector3());
+    targetAnchor = anchor.targetBone.getWorldPosition(new THREE.Vector3());
+  } else {
+    const sourceBox = new THREE.Box3().setFromObject(
+      state.source.displayRoot || state.source.root
+    );
+    const targetBox = new THREE.Box3().setFromObject(
+      state.target.displayRoot || state.target.root
+    );
+
+    sourceAnchor = sourceBox.getCenter(new THREE.Vector3());
+    targetAnchor = targetBox.getCenter(new THREE.Vector3());
+  }
+
+  ghost.container.position.copy(targetAnchor)
+    .sub(sourceAnchor.multiplyScalar(alignment.scale));
+
+  ghost.container.updateMatrixWorld(true);
+}
+
+function rebuildGhostOverlay() {
+  disposeGhostOverlay({ keepEnabled: true });
+
+  if (
+    !state.ghost.enabled ||
+    !state.source.root ||
+    !state.target.root ||
+    !state.source.activeClip ||
+    !state.targetPreviewClip
+  ) {
+    return;
+  }
+
+  const sourceVisual = state.source.displayRoot || state.source.root;
+  const visual = cloneSkeleton(sourceVisual);
+  const container = new THREE.Group();
+
+  container.name = 'Retarget_Source_Ghost_Container';
+  visual.name = 'Retarget_Source_Ghost';
+  visual.userData.retargetGhost = true;
+
+  visual.traverse(object => {
+    if (object.isMesh || object.isSkinnedMesh) {
+      const material = new THREE.MeshBasicMaterial({
+        color: 0x3b82f6,
+        transparent: true,
+        opacity: state.ghost.opacity,
+        depthTest: true,
+        depthWrite: false,
+        side: THREE.DoubleSide,
+        toneMapped: false
+      });
+
+      material.userData.retargetGhostMaterial = true;
+      object.material = material;
+      object.renderOrder = 45;
+      object.frustumCulled = false;
+      object.raycast = () => {};
+    } else if (object.isLine || object.isLineSegments || object.isPoints) {
+      object.visible = false;
+    }
+  });
+
+  container.add(visual);
+  targetView.scene.add(container);
+
+  const mixer = new THREE.AnimationMixer(visual);
+  const action = mixer.clipAction(state.source.activeClip);
+  action.setLoop(THREE.LoopRepeat, Infinity).play();
+
+  state.ghost.container = container;
+  state.ghost.visual = visual;
+  state.ghost.mixer = mixer;
+  state.ghost.action = action;
+
+  updateGhostOverlayPose();
+}
+
+function setGhostMode(enabled) {
+  state.ghost.enabled = !!enabled;
+
+  if (state.ghost.enabled) {
+    rebuildGhostOverlay();
+  } else {
+    disposeGhostOverlay({ keepEnabled: true });
+  }
+
+  const button = $('ghostMode');
+  if (button) {
+    button.classList.toggle('active', state.ghost.enabled);
+    button.setAttribute('aria-pressed', state.ghost.enabled ? 'true' : 'false');
+    button.textContent = state.ghost.enabled ? 'Ghost · ON' : 'Ghost';
+  }
+}
+
+function validationPercentile(values, percentile) {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  const index = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil(percentile * sorted.length) - 1)
+  );
+  return sorted[index];
+}
+
+function currentValidationSnapshot() {
+  if (!state.source.root || !state.target.root || !state.targetPreviewClip) {
+    throw new Error('Primero genera un Transfer para poder validar.');
+  }
+
+  // Make the two evaluated poses deterministic at the exact timeline time.
+  if (state.source.mixer && state.source.activeClip) {
+    state.source.mixer.setTime(state.playTime);
+  }
+  if (state.target.mixer && state.targetPreviewClip) {
+    state.target.mixer.setTime(state.playTime);
+  }
+
+  applyTargetRigRuntime();
+  updateSlotWorld(state.source);
+  updateSlotWorld(state.target);
+
+  const nodes = validationMappedNodes();
+  if (nodes.length < 3) {
+    throw new Error('No hay suficientes huesos comparables para validar.');
+  }
+
+  const bySource = new Map(nodes.map(node => [node.source, node]));
+  const sourceObjectToName = new Map();
+
+  for (const [name, bone] of state.source.bones) {
+    sourceObjectToName.set(bone, name);
+  }
+
+  const segments = [];
+
+  for (const node of nodes) {
+    let parentObject = node.sourceBone.parent;
+    let parentNode = null;
+
+    while (parentObject) {
+      const sourceName = sourceObjectToName.get(parentObject);
+      if (sourceName && bySource.has(sourceName)) {
+        parentNode = bySource.get(sourceName);
+        break;
+      }
+      parentObject = parentObject.parent;
+    }
+
+    if (!parentNode) continue;
+    if (parentNode.target === node.target) continue;
+
+    const sourceA = parentNode.sourceBone.getWorldPosition(new THREE.Vector3());
+    const sourceB = node.sourceBone.getWorldPosition(new THREE.Vector3());
+    const targetA = parentNode.targetBone.getWorldPosition(new THREE.Vector3());
+    const targetB = node.targetBone.getWorldPosition(new THREE.Vector3());
+
+    const sourceVector = sourceB.sub(sourceA);
+    const targetVector = targetB.sub(targetA);
+
+    if (sourceVector.lengthSq() < 1e-9 || targetVector.lengthSq() < 1e-9) {
+      continue;
+    }
+
+    const angleDeg = THREE.MathUtils.radToDeg(
+      sourceVector.angleTo(targetVector)
+    );
+
+    segments.push({
+      angleDeg,
+      finger:
+        RETARGET_VALIDATION_FINGER_RE.test(node.sourceOriginal) ||
+        RETARGET_VALIDATION_FINGER_RE.test(parentNode.sourceOriginal),
+      label:
+        `${parentNode.sourceOriginal} → ${node.sourceOriginal}  |  ` +
+        `${parentNode.targetOriginal} → ${node.targetOriginal}`
+    });
+  }
+
+  const alignment = validationRestAlignment(nodes);
+  const anchor = validationAnchorNode(nodes);
+
+  let sourceAnchor = anchor
+    ? anchor.sourceBone.getWorldPosition(new THREE.Vector3())
+    : centroidOfPoints(
+        nodes.map(node =>
+          node.sourceBone.getWorldPosition(new THREE.Vector3())
+        )
+      );
+
+  let targetAnchor = anchor
+    ? anchor.targetBone.getWorldPosition(new THREE.Vector3())
+    : centroidOfPoints(
+        nodes.map(node =>
+          node.targetBone.getWorldPosition(new THREE.Vector3())
+        )
+      );
+
+  const translation = targetAnchor.clone()
+    .sub(sourceAnchor.clone().multiplyScalar(alignment.scale));
+
+  const jointErrors = [];
+
+  for (const node of nodes) {
+    const sourceWorld = node.sourceBone
+      .getWorldPosition(new THREE.Vector3())
+      .multiplyScalar(alignment.scale)
+      .add(translation);
+
+    const targetWorld = node.targetBone.getWorldPosition(
+      new THREE.Vector3()
+    );
+
+    const distance = sourceWorld.distanceTo(targetWorld);
+    const percent = (distance / alignment.bodySpan) * 100;
+
+    jointErrors.push({
+      distance,
+      percent,
+      label: `${node.sourceOriginal} ↔ ${node.targetOriginal}`
+    });
+  }
+
+  let rootMotionErrorPercent = 0;
+
+  if (anchor) {
+    const sourceRest = state.source.rest.get(anchor.source);
+    const targetRest = state.target.rest.get(anchor.target);
+
+    if (sourceRest && targetRest) {
+      const sourceDelta = sourceAnchor.clone()
+        .sub(sourceRest.worldPos)
+        .multiplyScalar(alignment.scale);
+
+      const targetDelta = targetAnchor.clone()
+        .sub(targetRest.worldPos);
+
+      rootMotionErrorPercent =
+        sourceDelta.distanceTo(targetDelta) /
+        alignment.bodySpan *
+        100;
+    }
+  }
+
+  const angles = segments.map(x => x.angleDeg);
+  const coreAngles = segments
+    .filter(x => !x.finger)
+    .map(x => x.angleDeg);
+  const positionPercents = jointErrors.map(x => x.percent);
+
+  const average = values =>
+    values.length
+      ? values.reduce((sum, value) => sum + value, 0) / values.length
+      : 0;
+
+  return {
+    nodes,
+    segments,
+    jointErrors,
+    alignment,
+    anchor,
+    angularAverage: average(angles),
+    angularMedian: validationPercentile(angles, 0.5),
+    angularP95: validationPercentile(angles, 0.95),
+    coreAngularAverage: average(coreAngles.length ? coreAngles : angles),
+    positionAveragePercent: average(positionPercents),
+    positionMedianPercent: validationPercentile(positionPercents, 0.5),
+    positionP95Percent: validationPercentile(positionPercents, 0.95),
+    rootMotionErrorPercent
+  };
+}
+
+function buildRetargetValidationReport(snapshot) {
+  const worstSegments = [...snapshot.segments]
+    .sort((a, b) => b.angleDeg - a.angleDeg)
+    .slice(0, 8);
+
+  const worstJoints = [...snapshot.jointErrors]
+    .sort((a, b) => b.percent - a.percent)
+    .slice(0, 8);
+
+  const f2 = value => Number(value || 0).toFixed(2);
+
+  const lines = [
+    'RETARGET VALIDATION · WaltFBX',
+    `Frame: ${state.playTime.toFixed(3)} s`,
+    `Preset: ${state.activePreset?.label || state.activePresetId || 'manual'}`,
+    `Source: ${state.source.fileName || '—'}`,
+    `Target: ${state.target.fileName || '—'}`,
+    '',
+    'NORMALIZACIÓN',
+    `Escala uniforme Source→Target: ${snapshot.alignment.scale.toFixed(4)}x`,
+    `Anchor: ${snapshot.anchor?.sourceOriginal || 'centroide'} ↔ ${snapshot.anchor?.targetOriginal || 'centroide'}`,
+    `Joints comparados: ${snapshot.nodes.length}`,
+    `Segmentos comparados: ${snapshot.segments.length}`,
+    '',
+    'POSE · independiente del tamaño del personaje',
+    `Error angular medio: ${f2(snapshot.angularAverage)}°`,
+    `Error angular mediano: ${f2(snapshot.angularMedian)}°`,
+    `Error angular P95: ${f2(snapshot.angularP95)}°`,
+    `Core body medio (sin dedos): ${f2(snapshot.coreAngularAverage)}°`,
+    '',
+    'POSICIÓN · después de normalizar escala y alinear el anchor',
+    `Desviación media de joints: ${f2(snapshot.positionAveragePercent)}% del span del Target`,
+    `Desviación mediana: ${f2(snapshot.positionMedianPercent)}%`,
+    `Desviación P95: ${f2(snapshot.positionP95Percent)}%`,
+    `Error de root motion: ${f2(snapshot.rootMotionErrorPercent)}% del span del Target`,
+    '',
+    'PEORES SEGMENTOS'
+  ];
+
+  if (worstSegments.length) {
+    worstSegments.forEach((item, index) => {
+      lines.push(
+        `${index + 1}. ${f2(item.angleDeg)}° · ${item.label}`
+      );
+    });
+  } else {
+    lines.push('— Sin segmentos suficientes —');
+  }
+
+  lines.push('', 'PEORES JOINTS');
+
+  if (worstJoints.length) {
+    worstJoints.forEach((item, index) => {
+      lines.push(
+        `${index + 1}. ${f2(item.percent)}% · ${item.label}`
+      );
+    });
+  } else {
+    lines.push('— Sin joints suficientes —');
+  }
+
+  lines.push(
+    '',
+    'LECTURA',
+    '• El error angular compara DIRECCIÓN de segmentos, no longitud: un personaje chaparro/alto no es penalizado por estatura.',
+    '• La posición usa una escala uniforme Source→Target y luego alinea el root/hips; diferencias restantes reflejan pose y proporciones corporales.',
+    '• Root motion se reporta aparte para no esconder un desplazamiento incorrecto al alinear el Ghost.'
+  );
+
+  return lines.join('\n');
+}
+
+async function copyTextWithFallback(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch {
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+
+    let copied = false;
+    try {
+      copied = document.execCommand('copy');
+    } finally {
+      textarea.remove();
+    }
+
+    return copied;
+  }
+}
+
+async function validateAndCopyRetarget() {
+  const button = $('validateRetarget');
+
+  try {
+    const snapshot = currentValidationSnapshot();
+    const report = buildRetargetValidationReport(snapshot);
+
+    log(report);
+
+    const copied = await copyTextWithFallback(report);
+
+    setStatus(
+      `Validación ${copied ? 'copiada' : 'generada'} · ` +
+      `Pose ${snapshot.coreAngularAverage.toFixed(2)}° · ` +
+      `Joints ${snapshot.positionAveragePercent.toFixed(2)}%`,
+      'good'
+    );
+
+    if (button) {
+      const old = button.textContent;
+      button.textContent = copied ? 'Copiado ✓' : 'Validado ✓';
+      window.setTimeout(() => {
+        if (button) button.textContent = old;
+      }, 1300);
+    }
+  } catch (error) {
+    console.error(error);
+    setStatus('No se pudo validar', 'bad');
+    log(`ERROR Validación: ${error?.message || error}`);
+  }
+}
 
 const REST_POSE_BONES = [
   { role: 'leftUpperArm', label: 'Left Upper Arm', semantic: 'LeftArm', aliases: ['LeftArm', 'upper_arm_fk.L', 'FK-UpperArm.L', 'upperarm_l'] },
@@ -2203,6 +2826,10 @@ function disposeObject(root) {
 }
 
 function clearSlot(slot, view) {
+  if (state.ghost?.container) {
+    disposeGhostOverlay({ keepEnabled: true });
+  }
+
   if (state.restEditor?.targetOverlayRoot) {
     disposeRestPoseTargetOverlay();
   }
@@ -2497,6 +3124,11 @@ function setSourceClip(index) {
   slot.mixer.setTime(0);
   state.playTime = 0;
   updateTimelineBounds();
+
+  if (state.ghost?.enabled && state.targetPreviewClip) {
+    rebuildGhostOverlay();
+  }
+
   updateButtons();
 }
 
@@ -4843,6 +5475,10 @@ function applyRetarget() {
       state.deformPreviewClip = null;
     }
     rebuildTargetPreviewClip();
+
+    if (state.ghost.enabled) {
+      rebuildGhostOverlay();
+    }
 
     state.playTime = 0;
     playTargetClip(state.targetPreviewClip);
@@ -8949,6 +9585,21 @@ function updateButtons() {
   const ready = !!state.source.root && !!state.target.root && !!state.source.activeClip && validMap().length > 0;
   $('applyRetarget').disabled = !ready;
   $('convertIk').disabled = !state.fkClip || !supportsFkToIk();
+
+  const canCompare = !!(
+    state.fkClip &&
+    state.source.root &&
+    state.target.root &&
+    state.targetPreviewClip
+  );
+
+  if ($('ghostMode')) $('ghostMode').disabled = !canCompare;
+  if ($('validateRetarget')) $('validateRetarget').disabled = !canCompare;
+
+  if (!canCompare && state.ghost.enabled && state.ghost.container) {
+    disposeGhostOverlay({ keepEnabled: true });
+  }
+
   updateQuickIkStep();
   $('exportFbx').disabled = !state.exportClip;
   if ($('exportWorkspaceButton')) $('exportWorkspaceButton').disabled = !state.exportClip;
@@ -8970,6 +9621,7 @@ function seek(time) {
   if (state.source.mixer && state.source.activeClip) state.source.mixer.setTime(state.playTime);
   if (state.target.mixer && state.targetPreviewClip) state.target.mixer.setTime(state.playTime);
   applyTargetRigRuntime();
+  updateGhostOverlayPose();
   updateRigOverlays();
   $('timeline').value = String(state.playTime);
   $('timeReadout').textContent = `${state.playTime.toFixed(2)} / ${duration.toFixed(2)} s`;
@@ -9057,6 +9709,8 @@ $('sourceButton').onclick = () => $('sourceFile').click();
 $('targetButton').onclick = () => $('targetFile').click();
 $('fitSource').onclick = () => fitView(sourceView, state.source.displayRoot || state.source.root);
 $('fitTarget').onclick = () => fitView(targetView, state.target.displayRoot || state.target.root);
+$('ghostMode').onclick = () => setGhostMode(!state.ghost.enabled);
+$('validateRetarget').onclick = validateAndCopyRetarget;
 $('sourceClip').onchange = () => setSourceClip(Number($('sourceClip').value));
 $('loadPreset').onclick = () => {
   if ($('preset').value === 'none') {
@@ -9271,6 +9925,7 @@ function animate(now) {
   }
 
   applyTargetRigRuntime();
+  updateGhostOverlayPose();
   updateRigOverlays();
   syncRestPoseGizmoThickness();
   updateRestPoseJointMarkers();
