@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260922-autopreset-font" />
+  <link rel="stylesheet" href="./styles.css?v=20260922-transfer-progress1" />
   <script type="importmap">
   {
     "imports": {
@@ -130,6 +130,16 @@
 
             <div class="viewport-wrap">
               <div id="sourceViewport" class="viewport"></div>
+              <div id="sourceTransferProgress" class="source-transfer-progress" hidden aria-hidden="true">
+                <svg class="source-transfer-progress-frame" viewBox="0 0 100 100" preserveAspectRatio="none" focusable="false" aria-hidden="true">
+                  <path class="source-transfer-progress-path" pathLength="100" d="M 50 1 H 99 V 99 H 50"></path>
+                  <path class="source-transfer-progress-path" pathLength="100" d="M 50 1 H 1 V 99 H 50"></path>
+                </svg>
+                <div class="source-transfer-progress-badge">
+                  <span>Transfer</span>
+                  <b id="sourceTransferPercent">0%</b>
+                </div>
+              </div>
               <div class="viewport-tools">
                 <button id="fitSource" class="viewport-tool" type="button" title="Encuadrar">⌗</button>
               </div>
@@ -378,6 +388,6 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260922-sideautopreset2"></script>
+  <script type="module" src="./app.js?v=20260922-transfer-progress1"></script>
 </body>
 </html>
