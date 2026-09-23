@@ -1057,3 +1057,31 @@ h2,p{margin:0}
     max-width:0;
   }
 }
+
+
+/* Embedded Action Packer mobile sizing v1 */
+@media (max-width:760px){
+  .workspace-shell.actionpacker-focus{
+    display:block!important;
+    height:auto!important;
+    min-height:0!important;
+    overflow:visible!important;
+  }
+
+  .workspace-shell.actionpacker-focus .action-packer-workspace{
+    display:block;
+    width:100%;
+    height:auto!important;
+    min-height:calc(100dvh - 132px);
+    overflow:visible!important;
+  }
+
+  .workspace-shell.actionpacker-focus .action-packer-frame{
+    display:block;
+    width:100%;
+    height:var(--action-packer-mobile-height, calc(100dvh - 132px));
+    min-height:calc(100dvh - 132px);
+    overflow:hidden;
+    border:0;
+  }
+}
