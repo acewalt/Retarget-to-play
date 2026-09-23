@@ -547,9 +547,39 @@ function syncAllSourcesToActionPacker() {
 window.addEventListener('message', event => {
   if (event.origin !== window.location.origin) return;
   if (event.source !== actionPackerFrameWindow()) return;
-  if (event.data?.type !== 'action-packer:ready') return;
 
-  syncAllSourcesToActionPacker();
+  if (event.data?.type === 'action-packer:ready') {
+    syncAllSourcesToActionPacker();
+    return;
+  }
+
+  if (event.data?.type === 'action-packer:height') {
+    const frame = $('actionPackerFrame');
+    const height = Number(event.data.height);
+
+    if (
+      frame &&
+      window.matchMedia('(max-width: 760px)').matches &&
+      Number.isFinite(height) &&
+      height > 300
+    ) {
+      const clamped = Math.min(Math.max(Math.ceil(height), 520), 12000);
+      frame.style.height = clamped + 'px';
+      frame.parentElement?.style.setProperty(
+        '--action-packer-mobile-height',
+        clamped + 'px'
+      );
+    }
+  }
+});
+
+const actionPackerMobileMedia = window.matchMedia('(max-width: 760px)');
+actionPackerMobileMedia.addEventListener?.('change', event => {
+  if (event.matches) return;
+
+  const frame = $('actionPackerFrame');
+  if (frame) frame.style.removeProperty('height');
+  frame?.parentElement?.style.removeProperty('--action-packer-mobile-height');
 });
 
 function makeSlot(kind) {
