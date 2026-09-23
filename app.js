@@ -319,6 +319,7 @@ const state = {
   workspaceView: 'workspace',
   workspaceMappingCollapsed: true,
   dualFbxReady: false,
+  actionPackerSourceFiles: [],
   restEditor: {
     selectedBone: null,
     selectedRole: null,
@@ -338,6 +339,55 @@ const state = {
     applyingSensitivity: false
   }
 };
+
+
+function sourceFileIdentity(file) {
+  return [
+    String(file?.name || ''),
+    Number(file?.size || 0),
+    Number(file?.lastModified || 0)
+  ].join('::');
+}
+
+function actionPackerFrameWindow() {
+  return $('actionPackerFrame')?.contentWindow || null;
+}
+
+function postSourceFileToActionPacker(file) {
+  const target = actionPackerFrameWindow();
+  if (!target || !file) return;
+
+  target.postMessage({
+    type: 'retarget-to-play:source-fbx',
+    file
+  }, window.location.origin);
+}
+
+function rememberSourceForActionPacker(file) {
+  if (!file) return;
+
+  const key = sourceFileIdentity(file);
+  const exists = state.actionPackerSourceFiles.some(
+    entry => sourceFileIdentity(entry) === key
+  );
+
+  if (!exists) state.actionPackerSourceFiles.push(file);
+  postSourceFileToActionPacker(file);
+}
+
+function syncAllSourcesToActionPacker() {
+  for (const file of state.actionPackerSourceFiles) {
+    postSourceFileToActionPacker(file);
+  }
+}
+
+window.addEventListener('message', event => {
+  if (event.origin !== window.location.origin) return;
+  if (event.source !== actionPackerFrameWindow()) return;
+  if (event.data?.type !== 'action-packer:ready') return;
+
+  syncAllSourcesToActionPacker();
+});
 
 function makeSlot(kind) {
   return {
@@ -1869,6 +1919,7 @@ async function loadFbx(file, slot, view) {
     fillSourceClips();
     const inferred = inferPrefix(slot);
     if (inferred) $('sourcePrefix').value = inferred;
+    rememberSourceForActionPacker(file);
     log(`WaltFBX v${WALT_FBX_VERSION} Source: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions; UpAxis=${asset.metadata.upAxis}; axis=${asset.metadata.axisNormalization}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}.`);
   } else {
     $('targetLabel').textContent = `${file.name} · ${slot.bones.size} huesos · ${asset.rig.profile}`;
@@ -7379,6 +7430,10 @@ function setWorkspaceView(view) {
     setMappingCollapsed(false, false);
   } else if (next === 'workspace') {
     setMappingCollapsed(true, false);
+  }
+
+  if (isActionPacker) {
+    requestAnimationFrame(syncAllSourcesToActionPacker);
   }
 
   if (isRestPose) {
