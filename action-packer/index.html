@@ -9,6 +9,11 @@
   <meta http-equiv="Expires" content="0" />
   <title>Action Packer — FBX Animation Merger</title>
   <script>
+    if (window.parent && window.parent !== window) {
+      document.documentElement.classList.add('embedded-action-packer');
+    }
+  </script>
+  <script>
     (() => {
       const readTheme = () => {
         try {
@@ -36,7 +41,7 @@
       } catch {}
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260922-retarget-theme1" />
+  <link rel="stylesheet" href="./styles.css?v=20260923-mobile-layout1" />
   <script type="importmap">
   {
     "imports": {
@@ -430,6 +435,52 @@
     </article>
   </template>
 
-  <script type="module" src="./app.js?v=20260922-source-packer-sync1"></script>
+  <script>
+    (() => {
+      if (!(window.parent && window.parent !== window)) return;
+
+      let raf = 0;
+
+      const reportHeight = () => {
+        cancelAnimationFrame(raf);
+        raf = requestAnimationFrame(() => {
+          const height = Math.ceil(
+            Math.max(
+              document.body?.scrollHeight || 0,
+              document.documentElement?.scrollHeight || 0,
+              document.querySelector('.app-shell')?.scrollHeight || 0
+            )
+          );
+
+          window.parent.postMessage({
+            type: 'action-packer:height',
+            height
+          }, window.location.origin);
+        });
+      };
+
+      addEventListener('load', reportHeight, { once: true });
+      addEventListener('resize', reportHeight);
+
+      const startObserver = () => {
+        const shell = document.querySelector('.app-shell');
+        if (!shell) return;
+        new ResizeObserver(reportHeight).observe(shell);
+        new MutationObserver(reportHeight).observe(shell, {
+          childList: true,
+          subtree: true,
+          attributes: true
+        });
+        reportHeight();
+      };
+
+      if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startObserver, { once: true });
+      } else {
+        startObserver();
+      }
+    })();
+  </script>
+  <script type="module" src="./app.js?v=20260923-mobile-layout1"></script>
 </body>
 </html>
