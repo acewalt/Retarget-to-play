@@ -1,0 +1,407 @@
+<!doctype html>
+<html lang="es">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="theme-color" content="#101216" />
+  <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate" />
+  <meta http-equiv="Pragma" content="no-cache" />
+  <meta http-equiv="Expires" content="0" />
+  <title>Action Packer — FBX Animation Merger</title>
+  <link rel="stylesheet" href="./styles.css?v=20260922-50" />
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://esm.sh/three@0.186.0",
+      "three/addons/": "https://esm.sh/three@0.186.0/examples/jsm/",
+      "@comfyorg/fbx-exporter-three": "https://esm.sh/@comfyorg/fbx-exporter-three@1.0.1?external=three"
+    }
+  }
+  </script>
+</head>
+<body>
+  <div class="app-shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">ACTION PACKER</p>
+        <h1>Action Packer</h1>
+      </div>
+      <div class="topbar-meta">
+        <span class="pill">Local · sin subir archivos</span>
+        <a class="ghost-link" href="https://github.com/acewalt/action_to_edit" target="_blank" rel="noreferrer">GitHub</a>
+      </div>
+    </header>
+
+    <main class="workspace">
+      <aside class="sidebar left-panel">
+        <section class="panel-section">
+          <div class="section-heading">
+            <div>
+              <span class="step">01</span>
+              <h2>Importar FBX</h2>
+            </div>
+            <button id="clearAllBtn" class="text-button danger" type="button">Limpiar</button>
+          </div>
+
+          <label id="dropZone" class="drop-zone" for="fileInput">
+            <input id="fileInput" type="file" accept=".fbx" multiple />
+            <span class="drop-icon">＋</span>
+            <strong>Arrastra varios FBX aquí</strong>
+            <span>o haz clic para seleccionarlos</span>
+          </label>
+          <p class="hint">Cada archivo puede aportar una o varias acciones. Para mejores resultados, usa FBX con el mismo rig y nombres de huesos.</p>
+        </section>
+
+        <section class="panel-section grow">
+          <div class="section-heading">
+            <div>
+              <span class="step">02</span>
+              <h2>Modelo base</h2>
+            </div>
+            <span id="assetCount" class="counter">0</span>
+          </div>
+          <div id="assetList" class="asset-list empty-list">
+            <p>Importa FBX para elegir cuál conservará la malla y el esqueleto.</p>
+          </div>
+        </section>
+      </aside>
+
+      <section class="viewport-column">
+        <div class="viewport-card">
+          <div class="viewport-toolbar">
+            <div>
+              <span id="baseBadge" class="pill muted">Sin modelo base</span>
+              <span id="activeActionBadge" class="pill muted">Sin acción</span>
+            </div>
+            <div class="toolbar-actions">
+              <button id="toggleMotionPanelBtn" class="icon-button" type="button">Ajustes</button>
+              <button id="toggleShadingBtn" class="icon-button shading-toggle" type="button" title="Ver el modelo sin materiales ni texturas" disabled>Sólido</button>
+              <button id="toggleSkeletonBtn" class="icon-button" type="button" disabled>Esqueleto</button>
+              <button id="fitCameraBtn" class="icon-button" type="button" disabled>Encuadrar</button>
+            </div>
+          </div>
+
+          <div id="viewport" class="viewport">
+            <div class="view-navigation" aria-label="Navegación de vista">
+              <button id="toggleProjectionBtn" class="projection-toggle" type="button" title="Alternar Perspectiva / Ortográfica">Perspectiva</button>
+              <div id="viewGizmo" class="view-gizmo" aria-label="Gimbal de navegación">
+                <svg class="view-gizmo-lines" viewBox="0 0 86 86" aria-hidden="true">
+                  <line id="navLineXNeg" x1="43" y1="43" x2="18" y2="43"></line>
+                  <line id="navLineYNeg" x1="43" y1="43" x2="43" y2="68"></line>
+                  <line id="navLineZNeg" x1="43" y1="43" x2="43" y2="18"></line>
+                  <line id="navLineX" x1="43" y1="43" x2="68" y2="43"></line>
+                  <line id="navLineY" x1="43" y1="43" x2="43" y2="18"></line>
+                  <line id="navLineZ" x1="43" y1="43" x2="18" y2="43"></line>
+                </svg>
+                <span class="view-gizmo-center"></span>
+                <button class="view-axis view-axis-neg axis-x" type="button" data-axis-view="-x" title="Vista -X"></button>
+                <button class="view-axis view-axis-neg axis-y" type="button" data-axis-view="-y" title="Vista -Y"></button>
+                <button class="view-axis view-axis-neg axis-z" type="button" data-axis-view="-z" title="Vista -Z"></button>
+                <button class="view-axis axis-x" type="button" data-axis-view="+x" title="Vista +X">X</button>
+                <button class="view-axis axis-y" type="button" data-axis-view="+y" title="Vista +Y">Y</button>
+                <button class="view-axis axis-z" type="button" data-axis-view="+z" title="Vista +Z">Z</button>
+              </div>
+            </div>
+
+            <aside id="motionPanel" class="motion-panel">
+              <div class="motion-panel-header">
+                <div>
+                  <strong>Ajustes de Action</strong>
+                  <span id="motionPanelActionName">Selecciona una Action</span>
+                </div>
+                <button id="resetMotionPanelBtn" class="motion-reset-all" type="button" disabled>Reset</button>
+              </div>
+
+              <div id="motionPanelBody" class="motion-panel-body is-disabled">
+                <div class="motion-control">
+                  <div class="motion-control-head">
+                    <label for="overdriveRange">Overdrive</label>
+                    <output id="overdriveValue">50 · 1.00×</output>
+                  </div>
+                  <input id="overdriveRange" type="range" min="0" max="100" step="1" value="50" />
+                  <small>Solo velocidad · 0 = 0.5× · 50 = 1× · 100 = 2×</small>
+                </div>
+
+                <div class="motion-control">
+                  <div class="motion-control-head">
+                    <label for="armSpaceRange">Character Arm-Space</label>
+                    <output id="armSpaceValue">50</output>
+                  </div>
+                  <input id="armSpaceRange" type="range" min="0" max="100" step="1" value="50" />
+                  <small>50 = brazos originales</small>
+                </div>
+
+                <div class="motion-control trim-control">
+                  <div class="motion-control-head">
+                    <div>
+                      <label>Trim</label>
+                      <span id="trimFramesLabel">0 total Frames</span>
+                    </div>
+                    <button id="resetTrimBtn" class="mini-reset" type="button">Reset</button>
+                  </div>
+                  <div class="dual-range">
+                    <div class="dual-range-track"></div>
+                    <div id="trimRangeFill" class="dual-range-fill"></div>
+                    <input id="trimStartRange" class="dual-range-input" type="range" min="0" max="100" step="1" value="0" />
+                    <input id="trimEndRange" class="dual-range-input" type="range" min="0" max="100" step="1" value="100" />
+                  </div>
+                  <div class="range-limits"><span id="trimStartValue">0</span><span id="trimEndValue">100</span></div>
+                </div>
+
+                <label class="motion-check">
+                  <input id="mirrorActionCheckbox" type="checkbox" />
+                  <span>Mirror</span>
+                </label>
+
+                <div class="motion-divider"></div>
+
+                <div class="root-offset-section">
+                  <div class="motion-control-head">
+                    <div>
+                      <label>Action Transform</label>
+                      <span id="rootResolvedName">Todo el rig · no modifica huesos</span>
+                    </div>
+                    <button id="resetRootOffsetBtn" class="mini-reset" type="button">Reset transform</button>
+                  </div>
+
+                  <div class="action-transform-note">
+                    Offset superior a la animación, equivalente a transformar el objeto Armature completo.
+                  </div>
+
+                  <div class="gizmo-tool-row combined-gizmo-row">
+                    <button id="toggleRootGizmoBtn" class="gizmo-tool-button combined-gizmo-button" type="button">Transformar en viewport</button>
+                    <div class="combined-gizmo-snaps">
+                      <label class="gizmo-snap-control">
+                        <span>Mover</span>
+                        <select id="rootMoveSnapSelect">
+                          <option value="0.1">0.1</option>
+                          <option value="0.25">0.25</option>
+                          <option value="0.5" selected>0.5</option>
+                          <option value="1">1.0</option>
+                        </select>
+                      </label>
+                      <label class="gizmo-snap-control">
+                        <span>Rotar</span>
+                        <select id="rootRotateSnapSelect">
+                          <option value="1">1°</option>
+                          <option value="5" selected>5°</option>
+                          <option value="10">10°</option>
+                          <option value="15">15°</option>
+                        </select>
+                      </label>
+                    </div>
+                  </div>
+                  <small id="rootGizmoHelp" class="gizmo-help">Flechas = mover · aros = rotar en ejes globales. Ambos se actualizan en tiempo real.</small>
+
+                  <div class="transform-value-group">
+                    <span class="transform-value-title">Posición</span>
+                    <div class="offset-grid">
+                      <label><span>X</span><input id="rootOffsetX" type="number" step="0.1" value="0" /></label>
+                      <label><span>Y</span><input id="rootOffsetY" type="number" step="0.1" value="0" /></label>
+                      <label><span>Z</span><input id="rootOffsetZ" type="number" step="0.1" value="0" /></label>
+                    </div>
+                    <small>Offset global de la Action · unidades del FBX</small>
+                  </div>
+
+                  <div class="transform-value-group">
+                    <span class="transform-value-title">Rotación · Quaternion interno</span>
+                    <div class="offset-grid rotation-grid">
+                      <label><span>X</span><input id="rootRotationX" type="number" step="1" value="0" /></label>
+                      <label><span>Y</span><input id="rootRotationY" type="number" step="1" value="0" /></label>
+                      <label><span>Z</span><input id="rootRotationZ" type="number" step="1" value="0" /></label>
+                    </div>
+                    <small>Vista Euler de referencia · la rotación real se compone y exporta como quaternion</small>
+                  </div>
+                </div>
+
+                <div class="motion-divider"></div>
+
+                <div class="limb-offset-section">
+                  <div class="motion-control-head">
+                    <div>
+                      <label>Offset de extremidad</label>
+                      <span id="limbDetectedLabel">Detección automática · IK v2</span>
+                    </div>
+                    <button id="resetLimbOffsetBtn" class="mini-reset" type="button">Reset extremidad</button>
+                  </div>
+
+                  <label class="limb-field">
+                    <span>Extremidad</span>
+                    <select id="limbSlotSelect" class="motion-select">
+                      <option value="leftHand">Mano L</option>
+                      <option value="rightHand">Mano R</option>
+                      <option value="leftFoot">Pie L</option>
+                      <option value="rightFoot">Pie R</option>
+                    </select>
+                  </label>
+
+                  <label class="limb-field">
+                    <span>Hueso</span>
+                    <select id="limbBoneSelect" class="motion-select"></select>
+                  </label>
+
+                  <button id="toggleLimbGizmoBtn" class="gizmo-tool-button limb-gizmo-button" type="button">
+                    Gizmo IK en viewport
+                  </button>
+                  <small class="limb-hint">Se activa automáticamente al seleccionar una extremidad. Flechas = objetivo IK · aros = orientación del efector.</small>
+
+                  <label class="motion-check limb-stretch-check">
+                    <input id="limbAllowStretch" type="checkbox" />
+                    <span>Permitir estiramiento</span>
+                  </label>
+                  <small class="limb-hint">Desactivado: IK conserva longitudes de brazo/pierna. Activado: la cadena puede estirarse para alcanzar objetivos fuera de rango.</small>
+
+                  <div class="transform-value-group">
+                    <span class="transform-value-title">Posición global</span>
+                    <div class="offset-grid">
+                      <label><span>X</span><input id="limbOffsetX" type="number" step="0.1" value="0" /></label>
+                      <label><span>Y</span><input id="limbOffsetY" type="number" step="0.1" value="0" /></label>
+                      <label><span>Z</span><input id="limbOffsetZ" type="number" step="0.1" value="0" /></label>
+                    </div>
+                  </div>
+
+                  <div class="transform-value-group">
+                    <span class="transform-value-title">Rotación global · Quaternion interno</span>
+                    <div class="offset-grid rotation-grid">
+                      <label><span>X</span><input id="limbRotationX" type="number" step="1" value="0" /></label>
+                      <label><span>Y</span><input id="limbRotationY" type="number" step="1" value="0" /></label>
+                      <label><span>Z</span><input id="limbRotationZ" type="number" step="1" value="0" /></label>
+                    </div>
+                    <small>Los grados son una vista editable; internamente se guarda quaternion.</small>
+                  </div>
+                </div>
+              </div>
+            </aside>
+
+            <div id="viewportEmpty" class="viewport-empty">
+              <div class="empty-cube">◇</div>
+              <strong>Vista previa 3D</strong>
+              <span>Importa uno o más FBX.</span>
+            </div>
+          </div>
+
+          <div class="playback">
+            <button id="playPauseBtn" class="play-button" type="button" disabled>▶</button>
+            <div class="timeline-wrap">
+              <input id="timeline" type="range" min="0" max="1" value="0" step="0.001" disabled />
+              <div class="time-row">
+                <span id="currentTime">0.00 s</span>
+                <span id="durationTime">0.00 s</span>
+              </div>
+            </div>
+            <label class="speed-control">
+              <span>Velocidad</span>
+              <select id="speedSelect">
+                <option value="0.25">0.25×</option>
+                <option value="0.5">0.5×</option>
+                <option value="1" selected>1×</option>
+                <option value="1.5">1.5×</option>
+                <option value="2">2×</option>
+              </select>
+            </label>
+          </div>
+        </div>
+
+        <div id="statusBar" class="status-bar" data-kind="info">
+          <span class="status-dot"></span>
+          <span id="statusText">Listo. Los FBX se procesan únicamente en tu navegador.</span>
+        </div>
+      </section>
+
+      <aside class="sidebar right-panel">
+        <section class="panel-section grow">
+          <div class="section-heading">
+            <div>
+              <span class="step">03</span>
+              <h2>Actions</h2>
+            </div>
+            <span id="actionCount" class="counter">0</span>
+          </div>
+
+          <label class="search-box">
+            <span>⌕</span>
+            <input id="actionSearch" type="search" placeholder="Buscar action..." />
+          </label>
+
+          <div class="action-bulk-controls">
+            <button id="selectAllActionsBtn" class="bulk-action-button" type="button">Seleccionar todas</button>
+            <button id="deselectEmptyActionsBtn" class="bulk-action-button" type="button">Desmarcar sin tracks</button>
+            <button id="renameCompatibleActionsBtn" class="bulk-action-button rename-compatible-button" type="button">Renombrar 100% con nombre FBX</button>
+          </div>
+
+          <div id="actionList" class="action-list empty-list">
+            <p>Las animaciones encontradas aparecerán aquí. Puedes cambiarles el nombre y reproducirlas sobre el modelo base.</p>
+          </div>
+        </section>
+
+        <section class="export-card">
+          <div class="section-heading export-heading">
+            <div>
+              <span class="step">04</span>
+              <h2>Exportar</h2>
+            </div>
+          </div>
+
+          <label class="field">
+            <span>Destino FBX</span>
+            <select id="presetSelect">
+              <option value="unity" selected>Unity</option>
+              <option value="unreal">Unreal Engine</option>
+              <option value="blender">Blender</option>
+              <option value="maya">Maya</option>
+              <option value="threejs">Three.js</option>
+            </select>
+          </label>
+
+          <div class="export-summary">
+            <div><strong id="exportModelName">—</strong><span>modelo base</span></div>
+            <div><strong id="exportActionCount">0</strong><span>actions incluidas</span></div>
+          </div>
+
+          <button id="exportFbxBtn" class="primary-button" type="button" disabled>Exportar FBX con todas las actions</button>
+          <button id="exportGlbBtn" class="secondary-button" type="button" disabled>Exportar copia GLB</button>
+          <p class="hint compact">El FBX conserva el modelo base, su skin/esqueleto y las actions seleccionadas. GLB queda como formato alternativo.</p>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <template id="assetTemplate">
+    <article class="asset-card">
+      <label class="asset-main">
+        <input class="base-radio" type="radio" name="baseAsset" />
+        <span class="radio-ui"></span>
+        <span class="asset-info">
+          <strong class="asset-name"></strong>
+          <span class="asset-meta"></span>
+        </span>
+      </label>
+      <button class="asset-remove" type="button" title="Quitar FBX">×</button>
+    </article>
+  </template>
+
+  <template id="actionTemplate">
+    <article class="action-card">
+      <div class="action-top">
+        <button class="action-play" type="button" title="Reproducir">▶</button>
+        <div class="action-name-wrap">
+          <input class="action-name" type="text" aria-label="Nombre de la action" readonly />
+          <span class="action-origin"></span>
+        </div>
+        <button class="action-rename" type="button" title="Renombrar action">Renombrar</button>
+        <label class="include-toggle" title="Incluir al exportar">
+          <input class="action-include" type="checkbox" checked />
+          <span>Exportar</span>
+        </label>
+      </div>
+      <div class="action-meta">
+        <span class="duration-chip"></span>
+        <span class="tracks-chip"></span>
+        <span class="compat-chip"></span>
+      </div>
+    </article>
+  </template>
+
+  <script type="module" src="./app.js?v=20260922-50"></script>
+</body>
+</html>
