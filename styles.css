@@ -61,7 +61,6 @@ h2,p{margin:0}
 .viewport-wrap{position:relative;aspect-ratio:1/1;min-height:360px;background:var(--viewport);overflow:hidden}
 .viewport{position:absolute;inset:0}.viewport canvas{display:block;width:100%;height:100%}
 .source-transfer-progress{
-  --transfer-progress:0;
   position:absolute;
   inset:0;
   z-index:6;
@@ -81,11 +80,36 @@ h2,p{margin:0}
   stroke:var(--success);
   stroke-width:3px;
   vector-effect:non-scaling-stroke;
-  stroke-linecap:round;
+  stroke-linecap:butt;
   stroke-linejoin:round;
-  stroke-dasharray:var(--transfer-progress) 100;
+  stroke-dasharray:0 100;
   filter:drop-shadow(0 0 4px color-mix(in srgb,var(--success) 68%,transparent));
-  transition:stroke-dasharray .09s linear;
+}
+.source-transfer-progress.running .source-transfer-progress-path{
+  animation:source-transfer-ab-grow 1.8s cubic-bezier(.2,.72,.2,1) forwards;
+}
+.source-transfer-progress.complete .source-transfer-progress-path{
+  animation:none;
+  stroke-dasharray:100 100;
+  filter:drop-shadow(0 0 7px color-mix(in srgb,var(--success) 85%,transparent));
+}
+.source-transfer-point{
+  vector-effect:non-scaling-stroke;
+  stroke:var(--success);
+  stroke-width:1.2px;
+}
+.source-transfer-point-a{
+  fill:var(--success);
+  filter:drop-shadow(0 0 4px color-mix(in srgb,var(--success) 72%,transparent));
+}
+.source-transfer-point-b{
+  fill:var(--surface);
+  opacity:.45;
+}
+.source-transfer-progress.complete .source-transfer-point-b{
+  fill:var(--success);
+  opacity:1;
+  filter:drop-shadow(0 0 5px color-mix(in srgb,var(--success) 78%,transparent));
 }
 .source-transfer-progress-badge{
   position:absolute;
@@ -108,10 +132,7 @@ h2,p{margin:0}
 }
 .source-transfer-progress-badge b{font-size:10px}
 .source-transfer-progress.complete{
-  animation:source-transfer-progress-finish .68s ease forwards;
-}
-.source-transfer-progress.complete .source-transfer-progress-path{
-  filter:drop-shadow(0 0 7px color-mix(in srgb,var(--success) 85%,transparent));
+  animation:source-transfer-progress-finish .68s ease .18s forwards;
 }
 .retarget-button.is-loading{
   cursor:progress;
@@ -119,6 +140,11 @@ h2,p{margin:0}
 }
 .retarget-button.is-loading .spark{
   animation:transfer-spark-pulse .8s ease-in-out infinite alternate;
+}
+@keyframes source-transfer-ab-grow{
+  0%{stroke-dasharray:0 100}
+  72%{stroke-dasharray:72 100}
+  100%{stroke-dasharray:92 100}
 }
 @keyframes transfer-spark-pulse{
   from{opacity:.45;transform:scale(.86)}
