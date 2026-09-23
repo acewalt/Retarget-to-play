@@ -137,7 +137,7 @@ const fbxLoader = new FBXLoader();
 fbxLoader.trimAnimationClips = true;
 
 const scene = new THREE.Scene();
-scene.background = new THREE.Color(0x0e1115);
+scene.background = new THREE.Color(0xe9eef5);
 
 const previewStage = new THREE.Group();
 previewStage.name = '__preview_stage__';
@@ -315,9 +315,41 @@ function renderMainViewport() {
   }
 }
 
-const grid = new THREE.GridHelper(20, 20, 0x39414c, 0x222830);
-grid.position.y = 0;
-scene.add(grid);
+let grid = null;
+
+function actionPackerTheme() {
+  return document.documentElement.dataset.theme === 'dark' ? 'dark' : 'light';
+}
+
+function applyActionPackerViewportTheme() {
+  const dark = actionPackerTheme() === 'dark';
+  const palette = dark
+    ? { background: 0x111821, gridCenter: 0x3b4a5f, grid: 0x273241, solid: 0xaeb6bf }
+    : { background: 0xe9eef5, gridCenter: 0xaab8cb, grid: 0xcbd5e3, solid: 0xffffff };
+
+  scene.background.setHex(palette.background);
+  solidViewportMaterial.color.setHex(palette.solid);
+
+  if (grid) {
+    scene.remove(grid);
+    grid.geometry?.dispose?.();
+    if (Array.isArray(grid.material)) grid.material.forEach(material => material.dispose?.());
+    else grid.material?.dispose?.();
+  }
+
+  grid = new THREE.GridHelper(20, 20, palette.gridCenter, palette.grid);
+  grid.position.y = 0;
+  scene.add(grid);
+}
+
+applyActionPackerViewportTheme();
+
+new MutationObserver(() => {
+  applyActionPackerViewportTheme();
+}).observe(document.documentElement, {
+  attributes: true,
+  attributeFilter: ['data-theme']
+});
 
 const clock = new THREE.Clock();
 
@@ -2122,12 +2154,10 @@ function selectActionForEditing(recordId, { openPanel = true } = {}) {
   const record = state.clips.find((item) => item.id === recordId);
   if (!record) return;
 
-  const changedAction = state.activeClipId !== record.id;
   state.activeClipId = record.id;
 
-  if (changedAction) {
-    state.limbGizmoEnabled = true;
-  }
+  // Selecting or playing an Action must not open IK editing implicitly.
+  // The gizmo remains off until the user explicitly enables it.
 
   if (openPanel) state.motionPanelOpen = true;
   renderMotionPanel();
@@ -2578,12 +2608,10 @@ function playClip(clipId, options = {}) {
   action.paused = false;
   action.play();
 
-  const changedAction = state.activeClipId !== record.id;
   state.activeClipId = record.id;
 
-  if (changedAction) {
-    state.limbGizmoEnabled = true;
-  }
+  // Selecting or playing an Action must not open IK editing implicitly.
+  // The gizmo remains off until the user explicitly enables it.
 
   state.currentAction = action;
   state.previewClip = clip;
@@ -3538,7 +3566,6 @@ els.mirrorActionCheckbox.addEventListener('change', () => {
 
 els.limbSlotSelect.addEventListener('change', () => {
   state.activeLimbKey = els.limbSlotSelect.value;
-  state.limbGizmoEnabled = true;
 
   const record = getActiveRecord();
   const base = getBaseAsset();
@@ -3554,7 +3581,6 @@ els.limbBoneSelect.addEventListener('change', () => {
   if (!record || !base) return;
   const edit = ensureActionEdit(record);
   ensureLimbOffsets(edit)[state.activeLimbKey].bone = els.limbBoneSelect.value;
-  state.limbGizmoEnabled = true;
   renderLimbEditor(edit, base);
   refreshActivePreview();
   requestAnimationFrame(updateLimbGizmoAttachment);
