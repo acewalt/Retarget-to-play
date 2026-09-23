@@ -53,27 +53,51 @@ function installTransferUi() {
     }, 900);
   }
 
+  let primedByPointer = false;
+
+  // Prime only the visual effect on pointer-down. This gives the compositor
+  // time to paint A -> B before the click, without delaying the real Transfer.
+  button.addEventListener('pointerdown', () => {
+    if (uiBusy || button.disabled) return;
+    primedByPointer = true;
+    resetOverlay();
+  }, { passive: true });
+
+  // If the pointer is released without producing a click (drag/cancel),
+  // clean up the primed visual state.
+  document.addEventListener('pointerup', () => {
+    if (!primedByPointer || uiBusy) return;
+    window.setTimeout(() => {
+      if (!primedByPointer || uiBusy) return;
+      overlay.hidden = true;
+      overlay.classList.remove('running', 'complete');
+      button.classList.remove('is-loading');
+      const label = button.querySelector('b');
+      if (label) label.textContent = 'Transfer';
+      primedByPointer = false;
+    }, 0);
+  }, { passive: true });
+
   button.onclick = event => {
     if (uiBusy || button.disabled) return;
 
     uiBusy = true;
-    resetOverlay();
 
-    // The retarget core is synchronous and blocks the main JS thread.
-    // Start the border on compositor-friendly transform layers first, let
-    // the browser commit them, and only then call the untouched core logic.
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        window.setTimeout(() => {
-          try {
-            coreTransfer.call(button, event);
-          } finally {
-            finishOverlay();
-            uiBusy = false;
-          }
-        }, 0);
-      });
-    });
+    // Keyboard/programmatic activation has no pointer-down to prime the UI.
+    // Start the decoration, but call the original Transfer immediately:
+    // no RAF, no timeout, no artificial wait is inserted before retargeting.
+    if (!primedByPointer) resetOverlay();
+    primedByPointer = false;
+
+    const startedAt = performance.now();
+    try {
+      coreTransfer.call(button, event);
+    } finally {
+      const elapsed = performance.now() - startedAt;
+      console.debug(`[Transfer UI] core Transfer: ${elapsed.toFixed(1)} ms`);
+      finishOverlay();
+      uiBusy = false;
+    }
   };
 }
 
