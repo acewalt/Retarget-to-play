@@ -1278,13 +1278,13 @@ h2,p{margin:0}
 }
 .mapping-preview-grid{
   display:grid;
-  grid-template-columns:1fr 1fr;
-  min-height:210px;
+  grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+  align-items:start;
 }
 .mapping-preview-pane{
   min-width:0;
   display:grid;
-  grid-template-rows:32px 178px;
+  grid-template-rows:32px auto;
   background:color-mix(in srgb,var(--surface) 62%,var(--viewport));
 }
 .mapping-preview-pane+ .mapping-preview-pane{
@@ -1317,7 +1317,10 @@ h2,p{margin:0}
 .mapping-preview-pane canvas{
   display:block;
   width:100%;
-  height:178px;
+  height:auto;
+  aspect-ratio:1 / 1;
+  cursor:crosshair;
+  touch-action:manipulation;
 }
 .map-row{
   cursor:pointer;
@@ -1340,16 +1343,16 @@ h2,p{margin:0}
   font-weight:800;
 }
 .main-workspace[data-view="mappings"] .bone-map{
-  max-height:calc(100vh - 535px);
-  min-height:190px;
+  max-height:none;
+  min-height:260px;
 }
 @media(max-width:1080px){
-  .mapping-preview-grid{min-height:190px}
-  .mapping-preview-pane{grid-template-rows:30px 160px}
-  .mapping-preview-pane canvas{height:160px}
+  .mapping-preview-pane{
+    grid-template-rows:30px auto;
+  }
   .main-workspace[data-view="mappings"] .bone-map{
     max-height:none;
-    min-height:180px;
+    min-height:220px;
   }
 }
 @media(max-width:760px){
@@ -1369,13 +1372,34 @@ h2,p{margin:0}
     grid-template-columns:1fr;
   }
   .mapping-preview-pane{
-    grid-template-rows:30px 190px;
+    grid-template-rows:30px auto;
   }
   .mapping-preview-pane canvas{
-    height:190px;
+    width:100%;
+    height:auto;
+    aspect-ratio:1 / 1;
   }
   .mapping-preview-pane+ .mapping-preview-pane{
     border-left:0;
     border-top:1px solid var(--border);
+  }
+}
+
+
+/* Mapping Skeleton Preview click affordance */
+.mapping-preview-pane canvas{
+  outline:none;
+}
+.mapping-preview-pane canvas:active{
+  cursor:crosshair;
+}
+@media(hover:hover) and (pointer:fine){
+  .mapping-preview-pane canvas:hover{
+    background:
+      radial-gradient(
+        circle at center,
+        color-mix(in srgb,var(--primary) 4%,transparent),
+        transparent 68%
+      );
   }
 }
