@@ -492,7 +492,7 @@ const state = {
     bonePairs: [],
     comparison: null,
     lastTime: NaN,
-    opacity: 0.16
+    opacity: 0.20
   },
   restEditor: {
     selectedBone: null,
@@ -1098,9 +1098,19 @@ function validationGhostTranslation(alignment, anchor) {
 
 function syncGhostPoseFromSource() {
   const ghost = state.ghost;
-  if (!ghost?.bonePairs?.length) return;
+  if (!ghost?.visual) return;
 
-  for (const [sourceBone, ghostBone] of ghost.bonePairs) {
+  const sourceVisual = state.source.displayRoot || state.source.root;
+  if (!sourceVisual) return;
+
+  // Literal mirror of what is shown in the Source viewport.
+  // Do not derive any transform from presets, mappings, target bones or
+  // validation. The Source clone keeps the exact same scene-space transform.
+  ghost.visual.position.copy(sourceVisual.position);
+  ghost.visual.quaternion.copy(sourceVisual.quaternion);
+  ghost.visual.scale.copy(sourceVisual.scale);
+
+  for (const [sourceBone, ghostBone] of ghost.bonePairs || []) {
     ghostBone.position.copy(sourceBone.position);
     ghostBone.quaternion.copy(sourceBone.quaternion);
     ghostBone.scale.copy(sourceBone.scale);
@@ -1112,37 +1122,17 @@ function updateGhostOverlayPose(force = false) {
   if (!ghost?.enabled || !ghost.container || !ghost.visual) return;
   if (!state.source.root || !state.target.root || !state.targetPreviewClip) return;
 
-  // seek() already evaluates the Source mixer. The render loop used to:
-  //   1) evaluate a SECOND mixer for the Ghost,
-  //   2) rebuild the mapped-node list,
-  //   3) recalculate scale/rest alignment,
-  //   4) do the same work again in animate() after seek().
-  // Cache all static work and skip duplicate same-time updates.
   if (!force && ghost.lastTime === state.playTime) return;
 
+  // Source and Target viewports already use synchronized cameras. Therefore
+  // putting an exact clone of the Source scene object in targetView produces
+  // the same Source image on the Target side, only with the Ghost material.
   syncGhostPoseFromSource();
 
-  const comparison = ghost.comparison;
-  const nodes = comparison?.nodes || validationMappedNodes();
-  const alignment =
-    comparison?.alignment || validationRestAlignment(nodes);
-  const anchor =
-    comparison?.anchor || validationAnchorNode(nodes);
-
-  ghost.container.scale.setScalar(alignment.scale);
-  ghost.container.quaternion.copy(alignment.rotation);
-
-  const { translation } = validationGhostTranslation(
-    alignment,
-    anchor
-  );
-
-  ghost.container.position.copy(translation);
+  ghost.container.position.set(0, 0, 0);
+  ghost.container.quaternion.identity();
+  ghost.container.scale.set(1, 1, 1);
   ghost.lastTime = state.playTime;
-
-  // No visual.updateMatrixWorld(true) here. The renderer updates the Ghost
-  // hierarchy once during the normal Target render, avoiding another full
-  // skeleton traversal on the CPU.
 }
 function rebuildGhostOverlay() {
   disposeGhostOverlay({ keepEnabled: true });
@@ -1157,6 +1147,8 @@ function rebuildGhostOverlay() {
     return;
   }
 
+  // Same idea as Redefine Rest Pose > Target Overlay, but reversed:
+  // clone the SOURCE visual and render that exact clone in targetView.
   const sourceVisual = state.source.displayRoot || state.source.root;
   const visual = cloneSkeleton(sourceVisual);
   const container = new THREE.Group();
@@ -1168,18 +1160,21 @@ function rebuildGhostOverlay() {
   visual.traverse(object => {
     if (object.isMesh || object.isSkinnedMesh) {
       const material = new THREE.MeshBasicMaterial({
-        color: 0x3b82f6,
+        color: 0x63a7ff,
         transparent: true,
         opacity: state.ghost.opacity,
         depthTest: true,
         depthWrite: false,
         side: THREE.DoubleSide,
-        toneMapped: false
+        toneMapped: false,
+        polygonOffset: true,
+        polygonOffsetFactor: -1,
+        polygonOffsetUnits: -1
       });
 
       material.userData.retargetGhostMaterial = true;
       object.material = material;
-      object.renderOrder = 45;
+      object.renderOrder = 35;
       object.frustumCulled = false;
       object.raycast = () => {};
     } else if (object.isLine || object.isLineSegments || object.isPoints) {
@@ -1190,9 +1185,8 @@ function rebuildGhostOverlay() {
   container.add(visual);
   targetView.scene.add(container);
 
-  // Reuse the already-evaluated Source pose instead of running the same clip
-  // through a second AnimationMixer. A Mixamo Source has ~65 bones, so copying
-  // local TRS is much cheaper than evaluating all keyframe interpolants twice.
+  // Pair the clone's bones with the Source bones once. During playback we
+  // only copy local TRS. No second mixer and no preset/mapping computations.
   const ghostBones = collectBones(visual);
   const bonePairs = [];
 
@@ -1201,27 +1195,19 @@ function rebuildGhostOverlay() {
     if (ghostBone) bonePairs.push([sourceBone, ghostBone]);
   }
 
-  const nodes = validationMappedNodes();
-  const alignment = validationRestAlignment(nodes);
-  const anchor = validationAnchorNode(nodes);
-
   state.ghost.container = container;
   state.ghost.visual = visual;
   state.ghost.mixer = null;
   state.ghost.action = null;
   state.ghost.bonePairs = bonePairs;
-  state.ghost.comparison = {
-    nodes,
-    alignment,
-    anchor
-  };
+  state.ghost.comparison = null;
   state.ghost.lastTime = NaN;
 
   updateGhostOverlayPose(true);
 
   log(
-    `Ghost performance: pose compartida con Source · ` +
-    `${bonePairs.length} huesos sincronizados · alineación cacheada.`
+    `Ghost directo Source→Target: overlay independiente · ` +
+    `${bonePairs.length} huesos visuales sincronizados · sin presets/mapping.`
   );
 }
 function setGhostMode(enabled) {
