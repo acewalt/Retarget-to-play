@@ -716,7 +716,7 @@ h2,p{margin:0}
   min-height:32px;
   padding:6px 10px;
   white-space:nowrap;
-  font-size:9px;
+  font-size:13px;
   font-weight:800;
 }
 .sidebar-auto-preset.is-busy{
@@ -739,7 +739,7 @@ h2,p{margin:0}
     width:118px;
     max-width:118px;
   }
-  .sidebar-auto-preset{width:118px}
+  .sidebar-auto-preset{width:118px;font-size:9px}
   .sidebar-auto-preset-wrap.workspace-hidden{
     width:0;
     max-width:0;
