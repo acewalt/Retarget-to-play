@@ -1125,3 +1125,53 @@ h2,p{margin:0}
     font-size:8px;
   }
 }
+
+
+/* Target compare controls in card header */
+.target-card-head{
+  gap:10px;
+}
+.target-card-actions{
+  display:flex;
+  align-items:center;
+  justify-content:flex-end;
+  gap:6px;
+  min-width:0;
+}
+.target-compare-button{
+  min-height:30px;
+  height:30px;
+  padding:0 10px;
+  border-radius:8px;
+  font-size:9px;
+  font-weight:800;
+  color:var(--muted);
+  background:var(--surface-2);
+  border-color:var(--border);
+}
+.target-compare-button:hover:not(:disabled){
+  color:var(--text);
+}
+.target-compare-button.active{
+  color:#8fc5ff;
+  border-color:color-mix(in srgb,#3b82f6 68%,var(--border));
+  background:color-mix(in srgb,#3b82f6 20%,var(--surface));
+  box-shadow:0 0 0 1px color-mix(in srgb,#3b82f6 12%,transparent);
+}
+.target-compare-button:disabled{
+  opacity:.45;
+}
+@media(max-width:760px){
+  .target-card-head{
+    align-items:center;
+  }
+  .target-card-actions{
+    gap:4px;
+  }
+  .target-compare-button{
+    min-height:28px;
+    height:28px;
+    padding:0 7px;
+    font-size:8px;
+  }
+}
