@@ -482,6 +482,10 @@ const state = {
   workspaceView: 'workspace',
   workspaceMappingCollapsed: true,
   mappingPreviewSelectedIndex: null,
+  mappingPreviewHits: {
+    source: { joints: [], segments: [] },
+    target: { joints: [], segments: [] }
+  },
   dualFbxReady: false,
   actionPackerSourceFiles: [],
   ghost: {
@@ -3866,6 +3870,12 @@ function drawMappingSkeleton(canvas, slot, side, selectedName) {
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
+  const hitState = state.mappingPreviewHits?.[side];
+  if (hitState) {
+    hitState.joints = [];
+    hitState.segments = [];
+  }
+
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, width, height);
 
@@ -3956,6 +3966,17 @@ function drawMappingSkeleton(canvas, slot, side, selectedName) {
     const b=project(p);
     const highlighted=name===selectedName;
 
+    if (hitState) {
+      hitState.segments.push({
+        name,
+        parentName,
+        ax:a.x,
+        ay:a.y,
+        bx:b.x,
+        by:b.y
+      });
+    }
+
     ctx.beginPath();
     ctx.moveTo(a.x,a.y);
     ctx.lineTo(b.x,b.y);
@@ -3969,6 +3990,14 @@ function drawMappingSkeleton(canvas, slot, side, selectedName) {
   for (const [name,p] of points) {
     const q=project(p);
     const highlighted=name===selectedName;
+
+    if (hitState) {
+      hitState.joints.push({
+        name,
+        x:q.x,
+        y:q.y
+      });
+    }
 
     ctx.beginPath();
     ctx.arc(q.x,q.y,highlighted ? 5 : 2.15,0,Math.PI*2);
@@ -4049,17 +4078,130 @@ function renderMappingSkeletonPreview() {
   }
 }
 
-function selectMappingPreviewPair(index) {
+function selectMappingPreviewPair(index, { scrollIntoView = false } = {}) {
   state.mappingPreviewSelectedIndex=index;
 
+  let selectedRow=null;
+
   document.querySelectorAll('#boneMap .map-row').forEach(row => {
-    row.classList.toggle(
-      'selected',
-      Number(row.dataset.mapIndex)===index
-    );
+    const selected=Number(row.dataset.mapIndex)===index;
+    row.classList.toggle('selected',selected);
+    if(selected) selectedRow=row;
   });
 
   renderMappingSkeletonPreview();
+
+  if(scrollIntoView && selectedRow) {
+    selectedRow.scrollIntoView({
+      block:'nearest',
+      behavior:'smooth'
+    });
+  }
+}
+
+function pointToSegmentDistance(px,py,ax,ay,bx,by) {
+  const abx=bx-ax;
+  const aby=by-ay;
+  const apx=px-ax;
+  const apy=py-ay;
+  const denom=abx*abx+aby*aby;
+
+  if(denom<=1e-9) {
+    return Math.hypot(px-ax,py-ay);
+  }
+
+  const t=THREE.MathUtils.clamp(
+    (apx*abx+apy*aby)/denom,
+    0,
+    1
+  );
+
+  const qx=ax+abx*t;
+  const qy=ay+aby*t;
+  return Math.hypot(px-qx,py-qy);
+}
+
+function mappingPreviewBoneAtPoint(side,x,y) {
+  const hits=state.mappingPreviewHits?.[side];
+  if(!hits) return '';
+
+  let bestName='';
+  let bestDistance=Infinity;
+
+  // Joints get priority and a generous touch target.
+  for(const joint of hits.joints || []) {
+    const distance=Math.hypot(x-joint.x,y-joint.y);
+    if(distance<bestDistance) {
+      bestDistance=distance;
+      bestName=joint.name;
+    }
+  }
+
+  if(bestDistance<=18) return bestName;
+
+  // Clicking near a bone line selects the child bone represented by that line.
+  for(const segment of hits.segments || []) {
+    const distance=pointToSegmentDistance(
+      x,y,
+      segment.ax,segment.ay,
+      segment.bx,segment.by
+    );
+
+    if(distance<bestDistance) {
+      bestDistance=distance;
+      bestName=segment.name;
+    }
+  }
+
+  return bestDistance<=14 ? bestName : '';
+}
+
+function mappingPreviewPairIndexForBone(side,boneName) {
+  if(!boneName) return -1;
+
+  const key=side==='source' ? 'source' : 'target';
+
+  // Prefer the currently selected row if it uses the clicked bone.
+  const selected=state.mappingPreviewSelectedIndex;
+  if(
+    selected!=null &&
+    state.boneMap[selected]?.[key]===boneName
+  ) {
+    return selected;
+  }
+
+  return state.boneMap.findIndex(pair => pair?.[key]===boneName);
+}
+
+function handleMappingSkeletonPointer(event,side) {
+  const canvas=event.currentTarget;
+  if(!(canvas instanceof HTMLCanvasElement)) return;
+
+  const rect=canvas.getBoundingClientRect();
+  if(rect.width<=0 || rect.height<=0) return;
+
+  const x=event.clientX-rect.left;
+  const y=event.clientY-rect.top;
+  const boneName=mappingPreviewBoneAtPoint(side,x,y);
+
+  if(!boneName) return;
+
+  const index=mappingPreviewPairIndexForBone(side,boneName);
+
+  if(index>=0) {
+    selectMappingPreviewPair(index,{scrollIntoView:true});
+    return;
+  }
+
+  // The preview may include hierarchy parents that are not directly mapped.
+  // Keep the interaction explicit instead of silently selecting the wrong row.
+  const slot=side==='source' ? state.source : state.target;
+  const label=originalObjectName(slot.bones.get(boneName)) || boneName;
+  const hint=$('mappingPreviewHint');
+
+  if(hint) {
+    hint.textContent=`${label} · sin par directo en el mapping`;
+  }
 }
 
 function refreshMapUi() {
@@ -10350,6 +10492,13 @@ const mappingPreviewResizeObserver = new ResizeObserver(() => {
 if ($('mappingSkeletonPreview')) {
   mappingPreviewResizeObserver.observe($('mappingSkeletonPreview'));
 }
+
+$('mappingSourceSkeleton')?.addEventListener('click',event => {
+  handleMappingSkeletonPointer(event,'source');
+});
+$('mappingTargetSkeleton')?.addEventListener('click',event => {
+  handleMappingSkeletonPointer(event,'target');
+});
 
 $('mapSearch').oninput = refreshMapUi;
 $('sourcePrefix').onchange = () => {
