@@ -210,6 +210,13 @@ function usesRigifyPipeline() {
   return state.activePreset?.targetFamily === 'rigify' && targetLooksRigify();
 }
 
+function usesMixamoControlRigPipeline() {
+  return (
+    state.activePreset?.targetFamily === 'mixamo-ctrl' &&
+    targetLooksMixamoControlRig()
+  );
+}
+
 function supportsFkToIk() {
   return usesCloudRigPipeline() || usesRigifyPipeline();
 }
@@ -3089,6 +3096,102 @@ function extractWorldTwistQuaternion(q, axis, out = new THREE.Quaternion()) {
   return out.normalize();
 }
 
+function findMixamoControlRigDeformBone(slot, semantic) {
+  if (!slot?.root || !semantic) return '';
+
+  const wanted = canonicalSemantic(semantic);
+
+  // The control rig contains both Ctrl_* controls and the original
+  // mixamorig deform skeleton. For preview we MUST choose the latter.
+  for (const [loadedName, bone] of slot.bones) {
+    const original = originalObjectName(bone) || loadedName;
+    if (!/^mixamorig\d*:/i.test(original)) continue;
+
+    const tail = original.split(':').pop();
+    if (canonicalSemantic(tail) === wanted) return loadedName;
+  }
+
+  // Conservative fallback for variants that stripped the namespace but still
+  // keep a plain Mixamo deform hierarchy. Never match Ctrl_* controls here.
+  for (const [loadedName, bone] of slot.bones) {
+    const original = originalObjectName(bone) || loadedName;
+    if (/^Ctrl_/i.test(original)) continue;
+
+    if (canonicalSemantic(original) === wanted) return loadedName;
+  }
+
+  return '';
+}
+
+function mixamoControlRigPreviewSemantics() {
+  const out = [
+    'Hips',
+    'Spine', 'Spine1', 'Spine2',
+    'Neck', 'Head',
+    'LeftShoulder', 'LeftArm', 'LeftForeArm', 'LeftHand',
+    'RightShoulder', 'RightArm', 'RightForeArm', 'RightHand',
+    'LeftUpLeg', 'LeftLeg', 'LeftFoot', 'LeftToeBase',
+    'RightUpLeg', 'RightLeg', 'RightFoot', 'RightToeBase'
+  ];
+
+  for (const side of ['Left', 'Right']) {
+    for (const finger of ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky']) {
+      for (let i = 1; i <= 3; i++) {
+        out.push(`${side}Hand${finger}${i}`);
+      }
+    }
+  }
+
+  return out;
+}
+
+function buildMixamoControlRigDeformPreviewMap() {
+  if (!usesMixamoControlRigPipeline()) return [];
+
+  const pairs = [];
+
+  for (const semantic of mixamoControlRigPreviewSemantics()) {
+    const source = findSemanticBone(state.source, semantic);
+    const target = findMixamoControlRigDeformBone(state.target, semantic);
+    if (!source || !target) continue;
+
+    pairs.push({
+      source,
+      target,
+      sourceSpec: semantic,
+      targetSpec: semantic,
+      channels: semantic === 'Hips' ? 'ROT LOC' : 'ROT',
+      axes: 'XYZ',
+      locSpace: 'world',
+      influence: 1,
+      profile: 'blendcap-mixamo-ctrl-preview'
+    });
+  }
+
+  return pairs;
+}
+
+function filterClipToTargets(clip, targets, name) {
+  if (!clip) return null;
+  const wanted = targets instanceof Set ? targets : new Set(targets || []);
+
+  const tracks = clip.tracks
+    .filter(track => {
+      const parsed = parseTrackTarget(track.name);
+      return parsed && wanted.has(parsed.nodeName);
+    })
+    .map(track => track.clone());
+
+  if (!tracks.length) return null;
+
+  return new THREE.AnimationClip(
+    name || clip.name,
+    clip.duration,
+    tracks
+  );
+}
+
+
 function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const src = state.source;
   const tgt = state.target;
@@ -4255,6 +4358,21 @@ function rebuildTargetPreviewClip() {
     return;
   }
 
+  if (usesMixamoControlRigPipeline() && state.deformPreviewClip) {
+    // Blender's control constraints are not present in the exported FBX.
+    // Keep the real Ctrl_* Action for export, but preview it together with
+    // a separately baked copy on the embedded mixamorig deform skeleton.
+    state.targetPreviewClip = mergeClips(
+      'MixamoControlRig_Viewport_Preview',
+      [
+        state.fkRawClip || state.fkClip,
+        state.deformPreviewClip,
+        state.ikOnlyClip
+      ]
+    );
+    return;
+  }
+
   state.targetPreviewClip = state.ikOnlyClip
     ? mergeClips(
         'Preview_FK_IK',
@@ -4367,11 +4485,59 @@ function applyRetarget() {
     const map = validMap();
     if (!map.length) throw new Error('No hay pares válidos en el Bone Map.');
 
-    state.fkRawClip = bakeRetarget(map, 'Retargeted_FK_RAW');
+    let bakedRaw;
+    state.deformPreviewClip = null;
+
+    if (usesMixamoControlRigPipeline()) {
+      const deformMap = buildMixamoControlRigDeformPreviewMap();
+
+      if (!deformMap.length) {
+        throw new Error(
+          'Mixamo Control Rig detectado, pero no encontré su esqueleto mixamorig deform.'
+        );
+      }
+
+      // One sampling pass for both outputs:
+      //   A) Ctrl_* tracks = Action for the real control rig.
+      //   B) mixamorig tracks = viewport / standalone deform preview.
+      const combinedMap = [...map, ...deformMap];
+      bakedRaw = bakeRetarget(
+        combinedMap,
+        'Retargeted_MixamoControlRig_RAW'
+      );
+
+      const controlTargets = new Set(map.map(pair => pair.target));
+      const deformTargets = new Set(deformMap.map(pair => pair.target));
+
+      state.fkRawClip = filterClipToTargets(
+        bakedRaw,
+        controlTargets,
+        'Retargeted_FK_RAW'
+      );
+
+      state.deformPreviewClip = filterClipToTargets(
+        bakedRaw,
+        deformTargets,
+        'Retargeted_DEF_Preview'
+      );
+
+      if (!state.fkRawClip?.tracks?.length) {
+        throw new Error(
+          'Mixamo Control Rig: el bake no produjo curvas Ctrl_* válidas.'
+        );
+      }
+
+      log(
+        `Mixamo Control Rig preview: ${deformMap.length} huesos deform detectados · ` +
+        `${state.deformPreviewClip?.tracks?.length || 0} tracks de preview.`
+      );
+    } else {
+      state.fkRawClip = bakeRetarget(map, 'Retargeted_FK_RAW');
+    }
 
     // CloudRig loses several parenting/hinge constraints in FBX, so its
     // already-proven path needs the portable pose-basis rewrite. Rigify,
-    // ARP and Mixamo presets keep the generic baked target controls directly.
+    // ARP, Mixamo and Mixamo Control Rig keep their target-control bake.
     state.fkClip = usesCloudRigPipeline()
       ? buildOriginalRigTransferClip(state.fkRawClip)
       : usesRigifyPipeline()
@@ -4383,9 +4549,11 @@ function applyRetarget() {
     state.exportClip = state.fkClip;
     state.exported = false;
 
-    // Preview is intentionally separate from export. Rigify gets a visual
-    // DEF bake because its live Blender constraints are absent from FBX.
-    state.deformPreviewClip = null;
+    // Preview stays separate from export. Mixamo Control Rig keeps Ctrl_*
+    // tracks for the original rig and a deform-only companion for the mesh.
+    if (!usesMixamoControlRigPipeline()) {
+      state.deformPreviewClip = null;
+    }
     rebuildTargetPreviewClip();
 
     state.playTime = 0;
@@ -4402,7 +4570,13 @@ function applyRetarget() {
     updateStats();
     setStatus('Retarget FK listo · reproduciendo', 'good');
     const rt = state.target.rigRuntime?.status;
-    log(`Retarget FK: ${map.length} controles FK, ${state.fkClip.tracks.length} curvas TRS, ${Number($('fps').value) || 30} FPS. Action DEF=0. WaltRig Runtime FK→DEF=${rt ? `${rt.bindings}/${rt.requestedBindings}` : 'n/a'}.`);
+    log(
+      `Retarget FK: ${map.length} controles FK, ${state.fkClip.tracks.length} curvas TRS, ` +
+      `${Number($('fps').value) || 30} FPS. Action DEF=0. ` +
+      (usesMixamoControlRigPipeline()
+        ? `MixamoCtrl preview=${state.deformPreviewClip?.tracks?.length || 0} tracks.`
+        : `WaltRig Runtime FK→DEF=${rt ? `${rt.bindings}/${rt.requestedBindings}` : 'n/a'}.`)
+    );
   } catch (err) {
     console.error(err);
     state.fkClip = null;
@@ -7177,8 +7351,13 @@ async function exportTargetFbx() {
 
       let currentActionName = exportClip.name || 'Retargeted_FK';
 
-      if (usesCloudRigPipeline() && $('includeDefPreview')?.checked) {
-        const defPreview = bakeDeformPreviewClip();
+      if (
+        (usesCloudRigPipeline() || usesMixamoControlRigPipeline()) &&
+        $('includeDefPreview')?.checked
+      ) {
+        const defPreview = usesMixamoControlRigPipeline()
+          ? state.deformPreviewClip
+          : bakeDeformPreviewClip();
 
         if (defPreview) {
           const originalDefPreview = createOriginalNameExportClip(defPreview, state.target);
