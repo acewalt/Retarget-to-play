@@ -7232,7 +7232,23 @@ function revealConditionalFeature(element, animate = false, delayMs = 0) {
 }
 
 function updateConditionalFeatureVisibility() {
-  const ready = !!state.source.root && !!state.target.root;
+  const sourceReady = !!state.source.root;
+  const restPoseNav = $('navRestPose');
+
+  if (sourceReady) {
+    const shouldAnimate = !!restPoseNav?.hidden;
+    revealConditionalFeature(restPoseNav, shouldAnimate, 0);
+  } else if (restPoseNav) {
+    restPoseNav.classList.remove('feature-reveal', 'feature-reveal-prep');
+    restPoseNav.style.removeProperty('--feature-delay');
+    restPoseNav.hidden = true;
+
+    if (state.workspaceView === 'restpose') {
+      setWorkspaceView('workspace');
+    }
+  }
+
+  const ready = sourceReady && !!state.target.root;
   const becameReady = ready && !state.dualFbxReady;
   state.dualFbxReady = ready;
 
@@ -7383,7 +7399,11 @@ function setWorkspaceView(view) {
   let next = allowed.has(view) ? view : 'workspace';
 
   const needsBothFbx = next === 'mappings' || next === 'animations';
+  const needsSource = next === 'restpose';
+
   if (needsBothFbx && !(state.source.root && state.target.root)) {
+    next = 'workspace';
+  } else if (needsSource && !state.source.root) {
     next = 'workspace';
   }
 
