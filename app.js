@@ -7328,7 +7328,7 @@ function updateSidebarAutoPresetVisibility(view = state.workspaceView) {
 }
 
 function setWorkspaceView(view) {
-  const allowed = new Set(['workspace', 'mappings', 'restpose', 'animations']);
+  const allowed = new Set(['workspace', 'mappings', 'restpose', 'animations', 'actionpacker']);
   let next = allowed.has(view) ? view : 'workspace';
 
   const needsBothFbx = next === 'mappings' || next === 'animations';
@@ -7350,20 +7350,25 @@ function setWorkspaceView(view) {
   const bridge = document.querySelector('.retarget-bridge');
   const mappingCard = $('mappingCard');
   const restToolbar = $('restPoseToolbar');
+  const actionPackerWorkspace = $('actionPackerWorkspace');
   const isAnimation = next === 'animations';
   const isRestPose = next === 'restpose';
-  const isFocusDesk = isAnimation || isRestPose;
+  const isActionPacker = next === 'actionpacker';
+  const isFocusDesk = isAnimation || isRestPose || isActionPacker;
 
   shell?.classList.toggle('animations-focus', isAnimation);
   shell?.classList.toggle('restpose-focus', isRestPose);
   shell?.classList.toggle('mappings-focus', next === 'mappings');
+  shell?.classList.toggle('actionpacker-focus', isActionPacker);
   updateSidebarAutoPresetVisibility(next);
 
+  if (workspace) workspace.hidden = isActionPacker;
+  if (actionPackerWorkspace) actionPackerWorkspace.hidden = !isActionPacker;
   if (mappingCard) mappingCard.hidden = next !== 'mappings';
   if (restToolbar) restToolbar.hidden = !isRestPose;
   if (workflowSidebar) workflowSidebar.hidden = isFocusDesk;
   if (settingsPanel) settingsPanel.hidden = isFocusDesk;
-  if (bridge && (isAnimation || isRestPose)) bridge.hidden = true;
+  if (bridge && (isAnimation || isRestPose || isActionPacker)) bridge.hidden = true;
 
   document.querySelectorAll('[data-workspace]').forEach(button => {
     button.classList.toggle('active', button.dataset.workspace === next);
@@ -7382,12 +7387,14 @@ function setWorkspaceView(view) {
     requestAnimationFrame(() => seek(state.playTime));
   }
 
-  updateTransferBridgeVisibility(false);
+  if (!isActionPacker) {
+    updateTransferBridgeVisibility(false);
 
-  requestAnimationFrame(() => {
-    resizeViewports();
-    requestAnimationFrame(resizeViewports);
-  });
+    requestAnimationFrame(() => {
+      resizeViewports();
+      requestAnimationFrame(resizeViewports);
+    });
+  }
 }
 
 function setWorkflowStep(id, mode) {
