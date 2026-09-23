@@ -1175,3 +1175,72 @@ h2,p{margin:0}
     font-size:8px;
   }
 }
+
+
+/* Rest Pose actions centered in Source header */
+.source-card-head{
+  position:relative;
+}
+.restpose-card-actions{
+  display:none;
+}
+.main-workspace[data-view="restpose"] .source-card-head{
+  position:relative;
+}
+.main-workspace[data-view="restpose"] .restpose-card-actions{
+  position:absolute;
+  left:50%;
+  top:50%;
+  transform:translate(-50%,-50%);
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  gap:8px;
+  z-index:4;
+  max-width:58%;
+}
+.main-workspace[data-view="restpose"] .restpose-card-action{
+  min-height:34px;
+  height:34px;
+  padding:0 13px;
+  white-space:nowrap;
+  font-size:10px;
+}
+.main-workspace[data-view="restpose"] .restpose-card-action.restpose-commit{
+  box-shadow:0 5px 14px color-mix(in srgb,var(--primary) 20%,transparent);
+}
+@media(max-width:1080px){
+  .main-workspace[data-view="restpose"] .restpose-card-actions{
+    position:static;
+    transform:none;
+    margin-left:auto;
+    margin-right:8px;
+    max-width:none;
+  }
+}
+@media(max-width:760px){
+  .main-workspace[data-view="restpose"] .source-card-head{
+    min-height:92px;
+    height:auto;
+    padding-top:10px;
+    padding-bottom:10px;
+    flex-wrap:wrap;
+  }
+  .main-workspace[data-view="restpose"] .restpose-card-actions{
+    order:3;
+    width:100%;
+    margin:6px 0 0;
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:6px;
+  }
+  .main-workspace[data-view="restpose"] .restpose-card-action{
+    width:100%;
+    min-width:0;
+    padding:0 8px;
+    font-size:9px;
+  }
+  .main-workspace[data-view="restpose"] .viewport-card{
+    grid-template-rows:auto minmax(0,1fr);
+  }
+}
