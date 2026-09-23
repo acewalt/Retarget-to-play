@@ -130,6 +130,18 @@ const BLENDCAP_PRESET_REGISTRY = {
     sourceFamily: 'ue',
     targetFamily: 'rigify'
   },
+  ue_to_mixamo_ctrl: {
+    label: 'UE → Mixamo Control Rig',
+    path: './presets/ue_to_mixamo_ctrl.json',
+    sourceFamily: 'ue',
+    targetFamily: 'mixamo-ctrl'
+  },
+  ue_to_arp: {
+    label: 'UE → Auto-Rig Pro',
+    path: './presets/ue_to_arp.json',
+    sourceFamily: 'ue',
+    targetFamily: 'arp'
+  },
   blendcap_to_cloudrig: {
     label: 'BlendCap → CloudRig',
     path: './presets/blendcap_to_cloudrig.json',
@@ -217,11 +229,23 @@ function usesMixamoControlRigPipeline() {
   );
 }
 
+function usesAutoRigProPipeline() {
+  return (
+    state.activePreset?.targetFamily === 'arp' &&
+    targetLooksAutoRigPro()
+  );
+}
+
+function usesEmbeddedDeformControlRigPipeline() {
+  return usesMixamoControlRigPipeline() || usesAutoRigProPipeline();
+}
+
 function supportsFkToIk() {
   return (
     usesCloudRigPipeline() ||
     usesRigifyPipeline() ||
-    usesMixamoControlRigPipeline()
+    usesMixamoControlRigPipeline() ||
+    usesAutoRigProPipeline()
   );
 }
 
@@ -241,12 +265,46 @@ function targetLooksAutoRigPro() {
   const tgt = state.target;
   if (!tgt?.root) return false;
 
-  return !!(
-    findBoneByOriginalExact(tgt, ['c_arm_fk.l']) &&
-    findBoneByOriginalExact(tgt, ['c_forearm_fk.l']) &&
-    findBoneByOriginalExact(tgt, ['c_hand_fk.l']) &&
-    findBoneByOriginalExact(tgt, ['c_thigh_fk.l'])
-  );
+  const has = (...names) =>
+    !!findBoneByOriginalExact(tgt, names);
+
+  // Auto-Rig Pro exported FBX keeps both animator controls (c_*) and its
+  // driven/deform hierarchy. WaltFBX can therefore classify it generically.
+  // Detect ARP from the control signature instead of the generic profile.
+  const bodyControls =
+    has('c_pos') &&
+    has('c_root_master.x') &&
+    has('c_root.x') &&
+    has('c_spine_01.x') &&
+    has('c_spine_02.x') &&
+    has('c_neck.x') &&
+    has('c_head.x');
+
+  const fkControls =
+    has('c_arm_fk.l') &&
+    has('c_forearm_fk.l') &&
+    has('c_hand_fk.l') &&
+    has('c_arm_fk.r') &&
+    has('c_forearm_fk.r') &&
+    has('c_hand_fk.r') &&
+    has('c_thigh_fk.l') &&
+    has('c_leg_fk.l') &&
+    has('c_foot_fk.l') &&
+    has('c_thigh_fk.r') &&
+    has('c_leg_fk.r') &&
+    has('c_foot_fk.r');
+
+  const ikControls =
+    has('c_hand_ik.l') &&
+    has('c_hand_ik.r') &&
+    has('c_foot_ik.l') &&
+    has('c_foot_ik.r') &&
+    has('c_arms_pole.l') &&
+    has('c_arms_pole.r') &&
+    has('c_leg_pole.l') &&
+    has('c_leg_pole.r');
+
+  return !!(bodyControls && fkControls && ikControls);
 }
 
 function targetLooksMixamoControlRig() {
@@ -311,6 +369,17 @@ function loadedRigProfile(slot) {
   return slot?.asset?.rig?.profile || '';
 }
 
+function displayRigProfile(slot) {
+  if (!slot?.root) return loadedRigProfile(slot) || 'unknown';
+
+  if (slot.kind === 'target') {
+    if (targetLooksMixamoControlRig()) return 'mixamo-control-rig';
+    if (targetLooksAutoRigPro()) return 'auto-rig-pro';
+  }
+
+  return loadedRigProfile(slot) || 'generic';
+}
+
 function sourceMatchesPresetFamily(family) {
   if (!state.source.root) return false;
 
@@ -335,7 +404,10 @@ function targetMatchesPresetFamily(family) {
     case 'rigify':
       return targetLooksRigify();
     case 'mixamo':
-      return loadedRigProfile(state.target) === 'mixamo';
+      return (
+        loadedRigProfile(state.target) === 'mixamo' &&
+        !targetLooksMixamoControlRig()
+      );
     case 'arp':
       return targetLooksAutoRigPro();
     case 'mixamo-ctrl':
@@ -2252,7 +2324,7 @@ async function loadFbx(file, slot, view) {
     rememberSourceForActionPacker(file);
     log(`WaltFBX v${WALT_FBX_VERSION} Source: ${file.name}; profile=${asset.rig.profile}; ${slot.bones.size} huesos; ${loadedAnimations.length} Actions; Rest=${slot.restSource}; UpAxis=${asset.metadata.upAxis}; axis=${asset.metadata.axisNormalization}; UnitScaleFactor=${asset.metadata.unitScaleFactor}; ×${slot.unitScale.toFixed(4)} m; Constraints FBX=${asset.metadata.constraintCount}.`);
   } else {
-    $('targetLabel').textContent = `${file.name} · ${slot.bones.size} huesos · ${asset.rig.profile}`;
+    $('targetLabel').textContent = `${file.name} · ${slot.bones.size} huesos · ${displayRigProfile(slot)}`;
     const rewrittenCurves = targetRestActionReport?.curvesRewritten || 0;
     $('targetAnimNotice').textContent = loadedAnimations.length
       ? rewrittenCurves
@@ -2492,6 +2564,14 @@ async function detectAutoPreset() {
     log(
       'Auto-preset: Target reconocido como Mixamo Control Rig por firma de controles ' +
       '(Ctrl_Master / Ctrl_Hips / FK / IK), aunque el perfil base sea ' +
+      `"${loadedRigProfile(state.target) || 'desconocido'}".`
+    );
+  }
+
+  if (targetLooksAutoRigPro()) {
+    log(
+      'Auto-preset: Target reconocido como Auto-Rig Pro por firma de controles ' +
+      '(c_root / c_spine / FK / IK), aunque el perfil base sea ' +
       `"${loadedRigProfile(state.target) || 'desconocido'}".`
     );
   }
@@ -3105,8 +3185,6 @@ function findMixamoControlRigDeformBone(slot, semantic) {
 
   const wanted = canonicalSemantic(semantic);
 
-  // The control rig contains both Ctrl_* controls and the original
-  // mixamorig deform skeleton. For preview we MUST choose the latter.
   for (const [loadedName, bone] of slot.bones) {
     const original = originalObjectName(bone) || loadedName;
     if (!/^mixamorig\d*:/i.test(original)) continue;
@@ -3115,65 +3193,151 @@ function findMixamoControlRigDeformBone(slot, semantic) {
     if (canonicalSemantic(tail) === wanted) return loadedName;
   }
 
-  // Conservative fallback for variants that stripped the namespace but still
-  // keep a plain Mixamo deform hierarchy. Never match Ctrl_* controls here.
   for (const [loadedName, bone] of slot.bones) {
     const original = originalObjectName(bone) || loadedName;
     if (/^Ctrl_/i.test(original)) continue;
-
     if (canonicalSemantic(original) === wanted) return loadedName;
   }
 
   return '';
 }
 
-function mixamoControlRigPreviewSemantics() {
-  const out = [
-    'Hips',
-    'Spine', 'Spine1', 'Spine2',
-    'Neck', 'Head',
-    'LeftShoulder', 'LeftArm', 'LeftForeArm', 'LeftHand',
-    'RightShoulder', 'RightArm', 'RightForeArm', 'RightHand',
-    'LeftUpLeg', 'LeftLeg', 'LeftFoot', 'LeftToeBase',
-    'RightUpLeg', 'RightLeg', 'RightFoot', 'RightToeBase'
-  ];
+const MIXAMO_CONTROL_TO_DEFORM = {
+  'Ctrl_Master': 'Hips',
+  'Ctrl_Hips': 'Hips',
+  'Ctrl_Hips_Free': 'Hips',
+  'Ctrl_Spine': 'Spine',
+  'Ctrl_Spine1': 'Spine1',
+  'Ctrl_Spine2': 'Spine2',
+  'Ctrl_Neck': 'Neck',
+  'Ctrl_Head': 'Head',
+  'Ctrl_Shoulder_Left': 'LeftShoulder',
+  'Ctrl_Arm_FK_Left': 'LeftArm',
+  'Ctrl_ForeArm_FK_Left': 'LeftForeArm',
+  'Ctrl_Hand_FK_Left': 'LeftHand',
+  'Ctrl_Shoulder_Right': 'RightShoulder',
+  'Ctrl_Arm_FK_Right': 'RightArm',
+  'Ctrl_ForeArm_FK_Right': 'RightForeArm',
+  'Ctrl_Hand_FK_Right': 'RightHand',
+  'Ctrl_UpLeg_FK_Left': 'LeftUpLeg',
+  'Ctrl_Thigh_FK_Left': 'LeftUpLeg',
+  'Ctrl_Leg_FK_Left': 'LeftLeg',
+  'Ctrl_Foot_FK_Left': 'LeftFoot',
+  'Ctrl_Toe_FK_Left': 'LeftToeBase',
+  'Ctrl_UpLeg_FK_Right': 'RightUpLeg',
+  'Ctrl_Thigh_FK_Right': 'RightUpLeg',
+  'Ctrl_Leg_FK_Right': 'RightLeg',
+  'Ctrl_Foot_FK_Right': 'RightFoot',
+  'Ctrl_Toe_FK_Right': 'RightToeBase'
+};
 
-  for (const side of ['Left', 'Right']) {
-    for (const finger of ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky']) {
-      for (let i = 1; i <= 3; i++) {
-        out.push(`${side}Hand${finger}${i}`);
-      }
+for (const side of ['Left', 'Right']) {
+  for (const finger of ['Thumb', 'Index', 'Middle', 'Ring', 'Pinky']) {
+    for (let i = 1; i <= 3; i++) {
+      MIXAMO_CONTROL_TO_DEFORM[`Ctrl_${finger}${i}_${side}`] =
+        `${side}Hand${finger}${i}`;
     }
   }
-
-  return out;
 }
 
-function buildMixamoControlRigDeformPreviewMap() {
-  if (!usesMixamoControlRigPipeline()) return [];
+const ARP_CONTROL_TO_DEFORM = {
+  'c_pos': 'root.x',
+  'c_root_master.x': 'root.x',
+  'c_root.x': 'root.x',
+  'c_spine_01.x': 'spine_01.x',
+  'c_spine_02.x': 'spine_02.x',
+  'c_neck.x': 'neck.x',
+  'c_head.x': 'head.x',
+  'c_shoulder.l': 'shoulder.l',
+  'c_arm_fk.l': 'arm.l',
+  'c_forearm_fk.l': 'forearm.l',
+  'c_hand_fk.l': 'hand.l',
+  'c_shoulder.r': 'shoulder.r',
+  'c_arm_fk.r': 'arm.r',
+  'c_forearm_fk.r': 'forearm.r',
+  'c_hand_fk.r': 'hand.r',
+  'c_thigh_fk.l': 'thigh.l',
+  'c_leg_fk.l': 'leg.l',
+  'c_foot_fk.l': 'foot.l',
+  'c_toes_fk.l': 'toes_01.l',
+  'c_thigh_fk.r': 'thigh.r',
+  'c_leg_fk.r': 'leg.r',
+  'c_foot_fk.r': 'foot.r',
+  'c_toes_fk.r': 'toes_01.r'
+};
 
+for (const side of ['l', 'r']) {
+  for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
+    for (let i = 1; i <= 3; i++) {
+      ARP_CONTROL_TO_DEFORM[`c_${finger}${i}.${side}`] =
+        `${finger}${i}.${side}`;
+    }
+  }
+}
+
+function buildEmbeddedDeformPreviewMap(controlToDeform, profile) {
+  const tgt = state.target;
   const pairs = [];
 
-  for (const semantic of mixamoControlRigPreviewSemantics()) {
-    const source = findSemanticBone(state.source, semantic);
-    const target = findMixamoControlRigDeformBone(state.target, semantic);
-    if (!source || !target) continue;
+  for (const pair of validMap()) {
+    const targetBone = tgt.bones.get(pair.target);
+    if (!targetBone) continue;
+
+    const targetOriginal = originalObjectName(targetBone) || pair.target;
+    const deformSpec = controlToDeform[targetOriginal];
+    if (!deformSpec) continue;
+
+    const deformTarget = profile === 'mixamo-control-rig'
+      ? findMixamoControlRigDeformBone(tgt, deformSpec)
+      : (
+          findBoneByOriginalExact(tgt, [deformSpec]) ||
+          findSemanticBone(tgt, deformSpec)
+        );
+
+    if (!deformTarget) continue;
 
     pairs.push({
-      source,
-      target,
-      sourceSpec: semantic,
-      targetSpec: semantic,
-      channels: semantic === 'Hips' ? 'ROT LOC' : 'ROT',
-      axes: 'XYZ',
-      locSpace: 'world',
-      influence: 1,
-      profile: 'blendcap-mixamo-ctrl-preview'
+      source: pair.source,
+      target: deformTarget,
+      sourceSpec: pair.sourceSpec,
+      targetSpec: deformSpec,
+      channels: pair.channels || 'ROT',
+      axes: pair.axes || 'XYZ',
+      locSpace: pair.locSpace || 'world',
+      influence: pair.influence ?? 1,
+      profile
     });
   }
 
   return pairs;
 }
+
+function buildMixamoControlRigDeformPreviewMap() {
+  if (!usesMixamoControlRigPipeline()) return [];
+  return buildEmbeddedDeformPreviewMap(
+    MIXAMO_CONTROL_TO_DEFORM,
+    'mixamo-control-rig'
+  );
+}
+
+function buildAutoRigProDeformPreviewMap() {
+  if (!usesAutoRigProPipeline()) return [];
+  return buildEmbeddedDeformPreviewMap(
+    ARP_CONTROL_TO_DEFORM,
+    'auto-rig-pro'
+  );
+}
+
+function buildCurrentEmbeddedDeformPreviewMap() {
+  if (usesMixamoControlRigPipeline()) {
+    return buildMixamoControlRigDeformPreviewMap();
+  }
+  if (usesAutoRigProPipeline()) {
+    return buildAutoRigProDeformPreviewMap();
+  }
+  return [];
+}
+
 
 function filterClipToTargets(clip, targets, name) {
   if (!clip) return null;
@@ -4362,12 +4526,14 @@ function rebuildTargetPreviewClip() {
     return;
   }
 
-  if (usesMixamoControlRigPipeline() && state.deformPreviewClip) {
-    // Blender's control constraints are not present in the exported FBX.
-    // Keep the real Ctrl_* Action for export, but preview it together with
-    // a separately baked copy on the embedded mixamorig deform skeleton.
+  if (usesEmbeddedDeformControlRigPipeline() && state.deformPreviewClip) {
+    // Mixamo Control Rig and Auto-Rig Pro both lose live Blender constraints
+    // in FBX. Keep animator-control tracks for export and merge a deform-only
+    // companion clip for the viewport.
     state.targetPreviewClip = mergeClips(
-      'MixamoControlRig_Viewport_Preview',
+      usesAutoRigProPipeline()
+        ? 'AutoRigPro_Viewport_Preview'
+        : 'MixamoControlRig_Viewport_Preview',
       [
         state.fkRawClip || state.fkClip,
         state.deformPreviewClip,
@@ -4492,22 +4658,26 @@ function applyRetarget() {
     let bakedRaw;
     state.deformPreviewClip = null;
 
-    if (usesMixamoControlRigPipeline()) {
-      const deformMap = buildMixamoControlRigDeformPreviewMap();
+    if (usesEmbeddedDeformControlRigPipeline()) {
+      const isArp = usesAutoRigProPipeline();
+      const deformMap = buildCurrentEmbeddedDeformPreviewMap();
+      const rigLabel = isArp ? 'Auto-Rig Pro' : 'Mixamo Control Rig';
 
       if (!deformMap.length) {
         throw new Error(
-          'Mixamo Control Rig detectado, pero no encontré su esqueleto mixamorig deform.'
+          `${rigLabel} detectado, pero no encontré su esqueleto deform embebido.`
         );
       }
 
       // One sampling pass for both outputs:
-      //   A) Ctrl_* tracks = Action for the real control rig.
-      //   B) mixamorig tracks = viewport / standalone deform preview.
+      //   A) animator controls = Action for the original control rig.
+      //   B) embedded deform skeleton = viewport / standalone preview.
       const combinedMap = [...map, ...deformMap];
       bakedRaw = bakeRetarget(
         combinedMap,
-        'Retargeted_MixamoControlRig_RAW'
+        isArp
+          ? 'Retargeted_AutoRigPro_RAW'
+          : 'Retargeted_MixamoControlRig_RAW'
       );
 
       const controlTargets = new Set(map.map(pair => pair.target));
@@ -4527,12 +4697,12 @@ function applyRetarget() {
 
       if (!state.fkRawClip?.tracks?.length) {
         throw new Error(
-          'Mixamo Control Rig: el bake no produjo curvas Ctrl_* válidas.'
+          `${rigLabel}: el bake no produjo curvas de controles válidas.`
         );
       }
 
       log(
-        `Mixamo Control Rig preview: ${deformMap.length} huesos deform detectados · ` +
+        `${rigLabel} preview: ${deformTargets.size} huesos deform detectados · ` +
         `${state.deformPreviewClip?.tracks?.length || 0} tracks de preview.`
       );
     } else {
@@ -4553,9 +4723,9 @@ function applyRetarget() {
     state.exportClip = state.fkClip;
     state.exported = false;
 
-    // Preview stays separate from export. Mixamo Control Rig keeps Ctrl_*
-    // tracks for the original rig and a deform-only companion for the mesh.
-    if (!usesMixamoControlRigPipeline()) {
+    // Preview stays separate from export. Embedded Blender control rigs keep
+    // animator-control tracks plus a deform-only companion for the mesh.
+    if (!usesEmbeddedDeformControlRigPipeline()) {
       state.deformPreviewClip = null;
     }
     rebuildTargetPreviewClip();
@@ -4577,8 +4747,8 @@ function applyRetarget() {
     log(
       `Retarget FK: ${map.length} controles FK, ${state.fkClip.tracks.length} curvas TRS, ` +
       `${Number($('fps').value) || 30} FPS. Action DEF=0. ` +
-      (usesMixamoControlRigPipeline()
-        ? `MixamoCtrl preview=${state.deformPreviewClip?.tracks?.length || 0} tracks.`
+      (usesEmbeddedDeformControlRigPipeline()
+        ? `${usesAutoRigProPipeline() ? 'ARP' : 'MixamoCtrl'} preview=${state.deformPreviewClip?.tracks?.length || 0} tracks.`
         : `WaltRig Runtime FK→DEF=${rt ? `${rt.bindings}/${rt.requestedBindings}` : 'n/a'}.`)
     );
   } catch (err) {
@@ -5815,8 +5985,43 @@ const MIXAMO_CONTROL_RIG_IK_CHAINS = [
   }
 ];
 
-function resolveMixamoControlRigIkChains(tgt) {
-  return MIXAMO_CONTROL_RIG_IK_CHAINS.map(def => {
+const AUTO_RIG_PRO_IK_CHAINS = [
+  {
+    kind: 'ARM', side: 'L',
+    a: 'c_arm_fk.l',
+    b: 'c_forearm_fk.l',
+    c: 'c_hand_fk.l',
+    ik: 'c_hand_ik.l',
+    pole: 'c_arms_pole.l'
+  },
+  {
+    kind: 'ARM', side: 'R',
+    a: 'c_arm_fk.r',
+    b: 'c_forearm_fk.r',
+    c: 'c_hand_fk.r',
+    ik: 'c_hand_ik.r',
+    pole: 'c_arms_pole.r'
+  },
+  {
+    kind: 'LEG', side: 'L',
+    a: 'c_thigh_fk.l',
+    b: 'c_leg_fk.l',
+    c: 'c_foot_fk.l',
+    ik: 'c_foot_ik.l',
+    pole: 'c_leg_pole.l'
+  },
+  {
+    kind: 'LEG', side: 'R',
+    a: 'c_thigh_fk.r',
+    b: 'c_leg_fk.r',
+    c: 'c_foot_fk.r',
+    ik: 'c_foot_ik.r',
+    pole: 'c_leg_pole.r'
+  }
+];
+
+function resolveDirectControlIkChains(tgt, definitions) {
+  return definitions.map(def => {
     const resolved = { ...def };
 
     for (const key of ['a', 'b', 'c', 'ik', 'pole']) {
@@ -5832,7 +6037,7 @@ function resolveMixamoControlRigIkChains(tgt) {
   }).filter(Boolean);
 }
 
-function mixamoControlRigChainSnapshot(tgt, chain) {
+function directControlChainSnapshot(tgt, chain) {
   const read = runtimeName => {
     const bone = tgt.bones.get(runtimeName);
     if (!bone) return null;
@@ -5852,7 +6057,7 @@ function mixamoControlRigChainSnapshot(tgt, chain) {
   return a && b && c ? { a, b, c } : null;
 }
 
-function scanMixamoControlRigPoleAnchor(tgt, mixer, chain, times) {
+function scanDirectControlPoleAnchor(tgt, mixer, chain, times) {
   let bestLen = 0;
   let bestLocal = null;
   const step = Math.max(1, Math.floor(times.length / 60));
@@ -5862,7 +6067,7 @@ function scanMixamoControlRigPoleAnchor(tgt, mixer, chain, times) {
     mixer.setTime(Number(times[i]));
     updateSlotWorld(tgt);
 
-    const snap = mixamoControlRigChainSnapshot(tgt, chain);
+    const snap = directControlChainSnapshot(tgt, chain);
     if (!snap) continue;
 
     const upper = snap.b.position.clone().sub(snap.a.position);
@@ -5886,7 +6091,7 @@ function scanMixamoControlRigPoleAnchor(tgt, mixer, chain, times) {
   return bestLocal;
 }
 
-function mixamoControlRigWorldToLocalMatrix(
+function directControlWorldToLocalMatrix(
   tgt,
   runtimeName,
   desiredWorld,
@@ -5907,7 +6112,7 @@ function mixamoControlRigWorldToLocalMatrix(
   return out.copy(desiredWorld);
 }
 
-function bakeMixamoControlRigIkFromFk() {
+function bakeDirectControlRigIkFromFk(definitions, label) {
   if (!state.fkClip) {
     throw new Error('Primero aplica el retargeting FK.');
   }
@@ -5922,11 +6127,11 @@ function bakeMixamoControlRigIkFromFk() {
     (_, i) => Math.min(solveClip.duration, i / fps)
   );
 
-  const chains = resolveMixamoControlRigIkChains(tgt);
+  const chains = resolveDirectControlIkChains(tgt, definitions);
 
   if (chains.length !== 4) {
     throw new Error(
-      `FK→IK Mixamo Control Rig incompleto: encontré ${chains.length}/4 cadenas IK.`
+      `FK→IK ${label} incompleto: encontré ${chains.length}/4 cadenas IK.`
     );
   }
 
@@ -5936,14 +6141,12 @@ function bakeMixamoControlRigIkFromFk() {
   const mixer = new THREE.AnimationMixer(tgt.root);
   const action = mixer.clipAction(solveClip).play();
 
-  // Pick a stable bend-side from the most bent sample. This prevents the pole
-  // from flipping when an elbow/knee becomes nearly straight.
   const poleAnchors = new Map();
 
   for (const chain of chains) {
     poleAnchors.set(
       chain.pole,
-      scanMixamoControlRigPoleAnchor(tgt, mixer, chain, times)
+      scanDirectControlPoleAnchor(tgt, mixer, chain, times)
     );
   }
 
@@ -5972,7 +6175,7 @@ function bakeMixamoControlRigIkFromFk() {
       updateSlotWorld(tgt);
 
       for (const chain of chains) {
-        const snap = mixamoControlRigChainSnapshot(tgt, chain);
+        const snap = directControlChainSnapshot(tgt, chain);
         if (!snap) continue;
 
         const fkRest = tgt.rest.get(chain.c);
@@ -5998,13 +6201,11 @@ function bakeMixamoControlRigIkFromFk() {
           ikRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
         );
 
-        // Same snap principle used by the proven CloudRig path:
-        // IK_pose = FK_pose * inverse(FK_rest) * IK_rest
         desiredIkWorld.copy(fkPoseWorld)
           .multiply(fkRestWorld.clone().invert())
           .multiply(ikRestWorld);
 
-        const ikLocal = mixamoControlRigWorldToLocalMatrix(
+        const ikLocal = directControlWorldToLocalMatrix(
           tgt,
           chain.ik,
           desiredIkWorld,
@@ -6040,7 +6241,7 @@ function bakeMixamoControlRigIkFromFk() {
           poleRest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
         );
 
-        const poleLocal = mixamoControlRigWorldToLocalMatrix(
+        const poleLocal = directControlWorldToLocalMatrix(
           tgt,
           chain.pole,
           desiredPoleWorld,
@@ -6093,15 +6294,14 @@ function bakeMixamoControlRigIkFromFk() {
 
   if (tracks.length < 24) {
     log(
-      `FK→IK Mixamo Control Rig aviso: se generaron ${tracks.length}/24 curvas esperadas ` +
+      `FK→IK ${label} aviso: se generaron ${tracks.length}/24 curvas esperadas ` +
       '(4 IK + 4 POLE × TRS).'
     );
   }
 
   log(
-    'FK→IK Mixamo Control Rig: Ctrl_Hand_IK / Ctrl_Foot_IK hacen snap ' +
-    'a la pose FK; Ctrl_ArmPole_IK / Ctrl_LegPole_IK usan el plano real ' +
-    'de codo/rodilla con estabilización para miembros casi rectos.'
+    `FK→IK ${label}: end effectors hacen snap a la pose FK; ` +
+    'los poles usan el plano real de codo/rodilla con estabilización.'
   );
 
   return new THREE.AnimationClip(
@@ -6110,6 +6310,21 @@ function bakeMixamoControlRigIkFromFk() {
     tracks
   );
 }
+
+function bakeMixamoControlRigIkFromFk() {
+  return bakeDirectControlRigIkFromFk(
+    MIXAMO_CONTROL_RIG_IK_CHAINS,
+    'Mixamo Control Rig'
+  );
+}
+
+function bakeAutoRigProIkFromFk() {
+  return bakeDirectControlRigIkFromFk(
+    AUTO_RIG_PRO_IK_CHAINS,
+    'Auto-Rig Pro'
+  );
+}
+
 
 
 function buildConvertedOutputClip(keepLimbFk) {
@@ -6138,7 +6353,14 @@ function buildConvertedOutputClip(keepLimbFk) {
             'Ctrl_UpLeg_FK_Left', 'Ctrl_Leg_FK_Left', 'Ctrl_Foot_FK_Left',
             'Ctrl_UpLeg_FK_Right', 'Ctrl_Leg_FK_Right', 'Ctrl_Foot_FK_Right'
           ]
-        : [
+        : usesAutoRigProPipeline()
+          ? [
+              'c_arm_fk.l', 'c_forearm_fk.l', 'c_hand_fk.l',
+              'c_arm_fk.r', 'c_forearm_fk.r', 'c_hand_fk.r',
+              'c_thigh_fk.l', 'c_leg_fk.l', 'c_foot_fk.l',
+              'c_thigh_fk.r', 'c_leg_fk.r', 'c_foot_fk.r'
+            ]
+          : [
             'FK-UpperArm.L', 'FK-Forearm.L', 'FK-Hand.L',
             'FK-UpperArm.R', 'FK-Forearm.R', 'FK-Hand.R',
             'FK-Thigh.L', 'FK-Knee.L', 'FK-Foot.L',
@@ -6398,7 +6620,9 @@ function convertFkToIk() {
       ? bakeRigifyIkFromFk()
       : usesMixamoControlRigPipeline()
         ? bakeMixamoControlRigIkFromFk()
-        : bakeIkFromFk();
+        : usesAutoRigProPipeline()
+          ? bakeAutoRigProIkFromFk()
+          : bakeIkFromFk();
     state.exportClip = buildConvertedOutputClip($('keepFk').checked);
     state.exported = false;
 
@@ -7697,10 +7921,14 @@ async function exportTargetFbx() {
       let currentActionName = exportClip.name || 'Retargeted_FK';
 
       if (
-        (usesCloudRigPipeline() || usesMixamoControlRigPipeline()) &&
+        (
+          usesCloudRigPipeline() ||
+          usesMixamoControlRigPipeline() ||
+          usesAutoRigProPipeline()
+        ) &&
         $('includeDefPreview')?.checked
       ) {
-        const defPreview = usesMixamoControlRigPipeline()
+        const defPreview = usesEmbeddedDeformControlRigPipeline()
           ? state.deformPreviewClip
           : bakeDeformPreviewClip();
 
