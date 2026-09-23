@@ -311,8 +311,6 @@ const state = {
   deformPreviewClip: null,
   exportClip: null,
   targetPreviewClip: null,
-  transferInProgress: false,
-  transferProgressHideTimer: null,
   playing: false,
   playTime: 0,
   lastFrame: performance.now(),
@@ -2713,7 +2711,7 @@ function extractWorldTwistQuaternion(q, axis, out = new THREE.Quaternion()) {
   return out.normalize();
 }
 
-async function bakeRetarget(map, clipName, { rootMotion = true, onProgress = null } = {}) {
+function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const src = state.source;
   const tgt = state.target;
   const clip = src.activeClip;
@@ -2902,11 +2900,7 @@ async function bakeRetarget(map, clipName, { rootMotion = true, onProgress = nul
     }
   }
 
-  let lastUiYield = performance.now();
-
-  for (let frameIndex = 0; frameIndex < times.length; frameIndex++) {
-    const time = times[frameIndex];
-
+  for (const time of times) {
     restoreRest(src);
     src.mixer.setTime(time);
     updateSlotWorld(src);
@@ -3201,23 +3195,6 @@ async function bakeRetarget(map, clipName, { rootMotion = true, onProgress = nul
       d.q.push(q.x, q.y, q.z, q.w);
     }
 
-    // Let the browser paint the Source pose and the border progress while
-    // the retarget is being baked. This keeps the UI responsive without
-    // changing the actual frame sampling or retarget math.
-    const frameProgress = (frameIndex + 1) / times.length;
-    onProgress?.(frameProgress, time);
-
-    const now = performance.now();
-    const shouldYield =
-      frameIndex < times.length - 1 &&
-      (frameIndex === 0 || now - lastUiYield >= 5);
-
-    if (shouldYield) {
-      await new Promise(resolve =>
-        requestAnimationFrame(() => resolve())
-      );
-      lastUiYield = performance.now();
-    }
   }
 
   restoreRest(src);
@@ -4007,91 +3984,13 @@ function playTargetClip(clip) {
   updateRigOverlays();
 }
 
-function setSourceTransferProgress(value) {
-  const overlay = $('sourceTransferProgress');
-  const percent = $('sourceTransferPercent');
-  if (!overlay) return;
-
-  const progress = THREE.MathUtils.clamp(Number(value) || 0, 0, 100);
-  overlay.style.setProperty('--transfer-progress', progress.toFixed(2));
-  if (percent) percent.textContent = `${Math.round(progress)}%`;
-}
-
-function beginSourceTransferProgress() {
-  const overlay = $('sourceTransferProgress');
-  if (!overlay) return;
-
-  if (state.transferProgressHideTimer) {
-    clearTimeout(state.transferProgressHideTimer);
-    state.transferProgressHideTimer = null;
-  }
-
-  overlay.hidden = false;
-  overlay.classList.remove('complete');
-  setSourceTransferProgress(0);
-}
-
-function finishSourceTransferProgress(success = true) {
-  const overlay = $('sourceTransferProgress');
-  if (!overlay) return;
-
-  if (!success) {
-    overlay.hidden = true;
-    overlay.classList.remove('complete');
-    return;
-  }
-
-  setSourceTransferProgress(100);
-  overlay.classList.add('complete');
-
-  state.transferProgressHideTimer = window.setTimeout(() => {
-    overlay.hidden = true;
-    overlay.classList.remove('complete');
-    state.transferProgressHideTimer = null;
-  }, 720);
-}
-
-function setTransferButtonBusy(busy) {
-  const button = $('applyRetarget');
-  if (!button) return;
-
-  button.classList.toggle('is-loading', busy);
-  const label = button.querySelector('b');
-  if (label) label.textContent = busy ? 'Transfiriendo…' : 'Transfer';
-}
-
-async function applyRetarget() {
-  if (state.transferInProgress) return;
-
-  const wasPlaying = state.playing;
-
+function applyRetarget() {
   try {
-    state.transferInProgress = true;
-    state.playing = false;
-    $('playPause').textContent = '▶';
-    setTransferButtonBusy(true);
-    updateButtons();
-    beginSourceTransferProgress();
-    setSourceTransferProgress(2);
     setStatus('Calculando retarget FK…');
-
     const map = validMap();
     if (!map.length) throw new Error('No hay pares válidos en el Bone Map.');
 
-    // The Source itself becomes the loading preview: bakeRetarget advances
-    // its mixer through the real sampled frames and yields often enough for
-    // Three.js to paint those poses. Border progress follows the same work.
-    state.fkRawClip = await bakeRetarget(
-      map,
-      'Retargeted_FK_RAW',
-      {
-        onProgress: progress =>
-          setSourceTransferProgress(4 + progress * 74)
-      }
-    );
-
-    setSourceTransferProgress(82);
-    await new Promise(resolve => requestAnimationFrame(() => resolve()));
+    state.fkRawClip = bakeRetarget(map, 'Retargeted_FK_RAW');
 
     // CloudRig loses several parenting/hinge constraints in FBX, so its
     // already-proven path needs the portable pose-basis rewrite. Rigify,
@@ -4101,9 +4000,6 @@ async function applyRetarget() {
       : usesRigifyPipeline()
         ? buildRigifyOriginalRigTransferClip(state.fkRawClip)
         : state.fkRawClip.clone();
-
-    setSourceTransferProgress(94);
-    await new Promise(resolve => requestAnimationFrame(() => resolve()));
 
     state.fkClip.name = 'Retargeted_FK';
     state.ikOnlyClip = null;
@@ -4115,9 +4011,6 @@ async function applyRetarget() {
     state.deformPreviewClip = null;
     rebuildTargetPreviewClip();
 
-    setSourceTransferProgress(98);
-    await new Promise(resolve => requestAnimationFrame(() => resolve()));
-
     state.playTime = 0;
     playTargetClip(state.targetPreviewClip);
     updateTimelineBounds();
@@ -4128,34 +4021,20 @@ async function applyRetarget() {
     state.lastFrame = performance.now();
     $('playPause').textContent = 'Ⅱ';
 
-    setSourceTransferProgress(100);
+    updateButtons();
     updateStats();
     setStatus('Retarget FK listo · reproduciendo', 'good');
     const rt = state.target.rigRuntime?.status;
     log(`Retarget FK: ${map.length} controles FK, ${state.fkClip.tracks.length} curvas TRS, ${Number($('fps').value) || 30} FPS. Action DEF=0. WaltRig Runtime FK→DEF=${rt ? `${rt.bindings}/${rt.requestedBindings}` : 'n/a'}.`);
-    finishSourceTransferProgress(true);
   } catch (err) {
     console.error(err);
     state.fkClip = null;
     state.exportClip = null;
     state.targetPreviewClip = null;
-
-    state.playing = wasPlaying;
-    if (wasPlaying) {
-      state.lastFrame = performance.now();
-      $('playPause').textContent = 'Ⅱ';
-    } else {
-      $('playPause').textContent = '▶';
-    }
-
-    finishSourceTransferProgress(false);
+    updateButtons();
     updateWorkflowUI();
     setStatus('Error de retarget', 'bad');
     log(`ERROR Retarget: ${err?.stack || err?.message || err}`);
-  } finally {
-    state.transferInProgress = false;
-    setTransferButtonBusy(false);
-    updateButtons();
   }
 }
 
@@ -7590,7 +7469,7 @@ function updateQuickIkStep() {
 
 function updateButtons() {
   const ready = !!state.source.root && !!state.target.root && !!state.source.activeClip && validMap().length > 0;
-  $('applyRetarget').disabled = !ready || state.transferInProgress;
+  $('applyRetarget').disabled = !ready;
   $('convertIk').disabled = !state.fkClip || !supportsFkToIk();
   updateQuickIkStep();
   $('exportFbx').disabled = !state.exportClip;
@@ -7774,7 +7653,7 @@ $('sourcePrefix').onchange = () => {
 $('targetPrefix').onchange = () => {
   if ($('preset').value !== 'none' && state.source.root && state.target.root) void loadPreset();
 };
-$('applyRetarget').onclick = () => { void applyRetarget(); };
+$('applyRetarget').onclick = applyRetarget;
 
 $('restBoneSelect').onchange = () => selectRestPoseBone($('restBoneSelect').value);
 $('restSpaceToggle').onclick = () => {
