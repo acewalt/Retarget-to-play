@@ -33,6 +33,29 @@ h2,p{margin:0}
 .brand-mark span:nth-child(2){height:20px;opacity:.86}.brand-mark span:nth-child(3){height:13px;opacity:.68}
 .brand-copy{display:flex;flex-direction:column}.brand-copy strong{font-size:16px}.brand-copy small{font-size:10px;color:var(--muted)}
 .topnav{height:100%;display:flex;align-items:center;justify-content:center;gap:12px}
+.nav-workspace-separator{
+  width:1px;
+  height:24px;
+  flex:0 0 1px;
+  margin:0 4px;
+  background:var(--border);
+  border-radius:999px;
+}
+.nav-item-tool{
+  color:var(--text);
+}
+.nav-item-tool:not(.active)::before{
+  content:"";
+  width:6px;
+  height:6px;
+  display:inline-block;
+  margin-right:7px;
+  border-radius:50%;
+  background:var(--primary);
+  opacity:.72;
+  vertical-align:1px;
+}
+
 .nav-item{height:100%;min-height:0;border:0;border-radius:0;background:transparent;color:var(--muted);padding:0 14px;box-shadow:none!important;transform:none!important;position:relative}
 .nav-item.active{color:var(--primary);font-weight:800}.nav-item.active:after{content:"";position:absolute;left:10px;right:10px;bottom:0;height:3px;background:var(--primary);border-radius:3px 3px 0 0}
 .top-actions{display:flex;align-items:center;justify-content:flex-end;gap:8px}
@@ -40,6 +63,31 @@ h2,p{margin:0}
 .engine-chip span{margin-left:4px;color:var(--primary);font-weight:700}.status-pill{color:var(--success);background:var(--success-soft);border-color:color-mix(in srgb,var(--success) 32%,var(--border))}
 .icon-button{width:36px;height:36px;padding:0;display:grid;place-items:center;font-size:16px}
 .workspace-shell{min-height:0;display:grid;grid-template-columns:220px minmax(650px,1fr) 330px}
+.action-packer-workspace{
+  grid-column:1 / -1;
+  min-width:0;
+  min-height:0;
+  width:100%;
+  height:100%;
+  overflow:hidden;
+  background:#0b0d10;
+}
+.action-packer-workspace[hidden]{display:none}
+.action-packer-frame{
+  display:block;
+  width:100%;
+  height:100%;
+  min-height:0;
+  border:0;
+  background:#0b0d10;
+}
+.workspace-shell.actionpacker-focus{
+  grid-template-columns:minmax(0,1fr);
+}
+.workspace-shell.actionpacker-focus .action-packer-workspace{
+  grid-column:1;
+}
+
 .workflow-sidebar{min-height:0;border-right:1px solid var(--border);background:var(--surface);padding:24px 14px 18px;display:flex;flex-direction:column}
 .workflow-title{display:flex;flex-direction:column;padding:0 12px 18px}.workflow-title span{font-weight:800;font-size:14px}.workflow-title small{color:var(--muted);font-size:11px}
 .steps-list{list-style:none;margin:0;padding:0;position:relative}.steps-list:before{content:"";position:absolute;left:28px;top:31px;bottom:31px;width:1px;background:var(--border)}
@@ -576,6 +624,9 @@ h2,p{margin:0}
    selectors declared after the original mobile breakpoint.
    ------------------------------------------------------------------------- */
 @media (max-width:760px){
+  .nav-workspace-separator{height:20px;margin:0 1px}
+  .nav-item-tool:not(.active)::before{display:none}
+
   html,body{width:100%;max-width:100%;overflow-x:hidden}
   body{overflow-y:auto}
   .app{height:auto;min-height:100vh;display:block}
