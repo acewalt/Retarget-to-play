@@ -15,7 +15,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260923-restpose-header-actions1" />
+  <link rel="stylesheet" href="./styles.css?v=20260923-mapping-skeleton-preview1" />
   <script type="importmap">
   {
     "imports": {
@@ -246,6 +246,34 @@
               <button id="clearMap" class="danger-ghost" type="button">Clear</button>
             </div>
 
+            <section id="mappingSkeletonPreview" class="mapping-skeleton-preview">
+              <header class="mapping-preview-head">
+                <div>
+                  <span class="eyebrow">SKELETON PREVIEW</span>
+                  <h3>Rest Pose · Front</h3>
+                </div>
+                <span id="mappingPreviewHint">Selecciona una fila para comparar ambos huesos.</span>
+              </header>
+
+              <div class="mapping-preview-grid">
+                <article class="mapping-preview-pane">
+                  <div class="mapping-preview-pane-head">
+                    <b>SOURCE</b>
+                    <span id="mappingSourceBoneLabel">—</span>
+                  </div>
+                  <canvas id="mappingSourceSkeleton" aria-label="Preview del esqueleto Source"></canvas>
+                </article>
+
+                <article class="mapping-preview-pane">
+                  <div class="mapping-preview-pane-head">
+                    <b>TARGET</b>
+                    <span id="mappingTargetBoneLabel">—</span>
+                  </div>
+                  <canvas id="mappingTargetSkeleton" aria-label="Preview del esqueleto Target"></canvas>
+                </article>
+              </div>
+            </section>
+
             <div class="mapping-table-head">
               <span>Source Bone</span><span></span><span>Target Bone</span><span>Acción</span>
             </div>
@@ -421,7 +449,7 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260923-ghost-direct-source5"></script>
+  <script type="module" src="./app.js?v=20260923-mapping-skeleton-preview1"></script>
   <script type="module" src="./transfer-ui.js?v=20260922-transfer-nodelay1"></script>
 </body>
 </html>
