@@ -242,11 +242,57 @@ function targetLooksMixamoControlRig() {
   const tgt = state.target;
   if (!tgt?.root) return false;
 
+  const has = (...names) =>
+    !!findBoneByOriginalExact(tgt, names);
+
+  // Mixamo Control Rig contains the original mixamorig deform skeleton too,
+  // so WaltFBX may classify the FBX generically as "mixamo". Detect this rig
+  // from its control signature instead of relying on the generic profile.
+  //
+  // Current hierarchy uses Ctrl_UpLeg_FK_* (not Ctrl_Thigh_FK_*). Keep the
+  // older Thigh alias as a fallback so both variants remain compatible.
+  const coreControls =
+    has('Ctrl_Master') &&
+    has('Ctrl_Hips') &&
+    has('Ctrl_Spine') &&
+    has('Ctrl_Spine1') &&
+    has('Ctrl_Spine2');
+
+  const leftArm =
+    has('Ctrl_Arm_FK_Left') &&
+    has('Ctrl_ForeArm_FK_Left') &&
+    has('Ctrl_Hand_FK_Left');
+
+  const rightArm =
+    has('Ctrl_Arm_FK_Right') &&
+    has('Ctrl_ForeArm_FK_Right') &&
+    has('Ctrl_Hand_FK_Right');
+
+  const leftLeg =
+    has('Ctrl_UpLeg_FK_Left', 'Ctrl_Thigh_FK_Left') &&
+    has('Ctrl_Leg_FK_Left') &&
+    has('Ctrl_Foot_FK_Left');
+
+  const rightLeg =
+    has('Ctrl_UpLeg_FK_Right', 'Ctrl_Thigh_FK_Right') &&
+    has('Ctrl_Leg_FK_Right') &&
+    has('Ctrl_Foot_FK_Right');
+
+  const ikSignature =
+    has('Ctrl_Hand_IK_Left') &&
+    has('Ctrl_Hand_IK_Right') &&
+    has('Ctrl_Foot_IK_Left') &&
+    has('Ctrl_Foot_IK_Right') &&
+    has('Ctrl_ArmPole_IK_Left') &&
+    has('Ctrl_LegPole_IK_Left');
+
   return !!(
-    findBoneByOriginalExact(tgt, ['Ctrl_Arm_FK_Left']) &&
-    findBoneByOriginalExact(tgt, ['Ctrl_ForeArm_FK_Left']) &&
-    findBoneByOriginalExact(tgt, ['Ctrl_Hand_FK_Left']) &&
-    findBoneByOriginalExact(tgt, ['Ctrl_Thigh_FK_Left'])
+    coreControls &&
+    leftArm &&
+    rightArm &&
+    leftLeg &&
+    rightLeg &&
+    ikSignature
   );
 }
 
@@ -2430,6 +2476,14 @@ function scorePresetAgainstLoadedRigs(definition, presetData) {
 
 async function detectAutoPreset() {
   if (!state.source.root || !state.target.root) return null;
+
+  if (targetLooksMixamoControlRig()) {
+    log(
+      'Auto-preset: Target reconocido como Mixamo Control Rig por firma de controles ' +
+      '(Ctrl_Master / Ctrl_Hips / FK / IK), aunque el perfil base sea ' +
+      `"${loadedRigProfile(state.target) || 'desconocido'}".`
+    );
+  }
 
   const candidates = Object.entries(BLENDCAP_PRESET_REGISTRY)
     .filter(([, definition]) =>
