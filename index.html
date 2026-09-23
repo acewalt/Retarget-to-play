@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260922-transfer-compositor2" />
+  <link rel="stylesheet" href="./styles.css?v=20260922-actionpacker1" />
   <script type="importmap">
   {
     "imports": {
@@ -39,6 +39,8 @@
         <button id="navMappings" class="nav-item conditional-feature" type="button" data-workspace="mappings" hidden>Mappings</button>
         <button class="nav-item" type="button" data-workspace="restpose">Redefine Rest Pose</button>
         <button id="navAnimations" class="nav-item conditional-feature" type="button" data-workspace="animations" hidden>Animations</button>
+        <span class="nav-workspace-separator" aria-hidden="true"></span>
+        <button id="navActionPacker" class="nav-item nav-item-tool" type="button" data-workspace="actionpacker">Action Packer</button>
       </nav>
 
       <div class="top-actions">
@@ -392,10 +394,20 @@
           <div class="stats" id="stats">Sin retarget generado.</div>
         </div>
       </aside>
+
+      <section id="actionPackerWorkspace" class="action-packer-workspace" hidden>
+        <iframe
+          id="actionPackerFrame"
+          class="action-packer-frame"
+          src="./action-packer/index.html?v=20260922-actionpacker1"
+          title="Action Packer"
+          loading="eager"
+        ></iframe>
+      </section>
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260922-transfer-core-reverted"></script>
+  <script type="module" src="./app.js?v=20260922-actionpacker1"></script>
   <script type="module" src="./transfer-ui.js?v=20260922-transfer-nodelay1"></script>
 </body>
 </html>
