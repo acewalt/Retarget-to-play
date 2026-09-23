@@ -12,7 +12,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260922-transfer-progress1" />
+  <link rel="stylesheet" href="./styles.css?v=20260922-ab-progress1" />
   <script type="importmap">
   {
     "imports": {
@@ -132,12 +132,14 @@
               <div id="sourceViewport" class="viewport"></div>
               <div id="sourceTransferProgress" class="source-transfer-progress" hidden aria-hidden="true">
                 <svg class="source-transfer-progress-frame" viewBox="0 0 100 100" preserveAspectRatio="none" focusable="false" aria-hidden="true">
-                  <path class="source-transfer-progress-path" pathLength="100" d="M 50 1 H 99 V 99 H 50"></path>
-                  <path class="source-transfer-progress-path" pathLength="100" d="M 50 1 H 1 V 99 H 50"></path>
+                  <path class="source-transfer-progress-path source-transfer-progress-path-right" pathLength="100" d="M 50 1 H 99 V 99 H 50"></path>
+                  <path class="source-transfer-progress-path source-transfer-progress-path-left" pathLength="100" d="M 50 1 H 1 V 99 H 50"></path>
+                  <circle class="source-transfer-point source-transfer-point-a" cx="50" cy="1" r="1.15"></circle>
+                  <circle class="source-transfer-point source-transfer-point-b" cx="50" cy="99" r="1.15"></circle>
                 </svg>
                 <div class="source-transfer-progress-badge">
                   <span>Transfer</span>
-                  <b id="sourceTransferPercent">0%</b>
+                  <b id="sourceTransferPercent">…</b>
                 </div>
               </div>
               <div class="viewport-tools">
@@ -388,6 +390,7 @@
     </main>
   </div>
 
-  <script type="module" src="./app.js?v=20260922-transfer-progress1"></script>
+  <script type="module" src="./app.js?v=20260922-transfer-core-reverted"></script>
+  <script type="module" src="./transfer-ui.js?v=20260922-ab-progress1"></script>
 </body>
 </html>
