@@ -489,6 +489,9 @@ const state = {
     visual: null,
     mixer: null,
     action: null,
+    bonePairs: [],
+    comparison: null,
+    lastTime: NaN,
     opacity: 0.16
   },
   restEditor: {
@@ -703,6 +706,9 @@ function disposeGhostOverlay({ keepEnabled = true } = {}) {
   ghost.visual = null;
   ghost.mixer = null;
   ghost.action = null;
+  ghost.bonePairs = [];
+  ghost.comparison = null;
+  ghost.lastTime = NaN;
 
   if (!keepEnabled) ghost.enabled = false;
 }
@@ -1090,20 +1096,38 @@ function validationGhostTranslation(alignment, anchor) {
   };
 }
 
-function updateGhostOverlayPose() {
+function syncGhostPoseFromSource() {
   const ghost = state.ghost;
-  if (!ghost?.enabled || !ghost.container || !ghost.mixer) return;
+  if (!ghost?.bonePairs?.length) return;
+
+  for (const [sourceBone, ghostBone] of ghost.bonePairs) {
+    ghostBone.position.copy(sourceBone.position);
+    ghostBone.quaternion.copy(sourceBone.quaternion);
+    ghostBone.scale.copy(sourceBone.scale);
+  }
+}
+
+function updateGhostOverlayPose(force = false) {
+  const ghost = state.ghost;
+  if (!ghost?.enabled || !ghost.container || !ghost.visual) return;
   if (!state.source.root || !state.target.root || !state.targetPreviewClip) return;
 
-  ghost.mixer.setTime(state.playTime);
-  ghost.visual?.updateMatrixWorld?.(true);
+  // seek() already evaluates the Source mixer. The render loop used to:
+  //   1) evaluate a SECOND mixer for the Ghost,
+  //   2) rebuild the mapped-node list,
+  //   3) recalculate scale/rest alignment,
+  //   4) do the same work again in animate() after seek().
+  // Cache all static work and skip duplicate same-time updates.
+  if (!force && ghost.lastTime === state.playTime) return;
 
-  updateSlotWorld(state.source);
-  updateSlotWorld(state.target);
+  syncGhostPoseFromSource();
 
-  const nodes = validationMappedNodes();
-  const alignment = validationRestAlignment(nodes);
-  const anchor = validationAnchorNode(nodes);
+  const comparison = ghost.comparison;
+  const nodes = comparison?.nodes || validationMappedNodes();
+  const alignment =
+    comparison?.alignment || validationRestAlignment(nodes);
+  const anchor =
+    comparison?.anchor || validationAnchorNode(nodes);
 
   ghost.container.scale.setScalar(alignment.scale);
   ghost.container.quaternion.copy(alignment.rotation);
@@ -1114,9 +1138,12 @@ function updateGhostOverlayPose() {
   );
 
   ghost.container.position.copy(translation);
-  ghost.container.updateMatrixWorld(true);
-}
+  ghost.lastTime = state.playTime;
 
+  // No visual.updateMatrixWorld(true) here. The renderer updates the Ghost
+  // hierarchy once during the normal Target render, avoiding another full
+  // skeleton traversal on the CPU.
+}
 function rebuildGhostOverlay() {
   disposeGhostOverlay({ keepEnabled: true });
 
@@ -1163,18 +1190,40 @@ function rebuildGhostOverlay() {
   container.add(visual);
   targetView.scene.add(container);
 
-  const mixer = new THREE.AnimationMixer(visual);
-  const action = mixer.clipAction(state.source.activeClip);
-  action.setLoop(THREE.LoopRepeat, Infinity).play();
+  // Reuse the already-evaluated Source pose instead of running the same clip
+  // through a second AnimationMixer. A Mixamo Source has ~65 bones, so copying
+  // local TRS is much cheaper than evaluating all keyframe interpolants twice.
+  const ghostBones = collectBones(visual);
+  const bonePairs = [];
+
+  for (const [name, sourceBone] of state.source.bones) {
+    const ghostBone = ghostBones.get(name);
+    if (ghostBone) bonePairs.push([sourceBone, ghostBone]);
+  }
+
+  const nodes = validationMappedNodes();
+  const alignment = validationRestAlignment(nodes);
+  const anchor = validationAnchorNode(nodes);
 
   state.ghost.container = container;
   state.ghost.visual = visual;
-  state.ghost.mixer = mixer;
-  state.ghost.action = action;
+  state.ghost.mixer = null;
+  state.ghost.action = null;
+  state.ghost.bonePairs = bonePairs;
+  state.ghost.comparison = {
+    nodes,
+    alignment,
+    anchor
+  };
+  state.ghost.lastTime = NaN;
 
-  updateGhostOverlayPose();
+  updateGhostOverlayPose(true);
+
+  log(
+    `Ghost performance: pose compartida con Source · ` +
+    `${bonePairs.length} huesos sincronizados · alineación cacheada.`
+  );
 }
-
 function setGhostMode(enabled) {
   state.ghost.enabled = !!enabled;
 
@@ -2462,6 +2511,10 @@ function resetRestPoseEditorPose() {
 }
 
 function invalidateRetargetAfterRestChange() {
+  if (state.ghost?.container) {
+    disposeGhostOverlay({ keepEnabled: true });
+  }
+
   state.fkClip = null;
   state.fkRawClip = null;
   state.ikOnlyClip = null;
