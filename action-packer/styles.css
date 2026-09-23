@@ -1078,3 +1078,287 @@ html,body{background:var(--bg);color:var(--text)}
 }
 .ghost-link{color:var(--muted)}
 .ghost-link:hover{color:var(--primary)}
+
+
+/* Action Packer mobile workspace v1 */
+@media (max-width:760px){
+  html.embedded-action-packer,
+  html.embedded-action-packer body{
+    height:auto!important;
+    min-height:0!important;
+    overflow:visible!important;
+  }
+
+  html.embedded-action-packer .app-shell{
+    height:auto!important;
+    min-height:0!important;
+    overflow:visible!important;
+  }
+
+  /* The parent Retarget-to-play header already identifies the active tool. */
+  html.embedded-action-packer .topbar{
+    display:none!important;
+  }
+
+  .workspace{
+    display:block!important;
+    width:100%;
+    height:auto!important;
+    min-height:0!important;
+    overflow:visible!important;
+  }
+
+  .sidebar,
+  .left-panel,
+  .right-panel,
+  .viewport-column{
+    width:100%;
+    height:auto!important;
+    min-height:0!important;
+    overflow:visible!important;
+  }
+
+  .left-panel,
+  .right-panel{
+    border-left:0;
+    border-right:0;
+    border-bottom:1px solid var(--line);
+  }
+
+  .panel-section{
+    padding:14px 14px 15px;
+  }
+
+  .panel-section.grow,
+  .left-panel .grow,
+  .right-panel .grow{
+    flex:none!important;
+    max-height:none!important;
+    overflow:visible!important;
+  }
+
+  .section-heading{
+    margin-bottom:11px;
+  }
+
+  .section-heading h2{
+    font-size:14px;
+  }
+
+  .step{
+    width:28px;
+    height:28px;
+    font-size:10px;
+  }
+
+  .drop-zone{
+    min-height:124px;
+    padding:18px 14px;
+    border-radius:14px;
+  }
+
+  .drop-zone strong{
+    font-size:13px;
+  }
+
+  .drop-zone span:not(.drop-icon),
+  .hint{
+    font-size:10.5px;
+  }
+
+  .asset-list,
+  .action-list{
+    max-height:none!important;
+    overflow:visible!important;
+  }
+
+  .asset-card,
+  .action-card{
+    border-radius:13px;
+  }
+
+  /* Editor/preview comes immediately after Source/Base setup. */
+  .viewport-column{
+    padding:12px;
+    background:var(--bg);
+  }
+
+  .viewport-card{
+    display:grid;
+    grid-template-rows:auto minmax(0,auto) auto;
+    min-height:0;
+    border-radius:15px;
+    overflow:hidden;
+  }
+
+  .viewport-toolbar{
+    min-height:0;
+    padding:10px;
+    align-items:flex-start;
+    gap:8px;
+    flex-wrap:wrap;
+  }
+
+  .viewport-toolbar>div:first-child{
+    min-width:0;
+    flex:1 1 100%;
+    flex-direction:row!important;
+    flex-wrap:wrap;
+    gap:6px;
+  }
+
+  .viewport-toolbar .pill{
+    max-width:100%;
+    overflow:hidden;
+    text-overflow:ellipsis;
+  }
+
+  .toolbar-actions{
+    width:100%;
+    display:grid;
+    grid-template-columns:repeat(4,minmax(0,1fr));
+    gap:6px;
+  }
+
+  .toolbar-actions .icon-button{
+    width:100%;
+    min-width:0;
+    min-height:40px;
+    height:40px;
+    padding:0 6px;
+    font-size:10px;
+    white-space:nowrap;
+  }
+
+  .viewport{
+    width:100%;
+    height:auto!important;
+    min-height:0!important;
+    aspect-ratio:4/3;
+    overflow:hidden;
+    touch-action:none;
+  }
+
+  .view-navigation{
+    top:8px;
+    right:8px;
+    transform:scale(.82);
+    transform-origin:top right;
+  }
+
+  .motion-panel{
+    top:8px;
+    left:8px;
+    right:8px;
+    width:auto!important;
+    max-width:none;
+    max-height:calc(100% - 16px);
+    overflow:hidden;
+    border-radius:12px;
+  }
+
+  .motion-panel-body{
+    overscroll-behavior:contain;
+    -webkit-overflow-scrolling:touch;
+  }
+
+  .playback{
+    grid-template-columns:40px minmax(0,1fr);
+    gap:8px;
+    padding:9px 10px;
+  }
+
+  .playback .play-button{
+    width:40px;
+    height:40px;
+  }
+
+  .speed-control{
+    grid-column:1/-1;
+    justify-content:flex-end;
+  }
+
+  .status-bar{
+    margin:0 12px 12px;
+    min-height:36px;
+    font-size:10px;
+  }
+
+  /* Actions / Export become normal page sections, never clipped rails. */
+  .right-panel .panel-section{
+    width:100%;
+  }
+
+  .action-bulk-controls{
+    grid-template-columns:1fr 1fr;
+    gap:6px;
+  }
+
+  .rename-compatible-button{
+    grid-column:1/-1;
+  }
+
+  .action-top{
+    grid-template-columns:34px minmax(0,1fr) auto;
+    gap:7px;
+  }
+
+  .action-name{
+    font-size:12px;
+  }
+
+  .action-origin,
+  .action-meta{
+    font-size:9px;
+  }
+
+  .action-rename{
+    grid-column:2;
+    justify-self:start;
+  }
+
+  .include-toggle{
+    grid-column:3;
+    grid-row:1 / span 2;
+    align-self:center;
+  }
+
+  .export-card,
+  .export-summary{
+    width:100%;
+  }
+
+  .primary-button,
+  .secondary-button{
+    min-height:44px;
+    font-size:11px;
+    border-radius:11px;
+  }
+}
+
+@media (max-width:430px){
+  .panel-section{
+    padding-left:12px;
+    padding-right:12px;
+  }
+
+  .viewport-column{
+    padding:8px;
+  }
+
+  .toolbar-actions{
+    grid-template-columns:repeat(2,minmax(0,1fr));
+  }
+
+  .viewport{
+    aspect-ratio:1/1;
+  }
+
+  .action-bulk-controls{
+    grid-template-columns:1fr;
+  }
+
+  .rename-compatible-button{
+    grid-column:auto;
+  }
+}
