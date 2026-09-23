@@ -127,6 +127,7 @@ const state = {
   limbGizmoDrag: null,
   isScrubbing: false,
   exporting: false,
+  syncedSourceKeys: new Set(),
 
 };
 
@@ -2482,6 +2483,62 @@ function updateViewportEmpty() {
   updateExportState();
 }
 
+
+function externalFileIdentity(file) {
+  return [
+    String(file?.name || ''),
+    Number(file?.size || 0),
+    Number(file?.lastModified || 0)
+  ].join('::');
+}
+
+function hasImportedFile(file) {
+  const key = externalFileIdentity(file);
+  return state.assets.some(asset => externalFileIdentity(asset.file) === key);
+}
+
+async function importSourceFromRetarget(file) {
+  if (!(file instanceof File) || !/\.fbx$/i.test(file.name)) return;
+
+  const key = externalFileIdentity(file);
+  if (state.syncedSourceKeys.has(key) || hasImportedFile(file)) {
+    state.syncedSourceKeys.add(key);
+    return;
+  }
+
+  state.syncedSourceKeys.add(key);
+
+  try {
+    await importFiles([file]);
+    setStatus(
+      'Source sincronizado desde Retarget-to-play: ' + file.name + '.',
+      'ok'
+    );
+  } catch (error) {
+    state.syncedSourceKeys.delete(key);
+    console.error('No se pudo sincronizar Source desde Retarget-to-play', error);
+    setStatus(
+      'No se pudo sincronizar el Source ' + file.name + '.',
+      'error'
+    );
+  }
+}
+
+window.addEventListener('message', event => {
+  if (event.origin !== window.location.origin) return;
+  if (event.source !== window.parent) return;
+  if (event.data?.type !== 'retarget-to-play:source-fbx') return;
+
+  void importSourceFromRetarget(event.data.file);
+});
+
+try {
+  window.parent?.postMessage(
+    { type: 'action-packer:ready' },
+    window.location.origin
+  );
+} catch {}
+
 async function importFiles(fileList) {
   const files = Array.from(fileList).filter((file) => /\.fbx$/i.test(file.name));
   if (!files.length) {
@@ -3403,6 +3460,7 @@ function clearAll() {
 
   state.assets = [];
   state.clips = [];
+  state.syncedSourceKeys.clear();
   state.baseAssetId = null;
   state.activeClipId = null;
   state.skeletonHelper = null;
