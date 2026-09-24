@@ -15,7 +15,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260923-mapping-square-click2" />
+  <link rel="stylesheet" href="./styles.css?v=20260923-mapping-split-layout3" />
   <script type="importmap">
   {
     "imports": {
@@ -237,55 +237,62 @@
             </div>
           </header>
 
-          <div class="mapping-expandable">
-            <div class="mapping-toolbar">
-              <div class="search-field"><span>⌕</span><input id="mapSearch" placeholder="Buscar source o target…" /></div>
-              <button id="autoMatch" class="soft-primary" type="button">✦ Auto-preset</button>
-              <button id="loadPreset" type="button">Cargar preset</button>
-              <button id="addPair" type="button">+ Par</button>
-              <button id="clearMap" class="danger-ghost" type="button">Clear</button>
-            </div>
+          <div class="mapping-expandable mapping-workbench">
+            <aside class="mapping-preview-column">
+              <div class="mapping-preview-search">
+                <div class="search-field"><span>⌕</span><input id="mapSearch" placeholder="Buscar source o target…" /></div>
+              </div>
 
-            <section id="mappingSkeletonPreview" class="mapping-skeleton-preview">
-              <header class="mapping-preview-head">
-                <div>
-                  <span class="eyebrow">SKELETON PREVIEW</span>
-                  <h3>Rest Pose · Front</h3>
+              <section id="mappingSkeletonPreview" class="mapping-skeleton-preview">
+                <header class="mapping-preview-head">
+                  <div>
+                    <span class="eyebrow">SKELETON PREVIEW</span>
+                    <h3>Rest Pose · Front</h3>
+                  </div>
+                  <span id="mappingPreviewHint">Selecciona una fila para comparar ambos huesos.</span>
+                </header>
+
+                <div class="mapping-preview-grid">
+                  <article class="mapping-preview-pane">
+                    <div class="mapping-preview-pane-head">
+                      <b>SOURCE</b>
+                      <span id="mappingSourceBoneLabel">—</span>
+                    </div>
+                    <canvas id="mappingSourceSkeleton" aria-label="Preview del esqueleto Source"></canvas>
+                  </article>
+
+                  <article class="mapping-preview-pane">
+                    <div class="mapping-preview-pane-head">
+                      <b>TARGET</b>
+                      <span id="mappingTargetBoneLabel">—</span>
+                    </div>
+                    <canvas id="mappingTargetSkeleton" aria-label="Preview del esqueleto Target"></canvas>
+                  </article>
                 </div>
-                <span id="mappingPreviewHint">Selecciona una fila para comparar ambos huesos.</span>
-              </header>
+              </section>
+            </aside>
 
-              <div class="mapping-preview-grid">
-                <article class="mapping-preview-pane">
-                  <div class="mapping-preview-pane-head">
-                    <b>SOURCE</b>
-                    <span id="mappingSourceBoneLabel">—</span>
-                  </div>
-                  <canvas id="mappingSourceSkeleton" aria-label="Preview del esqueleto Source"></canvas>
-                </article>
+            <section class="mapping-list-column">
+              <div class="mapping-toolbar mapping-toolbar-actions">
+                <button id="autoMatch" class="soft-primary" type="button">✦ Auto-preset</button>
+                <button id="loadPreset" type="button">Cargar preset</button>
+                <button id="addPair" type="button">+ Par</button>
+                <button id="clearMap" class="danger-ghost" type="button">Clear</button>
+              </div>
 
-                <article class="mapping-preview-pane">
-                  <div class="mapping-preview-pane-head">
-                    <b>TARGET</b>
-                    <span id="mappingTargetBoneLabel">—</span>
-                  </div>
-                  <canvas id="mappingTargetSkeleton" aria-label="Preview del esqueleto Target"></canvas>
-                </article>
+              <div class="mapping-table-head">
+                <span>Source Bone</span><span></span><span>Target Bone</span><span>Acción</span>
+              </div>
+
+              <div class="mapping-content">
+                <div id="boneMap" class="bone-map empty">Carga ambos FBX.</div>
+              </div>
+
+              <div class="mapping-footer">
+                <span id="mapCount">0 / 0 válidos</span>
+                <span>Los nombres originales del FBX se preservan al exportar.</span>
               </div>
             </section>
-
-            <div class="mapping-table-head">
-              <span>Source Bone</span><span></span><span>Target Bone</span><span>Acción</span>
-            </div>
-
-            <div class="mapping-content">
-              <div id="boneMap" class="bone-map empty">Carga ambos FBX.</div>
-            </div>
-
-            <div class="mapping-footer">
-              <span id="mapCount">0 / 0 válidos</span>
-              <span>Los nombres originales del FBX se preservan al exportar.</span>
-            </div>
           </div>
         </section>
 
