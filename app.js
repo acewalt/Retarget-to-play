@@ -499,6 +499,11 @@ const state = {
     links: [],
     line: null
   },
+  arpSkinPreviewCache: {
+    targetRoot: null,
+    weightedNames: null,
+    bindings: null
+  },
   ghost: {
     enabled: false,
     container: null,
@@ -3241,6 +3246,12 @@ function disposeObject(root) {
 function clearSlot(slot, view) {
   disposeUeArpHelperBridge();
 
+  if (slot.kind === 'target') {
+    state.arpSkinPreviewCache.targetRoot = null;
+    state.arpSkinPreviewCache.weightedNames = null;
+    state.arpSkinPreviewCache.bindings = null;
+  }
+
   if (state.ghost?.container) {
     disposeGhostOverlay({ keepEnabled: true });
   }
@@ -5141,9 +5152,19 @@ function buildMixamoToArpReferencePreviewMap() {
 }
 
 function autoRigProWeightedSkinBoneNames() {
-  const weighted = new Set();
   const tgt = state.target;
-  if (!tgt?.root) return weighted;
+  const cache = state.arpSkinPreviewCache;
+
+  if (!tgt?.root) return new Set();
+
+  if (
+    cache.targetRoot === tgt.root &&
+    cache.weightedNames instanceof Set
+  ) {
+    return cache.weightedNames;
+  }
+
+  const weighted = new Set();
 
   tgt.root.traverse(object => {
     if (!object.isSkinnedMesh || !object.skeleton?.bones) return;
@@ -5152,8 +5173,6 @@ function autoRigProWeightedSkinBoneNames() {
     const skinWeight = object.geometry?.getAttribute?.('skinWeight');
     const bones = object.skeleton.bones;
 
-    // If weight attributes are unavailable, all skeleton bones are potential
-    // deformers. Normally FBX SkinnedMesh provides both attributes.
     if (!skinIndex || !skinWeight) {
       for (const bone of bones) {
         if (bone?.name) weighted.add(bone.name);
@@ -5185,6 +5204,10 @@ function autoRigProWeightedSkinBoneNames() {
       }
     }
   });
+
+  cache.targetRoot = tgt.root;
+  cache.weightedNames = weighted;
+  cache.bindings = null;
 
   return weighted;
 }
@@ -5264,37 +5287,68 @@ function autoRigProReferenceForSkinBone(original) {
 
 function resolveAutoRigProRefToSkinBindings() {
   const tgt = state.target;
+  const cache = state.arpSkinPreviewCache;
+
+  if (
+    cache.targetRoot === tgt.root &&
+    Array.isArray(cache.bindings)
+  ) {
+    return cache.bindings;
+  }
+
   const weightedNames = autoRigProWeightedSkinBoneNames();
   const bindings = [];
   const seen = new Set();
 
   for (const runtimeName of weightedNames) {
-    const bone = tgt.bones.get(runtimeName);
-    if (!bone) continue;
+    const drivenBone = tgt.bones.get(runtimeName);
+    if (!drivenBone) continue;
 
-    const original = originalObjectName(bone) || runtimeName;
+    const original = originalObjectName(drivenBone) || runtimeName;
     const refOriginal = autoRigProReferenceForSkinBone(original);
     if (!refOriginal) continue;
 
     const ref = findBoneByOriginalExact(tgt, [refOriginal]);
-    if (!ref) continue;
+    const refBone = ref ? tgt.bones.get(ref) : null;
+    const refRest = ref ? tgt.rest.get(ref) : null;
+    const drivenRest = tgt.rest.get(runtimeName);
+
+    if (!ref || !refBone || !refRest || !drivenRest) continue;
 
     const key = ref + '::' + runtimeName;
     if (seen.has(key)) continue;
     seen.add(key);
 
+    const refRestWorld = new THREE.Matrix4().compose(
+      refRest.worldPos,
+      refRest.worldQuat,
+      refRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    const drivenRestWorld = new THREE.Matrix4().compose(
+      drivenRest.worldPos,
+      drivenRest.worldQuat,
+      drivenRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
     bindings.push({
       ref,
       refOriginal,
+      refBone,
       driven: runtimeName,
-      drivenOriginal: original
+      drivenOriginal: original,
+      drivenBone,
+      drivenRest,
+      refToDrivenRest: refRestWorld.invert().multiply(drivenRestWorld)
     });
   }
 
   bindings.sort((a, b) =>
-    boneDepth(tgt.bones.get(a.driven)) -
-    boneDepth(tgt.bones.get(b.driven))
+    boneDepth(a.drivenBone) - boneDepth(b.drivenBone)
   );
+
+  cache.targetRoot = tgt.root;
+  cache.bindings = bindings;
 
   return bindings;
 }
@@ -5335,9 +5389,11 @@ function resetAutoRigProReferenceSkinPreview() {
   const tgt = state.target;
   if (!tgt?.root) return;
 
-  for (const binding of resolveAutoRigProRefToSkinBindings()) {
-    const bone = tgt.bones.get(binding.driven);
-    const rest = tgt.rest.get(binding.driven);
+  const bindings = resolveAutoRigProRefToSkinBindings();
+
+  for (const binding of bindings) {
+    const bone = binding.drivenBone;
+    const rest = binding.drivenRest;
     if (!bone || !rest) continue;
 
     bone.position.copy(rest.position);
@@ -5363,10 +5419,15 @@ function applyAutoRigProReferenceSkinPreviewRuntime() {
   const bindings = resolveAutoRigProRefToSkinBindings();
   if (!bindings.length) return false;
 
-  // Reset only the actual skinning bones we own.
+  // Mixer.setTime() has changed the *_ref local transforms. Update the whole
+  // target ONCE so every refBone.matrixWorld is current.
+  updateSlotWorld(tgt);
+
+  // Reset owned skin bones without rescanning vertices or traversing the whole
+  // 467-bone rig after every individual bone.
   for (const binding of bindings) {
-    const bone = tgt.bones.get(binding.driven);
-    const rest = tgt.rest.get(binding.driven);
+    const bone = binding.drivenBone;
+    const rest = binding.drivenRest;
     if (!bone || !rest) continue;
 
     bone.position.copy(rest.position);
@@ -5374,11 +5435,9 @@ function applyAutoRigProReferenceSkinPreviewRuntime() {
     bone.scale.copy(rest.scale);
   }
 
+  // One reset propagation before the parent-first solve.
   updateSlotWorld(tgt);
 
-  const refRestWorld = new THREE.Matrix4();
-  const drivenRestWorld = new THREE.Matrix4();
-  const refToDrivenRest = new THREE.Matrix4();
   const desiredWorld = new THREE.Matrix4();
   const parentInv = new THREE.Matrix4();
   const desiredLocal = new THREE.Matrix4();
@@ -5388,35 +5447,17 @@ function applyAutoRigProReferenceSkinPreviewRuntime() {
   const scale = new THREE.Vector3();
 
   for (const binding of bindings) {
-    const refBone = tgt.bones.get(binding.ref);
-    const drivenBone = tgt.bones.get(binding.driven);
-    const refRest = tgt.rest.get(binding.ref);
-    const drivenRest = tgt.rest.get(binding.driven);
+    const refBone = binding.refBone;
+    const drivenBone = binding.drivenBone;
 
-    if (!refBone || !drivenBone || !refRest || !drivenRest) continue;
-
-    refRestWorld.compose(
-      refRest.worldPos,
-      refRest.worldQuat,
-      refRest.worldScale || new THREE.Vector3(1, 1, 1)
-    );
-
-    drivenRestWorld.compose(
-      drivenRest.worldPos,
-      drivenRest.worldQuat,
-      drivenRest.worldScale || new THREE.Vector3(1, 1, 1)
-    );
-
-    // Preserve the exact rest offset between the clean reference bone and
-    // the bone that really skins the mesh.
-    refToDrivenRest.copy(refRestWorld)
-      .invert()
-      .multiply(drivenRestWorld);
+    if (!refBone || !drivenBone) continue;
 
     desiredWorld.copy(refBone.matrixWorld)
-      .multiply(refToDrivenRest);
+      .multiply(binding.refToDrivenRest);
 
     if (drivenBone.parent) {
+      // Parent bindings are processed first by depth, so its matrixWorld is
+      // already valid. For non-owned parents the single update above is enough.
       parentInv.copy(drivenBone.parent.matrixWorld).invert();
       desiredLocal.copy(parentInv).multiply(desiredWorld);
     } else {
@@ -5429,7 +5470,18 @@ function applyAutoRigProReferenceSkinPreviewRuntime() {
     drivenBone.quaternion.copy(quaternion).normalize();
     drivenBone.scale.copy(scale);
 
-    updateSlotWorld(tgt);
+    // Update ONLY this bone's matrices. updateSlotWorld(tgt) here used to
+    // traverse hundreds of bones for every binding on every frame.
+    drivenBone.updateMatrix();
+    if (drivenBone.parent) {
+      drivenBone.matrixWorld.multiplyMatrices(
+        drivenBone.parent.matrixWorld,
+        drivenBone.matrix
+      );
+    } else {
+      drivenBone.matrixWorld.copy(drivenBone.matrix);
+    }
+    drivenBone.matrixWorldNeedsUpdate = false;
   }
 
   return true;
@@ -5466,6 +5518,15 @@ function filterClipToTargets(clip, targets, name) {
   );
 }
 
+
+function updateBoneWorldPath(bone) {
+  if (!bone) return;
+  if (typeof bone.updateWorldMatrix === 'function') {
+    bone.updateWorldMatrix(true, false);
+    return;
+  }
+  bone.updateMatrixWorld?.(true);
+}
 
 function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
   const src = state.source;
@@ -5702,11 +5763,14 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       }
 
       localPos.copy(desiredWorldPos);
-      if (tb.parent) tb.parent.worldToLocal(localPos);
+      if (tb.parent) {
+        updateBoneWorldPath(tb.parent);
+        tb.parent.worldToLocal(localPos);
+      }
 
       tb.position.copy(localPos);
       tb.scale.copy(tr.scale);
-      updateSlotWorld(tgt);
+      updateBoneWorldPath(tb);
 
     }
 
@@ -5779,6 +5843,7 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       }
 
       if (tb.parent) {
+        updateBoneWorldPath(tb.parent);
         tb.parent.getWorldQuaternion(qParent);
         qLocal.copy(qParent)
           .invert()
@@ -5793,7 +5858,7 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       if (!locData.has(pair.target)) tb.position.copy(tr.position);
       tb.quaternion.copy(qLocal);
       tb.scale.copy(tr.scale);
-      updateSlotWorld(tgt);
+      updateBoneWorldPath(tb);
     }
 
     // HEAD_LOCAL translation runs after target Head rotation, matching
@@ -5855,11 +5920,14 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
       }
 
       localPos.copy(desiredWorldPos);
-      if (tb.parent) tb.parent.worldToLocal(localPos);
+      if (tb.parent) {
+        updateBoneWorldPath(tb.parent);
+        tb.parent.worldToLocal(localPos);
+      }
 
       tb.position.copy(localPos);
       tb.scale.copy(tr.scale);
-      updateSlotWorld(tgt);
+      updateBoneWorldPath(tb);
     }
 
     // BlendCap leg-anchor compensation:
@@ -5910,7 +5978,7 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
         if (torso.parent) torso.parent.worldToLocal(torsoLocal);
 
         torso.position.copy(torsoLocal);
-        updateSlotWorld(tgt);
+        updateBoneWorldPath(torso);
       }
     }
 
@@ -10871,131 +10939,130 @@ function buildAutoRigProOriginalRigTransferClip(clip) {
   const tgt = state.target;
   if (!clip || !tgt.root) return clip;
 
-  // IMPORTANT: this intentionally mirrors buildOriginalRigTransferClip(),
-  // the path that makes UE -> CloudRig reproduce the Source reliably.
-  //
-  // The raw FBX bake is used only as a WORLD-pose oracle. We never try to
-  // replay its helper/carrier hierarchy on the original Auto-Rig Pro rig.
-  // Instead every control is re-encoded as:
-  //
-  //   poseRelative = inverse(logicalParentWorld) * desiredChildWorld
-  //   basis        = inverse(logicalRestRelative) * poseRelative
-  //   exportLocal  = childRestLocal * basis
-  //
-  // That is exactly the CloudRig OriginalRig strategy.
   const runtimePairs = new Map();
 
   for (const [childOriginal, parentOriginal] of Object.entries(
     AUTO_RIG_PRO_LOGICAL_PARENT
   )) {
-    const childName=findBoneByOriginalExact(tgt,[childOriginal]);
-    const parentName=findBoneByOriginalExact(tgt,[parentOriginal]);
+    const childName = findBoneByOriginalExact(tgt, [childOriginal]);
+    const parentName = findBoneByOriginalExact(tgt, [parentOriginal]);
 
-    if(!childName || !parentName) continue;
+    if (!childName || !parentName) continue;
 
-    runtimePairs.set(childName,{
+    runtimePairs.set(childName, {
       childOriginal,
       parentOriginal,
       parentName
     });
   }
 
-  if(!runtimePairs.size) return clip.clone();
+  if (!runtimePairs.size) return clip.clone();
 
-  const sourceTracks=clip.tracks.map(track=>track.clone());
+  const sourceTracks = clip.tracks.map(track => track.clone());
 
-  const specialTracks=sourceTracks.filter(track=>{
-    const parsed=parseTrackTarget(track.name);
-    return (
-      parsed?.property==='quaternion' &&
-      runtimePairs.has(parsed.nodeName)
-    );
-  });
+  const entries = sourceTracks
+    .map(track => {
+      const parsed = parseTrackTarget(track.name);
 
-  if(!specialTracks.length) return clip.clone();
+      if (
+        parsed?.property !== 'quaternion' ||
+        !runtimePairs.has(parsed.nodeName)
+      ) {
+        return null;
+      }
+
+      const childName = parsed.nodeName;
+      const pair = runtimePairs.get(childName);
+      const child = tgt.bones.get(childName);
+      const parent = tgt.bones.get(pair.parentName);
+      const childRest = tgt.rest.get(childName);
+      const parentRest = tgt.rest.get(pair.parentName);
+
+      if (!child || !parent || !childRest || !parentRest) return null;
+
+      const restRelativeInv = parentRest.worldQuat.clone()
+        .invert()
+        .multiply(childRest.worldQuat)
+        .normalize()
+        .invert();
+
+      return {
+        track,
+        child,
+        parent,
+        childRest,
+        restRelativeInv,
+        values: [],
+        previous: null
+      };
+    })
+    .filter(Boolean);
+
+  if (!entries.length) return clip.clone();
+
+  // bakeRetarget creates uniformly sampled tracks. Use a sorted union anyway
+  // so this stays correct if a future clip contains different key times.
+  const timeSet = new Set();
+  for (const entry of entries) {
+    for (const time of entry.track.times) {
+      timeSet.add(Number(time));
+    }
+  }
+  const times = [...timeSet].sort((a, b) => a - b);
 
   restoreRest(tgt);
   tgt.mixer?.stopAllAction();
 
-  const mixer=new THREE.AnimationMixer(tgt.root);
-  const action=mixer.clipAction(clip).play();
-  const replacements=new Map();
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(clip).play();
+
+  const childWorld = new THREE.Quaternion();
+  const parentWorld = new THREE.Quaternion();
+  const poseRelative = new THREE.Quaternion();
+  const basisDelta = new THREE.Quaternion();
+  const exportLocal = new THREE.Quaternion();
 
   try {
-    for(const track of specialTracks) {
-      const parsed=parseTrackTarget(track.name);
-      const childName=parsed.nodeName;
-      const pair=runtimePairs.get(childName);
+    // Critical performance fix: evaluate the 467-bone ARP rig ONCE per frame,
+    // then solve every control from that same evaluated pose. The previous
+    // implementation evaluated the entire timeline once PER CONTROL.
+    for (const time of times) {
+      mixer.setTime(time);
+      updateSlotWorld(tgt);
 
-      const child=tgt.bones.get(childName);
-      const parent=tgt.bones.get(pair.parentName);
-      const childRest=tgt.rest.get(childName);
-      const parentRest=tgt.rest.get(pair.parentName);
-
-      if(!child || !parent || !childRest || !parentRest) continue;
-
-      const restRelative=parentRest.worldQuat.clone()
-        .invert()
-        .multiply(childRest.worldQuat)
-        .normalize();
-
-      const restRelativeInv=restRelative.clone().invert();
-      const values=[];
-
-      const childWorld=new THREE.Quaternion();
-      const parentWorld=new THREE.Quaternion();
-      const poseRelative=new THREE.Quaternion();
-      const basisDelta=new THREE.Quaternion();
-      const exportLocal=new THREE.Quaternion();
-
-      let previous=null;
-
-      for(const time of track.times) {
-        restoreRest(tgt);
-        mixer.setTime(Number(time));
-        updateSlotWorld(tgt);
-
-        // Desired WORLD rotations produced by bakeRetarget().
-        child.getWorldQuaternion(childWorld).normalize();
-        parent.getWorldQuaternion(parentWorld).normalize();
+      for (const entry of entries) {
+        entry.child.getWorldQuaternion(childWorld).normalize();
+        entry.parent.getWorldQuaternion(parentWorld).normalize();
 
         poseRelative.copy(parentWorld)
           .invert()
           .multiply(childWorld)
           .normalize();
 
-        basisDelta.copy(restRelativeInv)
+        basisDelta.copy(entry.restRelativeInv)
           .multiply(poseRelative)
           .normalize();
 
-        exportLocal.copy(childRest.quaternion)
+        exportLocal.copy(entry.childRest.quaternion)
           .multiply(basisDelta)
           .normalize();
 
-        if(previous && previous.dot(exportLocal)<0) {
-          exportLocal.x*=-1;
-          exportLocal.y*=-1;
-          exportLocal.z*=-1;
-          exportLocal.w*=-1;
+        if (entry.previous && entry.previous.dot(exportLocal) < 0) {
+          exportLocal.x *= -1;
+          exportLocal.y *= -1;
+          exportLocal.z *= -1;
+          exportLocal.w *= -1;
         }
 
-        values.push(
+        entry.values.push(
           exportLocal.x,
           exportLocal.y,
           exportLocal.z,
           exportLocal.w
         );
-        previous=exportLocal.clone();
-      }
 
-      replacements.set(
-        track.name,
-        new THREE.QuaternionKeyframeTrack(
-          track.name,
-          Array.from(track.times),
-          values
-        )
-      );
+        entry.previous = exportLocal.clone();
+      }
     }
   } finally {
     action.stop();
@@ -11003,13 +11070,26 @@ function buildAutoRigProOriginalRigTransferClip(clip) {
     restoreRest(tgt);
   }
 
-  const tracks=sourceTracks.map(
-    track=>replacements.get(track.name)||track
+  const replacements = new Map();
+
+  for (const entry of entries) {
+    replacements.set(
+      entry.track.name,
+      new THREE.QuaternionKeyframeTrack(
+        entry.track.name,
+        times,
+        entry.values
+      )
+    );
+  }
+
+  const tracks = sourceTracks.map(
+    track => replacements.get(track.name) || track
   );
 
   log(
-    `Auto-Rig Pro OriginalRig · CloudRig parity: ${replacements.size} ` +
-    'controles recodificados desde WORLD pose contra parent lógico.'
+    `Auto-Rig Pro OriginalRig optimizado: ${replacements.size} controles · ` +
+    `${times.length} frames evaluados una sola vez (no por control).`
   );
 
   return new THREE.AnimationClip(
