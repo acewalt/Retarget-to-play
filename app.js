@@ -142,18 +142,6 @@ const BLENDCAP_PRESET_REGISTRY = {
     sourceFamily: 'ue',
     targetFamily: 'rigify'
   },
-  ue_to_mixamo_ctrl: {
-    label: 'UE → Mixamo Control Rig',
-    path: './presets/ue_to_mixamo_ctrl.json',
-    sourceFamily: 'ue',
-    targetFamily: 'mixamo-ctrl'
-  },
-  ue_to_arp: {
-    label: 'UE → Auto-Rig Pro',
-    path: './presets/ue_to_arp.json',
-    sourceFamily: 'ue',
-    targetFamily: 'arp'
-  },
   blendcap_to_cloudrig: {
     label: 'BlendCap → CloudRig',
     path: './presets/blendcap_to_cloudrig.json',
