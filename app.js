@@ -242,6 +242,14 @@ function usesAutoRigProPipeline() {
   );
 }
 
+function usesUeToAutoRigProPipeline() {
+  return (
+    usesAutoRigProPipeline() &&
+    state.activePreset?.sourceFamily === 'ue' &&
+    state.activePresetId === 'ue_to_arp'
+  );
+}
+
 function usesEmbeddedDeformControlRigPipeline() {
   return usesMixamoControlRigPipeline() || usesAutoRigProPipeline();
 }
@@ -6192,11 +6200,20 @@ function applyRetarget() {
       ? buildOriginalRigTransferClip(state.fkRawClip)
       : usesRigifyPipeline()
         ? buildRigifyOriginalRigTransferClip(state.fkRawClip)
-        : usesAutoRigProPipeline()
-          ? buildAutoRigProOriginalRigTransferClip(state.fkRawClip)
-          : state.fkRawClip.clone();
+        : usesUeToAutoRigProPipeline()
+          ? state.fkRawClip.clone()
+          : usesAutoRigProPipeline()
+            ? buildAutoRigProOriginalRigTransferClip(state.fkRawClip)
+            : state.fkRawClip.clone();
 
     state.fkClip.name = 'Retargeted_FK';
+
+    if (usesUeToAutoRigProPipeline()) {
+      log(
+        'UE → Auto-Rig Pro FK: usando basis local cruda del FBX ' +
+        '(sin recodificar parent frames) para conservar la pose del Source.'
+      );
+    }
     state.ikOnlyClip = null;
     state.exportClip = state.fkClip;
     state.exported = false;
