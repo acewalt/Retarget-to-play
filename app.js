@@ -4644,21 +4644,29 @@ for (const side of ['Left', 'Right']) {
 }
 
 const ARP_CONTROL_TO_DEFORM = {
-  'c_pos': 'root.x',
-  'c_root_master.x': 'root.x',
-  'c_root.x': 'root.x',
-  'c_spine_01.x': 'spine_01.x',
-  'c_spine_02.x': 'spine_02.x',
-  'c_neck.x': 'neck.x',
-  'c_head.x': 'head.x',
-  'c_shoulder.l': 'shoulder.l',
+  // Global/body carriers: keep the actual ARP controls in the preview.
+  // These are common ancestors of the visible deform branches.
+  'c_pos': 'c_pos',
+  'c_root_master.x': 'c_root_master.x',
+  'c_root.x': 'c_root_master.x',
+
+  'c_spine_01.x': 'c_spine_01.x',
+  'c_spine_02.x': 'c_spine_02.x',
+  'c_neck.x': 'c_neck.x',
+  'c_head.x': 'c_head.x',
+
+  // Shoulder controls are parents of arm.l / forearm.l / hand.l.
+  'c_shoulder.l': 'c_shoulder.l',
+  'c_shoulder.r': 'c_shoulder.r',
+
+  // Limbs are baked directly on the visible deform chains.
   'c_arm_fk.l': 'arm.l',
   'c_forearm_fk.l': 'forearm.l',
   'c_hand_fk.l': 'hand.l',
-  'c_shoulder.r': 'shoulder.r',
   'c_arm_fk.r': 'arm.r',
   'c_forearm_fk.r': 'forearm.r',
   'c_hand_fk.r': 'hand.r',
+
   'c_thigh_fk.l': 'thigh.l',
   'c_leg_fk.l': 'leg.l',
   'c_foot_fk.l': 'foot.l',
@@ -4677,6 +4685,7 @@ for (const side of ['l', 'r']) {
     }
   }
 }
+
 
 function buildEmbeddedDeformPreviewMap(controlToDeform, profile) {
   const tgt = state.target;
@@ -4725,10 +4734,33 @@ function buildMixamoControlRigDeformPreviewMap() {
 
 function buildAutoRigProDeformPreviewMap() {
   if (!usesAutoRigProPipeline()) return [];
-  return buildEmbeddedDeformPreviewMap(
-    ARP_CONTROL_TO_DEFORM,
-    'auto-rig-pro'
-  );
+
+  const tgt = state.target;
+  const pairs = [];
+
+  for (const pair of validMap()) {
+    const targetBone = tgt.bones.get(pair.target);
+    if (!targetBone) continue;
+
+    const targetOriginal = originalObjectName(targetBone) || pair.target;
+    const previewOriginal = ARP_CONTROL_TO_DEFORM[targetOriginal];
+    if (!previewOriginal) continue;
+
+    const previewTarget =
+      findBoneByOriginalExact(tgt, [previewOriginal]) ||
+      findSemanticBone(tgt, previewOriginal);
+
+    if (!previewTarget) continue;
+
+    pairs.push({
+      ...pair,
+      target: previewTarget,
+      targetSpec: previewOriginal,
+      profile: 'auto-rig-pro-preview'
+    });
+  }
+
+  return pairs;
 }
 
 function buildCurrentEmbeddedDeformPreviewMap() {
@@ -6104,7 +6136,7 @@ function applyRetarget() {
       }
 
       log(
-        `Auto-Rig Pro preview independiente: ${deformMap.length} mappings · ` +
+        `Auto-Rig Pro preview híbrido (carrier+deform): ${deformMap.length} mappings · ` +
         `${state.deformPreviewClip?.tracks?.length || 0} tracks deform.`
       );
     } else if (usesMixamoControlRigPipeline()) {
@@ -8717,22 +8749,27 @@ function buildRigifyOriginalRigTransferClip(clip) {
 }
 
 const AUTO_RIG_PRO_LOGICAL_PARENT = {
-  'c_spine_01.x': 'c_root.x',
+  // Real ARP control-frame relationships from the supplied hierarchy.
+  // c_root.x and c_spine_01.x are SIBLINGS under c_root_master.x.
+  'c_root.x': 'c_root_master.x',
+  'c_spine_01.x': 'c_root_master.x',
   'c_spine_02.x': 'c_spine_01.x',
 
   'c_neck.x': 'c_spine_02.x',
   'c_head.x': 'c_neck.x',
 
   'c_shoulder.l': 'c_spine_02.x',
-  'c_arm_fk.l': 'c_shoulder.l',
+  'c_arm_fk.l': 'c_spine_02.x',
   'c_forearm_fk.l': 'c_arm_fk.l',
   'c_hand_fk.l': 'c_forearm_fk.l',
 
   'c_shoulder.r': 'c_spine_02.x',
-  'c_arm_fk.r': 'c_shoulder.r',
+  'c_arm_fk.r': 'c_spine_02.x',
   'c_forearm_fk.r': 'c_arm_fk.r',
   'c_hand_fk.r': 'c_forearm_fk.r',
 
+  // The c_thigh_b.* helper sits between c_root.x and c_thigh_fk.* in FBX.
+  // Functionally the FK leg frame follows the pelvis/root frame.
   'c_thigh_fk.l': 'c_root.x',
   'c_leg_fk.l': 'c_thigh_fk.l',
   'c_foot_fk.l': 'c_leg_fk.l',
