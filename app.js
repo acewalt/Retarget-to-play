@@ -10582,24 +10582,21 @@ const AUTO_RIG_PRO_LOGICAL_PARENT = {
   // these controls behave like the anatomical reference skeleton.
   'c_root.x': 'c_root_master.x',
 
-  // Actual ARP control hierarchy: c_root.x and c_spine_01.x are siblings
-  // below c_root_master.x.
-  'c_spine_01.x': 'c_root_master.x',
+  // Functional/original-rig carry. Like CloudRig, this deliberately does
+  // NOT mirror the raw exported FBX hierarchy.
+  'c_spine_01.x': 'c_root.x',
   'c_spine_02.x': 'c_spine_01.x',
 
   'c_neck.x': 'c_spine_02.x',
   'c_head.x': 'c_neck.x',
 
   'c_shoulder.l': 'c_spine_02.x',
-  // c_arm_fk.l is also a child of spine_02.x in the actual ARP hierarchy.
-  // It does NOT inherit from c_shoulder.l.
-  'c_arm_fk.l': 'c_spine_02.x',
+  'c_arm_fk.l': 'c_shoulder.l',
   'c_forearm_fk.l': 'c_arm_fk.l',
   'c_hand_fk.l': 'c_forearm_fk.l',
 
   'c_shoulder.r': 'c_spine_02.x',
-  // Same structure on the right side.
-  'c_arm_fk.r': 'c_spine_02.x',
+  'c_arm_fk.r': 'c_shoulder.r',
   'c_forearm_fk.r': 'c_arm_fk.r',
   'c_hand_fk.r': 'c_forearm_fk.r',
 
@@ -10627,7 +10624,6 @@ for (const side of ['l', 'r']) {
 
 
 const AUTO_RIG_PRO_CONTROL_TO_REFERENCE = {
-  'c_root_master.x': 'root_ref.x',
   'c_root.x': 'root_ref.x',
   'c_spine_01.x': 'spine_01_ref.x',
   'c_spine_02.x': 'spine_02_ref.x',
@@ -11546,7 +11542,10 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
   );
 }
 
-function buildMixamoAutoRigProReferenceCopyBackClip(rawControlClip) {
+function buildMixamoAutoRigProReferenceCopyBackClip(
+  rawControlClip,
+  { axisMode = 'control' } = {}
+) {
   const tgt = state.target;
   const refClip = state.deformPreviewClip;
 
@@ -11704,11 +11703,20 @@ function buildMixamoAutoRigProReferenceCopyBackClip(rawControlClip) {
           .multiply(poseRelative)
           .normalize();
 
-        // Same physical basis expressed in the c_* control's local axes.
-        controlBasis.copy(entry.refToControl)
-          .multiply(refBasis)
-          .multiply(entry.refToControlInv)
-          .normalize();
+        if (axisMode === 'reference') {
+          // Diagnostic/reference-axis carrier:
+          // treat the clean ARP *_ref basis as the pose-bone matrix_basis
+          // expected by the ORIGINAL .blend control. The FBX c_* node is only
+          // a transport container; its exported local axes are intentionally
+          // not used to reinterpret the motion.
+          controlBasis.copy(refBasis).normalize();
+        } else {
+          // Existing carrier-axis solution.
+          controlBasis.copy(entry.refToControl)
+            .multiply(refBasis)
+            .multiply(entry.refToControlInv)
+            .normalize();
+        }
 
         exportLocal.copy(entry.controlRest.quaternion)
           .multiply(controlBasis)
@@ -11760,13 +11768,15 @@ function buildMixamoAutoRigProReferenceCopyBackClip(rawControlClip) {
   );
 
   log(
-    'Mixamo → ARP ref copy-back v2: ' +
+    'Mixamo → ARP ref copy-back: mode=' +
+    axisMode +
+    ' · ' +
     replacements.size +
     '/' +
     entries.length +
     ' controles desde *_ref · ' +
     times.length +
-    ' frames · spine01 parent=root_ref · arm_fk parent=spine_02_ref.'
+    ' frames.'
   );
 
   return new THREE.AnimationClip(
@@ -11774,6 +11784,60 @@ function buildMixamoAutoRigProReferenceCopyBackClip(rawControlClip) {
     rawControlClip.duration,
     tracks
   );
+}
+
+function buildMixamoArpCopyBackCandidates() {
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !state.fkRawClip
+  ) {
+    return [];
+  }
+
+  const candidates = [
+    {
+      name: 'ARP_CloudRigStyle',
+      runtime: buildAutoRigProOriginalRigTransferClip(
+        state.fkRawClip
+      )
+    },
+    {
+      name: 'ARP_ReferenceAxes',
+      runtime: buildMixamoAutoRigProReferenceCopyBackClip(
+        state.fkRawClip,
+        { axisMode: 'reference' }
+      )
+    },
+    {
+      name: 'ARP_ControlAxes',
+      runtime: buildMixamoAutoRigProReferenceCopyBackClip(
+        state.fkRawClip,
+        { axisMode: 'control' }
+      )
+    }
+  ];
+
+  return candidates
+    .map(candidate => {
+      const controlOnly = buildOriginalRigControlOnlyClip(
+        candidate.runtime
+      );
+
+      if (!controlOnly?.tracks?.length) return null;
+
+      const original = createOriginalNameExportClip(
+        controlOnly,
+        state.target
+      );
+
+      original.name = candidate.name;
+
+      return {
+        name: candidate.name,
+        clip: original
+      };
+    })
+    .filter(Boolean);
 }
 
 function buildAutoRigProOriginalRigTransferClip(clip) {
@@ -12820,39 +12884,30 @@ async function exportTargetFbx() {
         usesAutoRigProPipeline() &&
         state.activePresetId === 'mixamo_to_arp'
       ) {
-        const selectedRuntimeClip = state.exportClip || state.fkClip;
-        const controlRuntime = buildOriginalRigControlOnlyClip(
-          withTargetNeutralBaseline(selectedRuntimeClip)
-        );
+        const candidates = buildMixamoArpCopyBackCandidates();
 
-        if (!controlRuntime?.tracks?.length) {
+        if (candidates.length !== 3) {
           throw new Error(
-            'Mixamo → Auto-Rig Pro: no pude construir la Action para el rig original.'
+            'Mixamo → Auto-Rig Pro: no pude construir las 3 Actions diagnósticas.'
           );
         }
 
-        logMixamoArpExportSpineDiagnostic(controlRuntime);
+        for (const candidate of candidates) {
+          logMixamoArpExportSpineDiagnostic(candidate.clip);
+        }
 
-        const originalRigClip = createOriginalNameExportClip(
-          controlRuntime,
-          state.target
-        );
-
-        const actionName =
-          selectedRuntimeClip === state.fkClip
-            ? 'Retargeted_OriginalRig_FK'
-            : (selectedRuntimeClip.name || 'Retargeted_OriginalRig');
-
-        originalRigClip.name = actionName;
-
-        // Same philosophy as the working CloudRig copy-back:
-        // one control Action, no DEF companion, no automatic IK contamination.
-        exactActions = [{
-          clip: originalRigClip,
-          actionName,
+        exactActions = candidates.map(candidate => ({
+          clip: candidate.clip,
+          actionName: candidate.name,
           includeControlPositions: true
-        }];
-        currentActionName = actionName;
+        }));
+
+        currentActionName = 'ARP_CloudRigStyle';
+
+        log(
+          'Mixamo → ARP A/B/C: exportando ARP_CloudRigStyle, ' +
+          'ARP_ReferenceAxes y ARP_ControlAxes en el mismo FBX.'
+        );
       } else {
         exactActions = [
           {
@@ -12918,9 +12973,9 @@ async function exportTargetFbx() {
         state.activePresetId === 'mixamo_to_arp'
       ) {
         log(
-          `Mixamo → Auto-Rig Pro EXPORT copy-back: [${clipNames}] · ` +
-          `${report.curveNodes} CurveNodes · ${report.curves} Curves · ` +
-          'misma estrategia que CloudRig: Action de controles contra parents funcionales.'
+          `Mixamo → Auto-Rig Pro EXPORT A/B/C: [${clipNames}] · ` +
+          `${report.curveNodes} CurveNodes · ${report.curves} Curves. ` +
+          'Prueba las tres Actions sobre el MISMO ARP original sin cambiar nada más.'
         );
       } else {
         log(
