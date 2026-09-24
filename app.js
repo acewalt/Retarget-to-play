@@ -12162,6 +12162,90 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
 
   const controlledNames = new Set(entries.map(entry => entry.controlName));
 
+  // Original ARP separates trajectory/global motion from the two anatomical
+  // branches. c_pos is the global/trajectory carrier. Letting Mixamo Hips'
+  // vertical bob live there moves the ENTIRE rig away from the floor in
+  // Blender. Keep only ground-plane travel on c_pos and move the vertical
+  // Hips delta into BOTH branch roots:
+  //
+  //   c_root.x     -> lower body / legs
+  //   c_spine_01.x -> upper body / torso
+  //
+  // This preserves the source pelvis height without lifting the global root.
+  const cPosName = findBoneByOriginalExact(tgt, ['c_pos']);
+  const cRootName = findBoneByOriginalExact(tgt, ['c_root.x']);
+  const cSpine01Name = findBoneByOriginalExact(tgt, ['c_spine_01.x']);
+
+  const cPosRest = cPosName ? tgt.rest.get(cPosName) : null;
+  const cRootRest = cRootName ? tgt.rest.get(cRootName) : null;
+  const cSpine01Rest = cSpine01Name ? tgt.rest.get(cSpine01Name) : null;
+
+  const cPosTrack = rawControlClip.tracks.find(track => {
+    const parsed = parseTrackTarget(track.name);
+    return (
+      parsed?.nodeName === cPosName &&
+      parsed?.property === 'position'
+    );
+  });
+
+  // FBX declares its local up axis explicitly. Blender/ARP FBX is normally
+  // Z-up (=2), while other targets may be Y-up. Position tracks are still in
+  // the raw FBX local basis, so use this axis instead of the Y-up viewport.
+  const declaredUpAxis = Number(tgt.metadata?.upAxis);
+  const upAxis = [0, 1, 2].includes(declaredUpAxis)
+    ? declaredUpAxis
+    : 2;
+
+  const sampleVectorTrack = (track, time, out) => {
+    if (!track?.times?.length || !track?.values?.length) return null;
+
+    const ts = track.times;
+    const vs = track.values;
+    const n = ts.length;
+
+    if (time <= ts[0]) {
+      out.set(vs[0], vs[1], vs[2]);
+      return out;
+    }
+
+    if (time >= ts[n - 1]) {
+      const j = (n - 1) * 3;
+      out.set(vs[j], vs[j + 1], vs[j + 2]);
+      return out;
+    }
+
+    let lo = 0;
+    let hi = n - 1;
+    while (hi - lo > 1) {
+      const mid = (lo + hi) >> 1;
+      if (ts[mid] <= time) lo = mid;
+      else hi = mid;
+    }
+
+    const t0 = Number(ts[lo]);
+    const t1 = Number(ts[hi]);
+    const alpha = t1 > t0
+      ? THREE.MathUtils.clamp((time - t0) / (t1 - t0), 0, 1)
+      : 0;
+
+    const a = lo * 3;
+    const b = hi * 3;
+
+    out.set(
+      THREE.MathUtils.lerp(vs[a], vs[b], alpha),
+      THREE.MathUtils.lerp(vs[a + 1], vs[b + 1], alpha),
+      THREE.MathUtils.lerp(vs[a + 2], vs[b + 2], alpha)
+    );
+
+    return out;
+  };
+
+  const redistributedRootMotion = {
+    cPos: [],
+    lower: [],
+    upper: []
+  };
+
   const baseTracks = rawControlClip.tracks
     .filter(track => {
       const parsed = parseTrackTarget(track.name);
@@ -12175,8 +12259,20 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
         return false;
       }
 
-      // c_pos translation is intentionally preserved from the raw Mixamo Hips
-      // location bake. Do not manufacture position curves for other controls.
+      // These three position channels are rebuilt below. c_pos keeps only
+      // ground-plane travel; the vertical component is redistributed to the
+      // lower/upper ARP branch roots.
+      if (
+        parsed.property === 'position' &&
+        (
+          parsed.nodeName === cPosName ||
+          parsed.nodeName === cRootName ||
+          parsed.nodeName === cSpine01Name
+        )
+      ) {
+        return false;
+      }
+
       return true;
     })
     .map(track => track.clone());
@@ -12200,6 +12296,71 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
       restoreRest(tgt);
       mixer.setTime(Number(time));
       updateSlotWorld(tgt);
+
+      // Rebuild ARP global/root translation from the raw Mixamo Hips LOC.
+      // Crucially, the declared FBX up-axis is removed from c_pos so the
+      // global control stays on its floor plane. The SAME vertical delta is
+      // applied to both body branch roots, preserving pelvis bob/crouch while
+      // Source feet keep their intended world trajectory.
+      if (
+        cPosTrack &&
+        cPosRest &&
+        cRootRest &&
+        cSpine01Rest
+      ) {
+        const sampled = sampleVectorTrack(
+          cPosTrack,
+          Number(time),
+          new THREE.Vector3()
+        );
+
+        if (sampled) {
+          const restArray = [
+            cPosRest.position.x,
+            cPosRest.position.y,
+            cPosRest.position.z
+          ];
+
+          const rawArray = [sampled.x, sampled.y, sampled.z];
+          const verticalDelta = rawArray[upAxis] - restArray[upAxis];
+
+          // Global trajectory: X/Y ground plane only (or equivalent for the
+          // declared axis). Never let this control create vertical floating.
+          const globalArray = [...rawArray];
+          globalArray[upAxis] = restArray[upAxis];
+
+          redistributedRootMotion.cPos.push(
+            globalArray[0],
+            globalArray[1],
+            globalArray[2]
+          );
+
+          const lowerArray = [
+            cRootRest.position.x,
+            cRootRest.position.y,
+            cRootRest.position.z
+          ];
+          const upperArray = [
+            cSpine01Rest.position.x,
+            cSpine01Rest.position.y,
+            cSpine01Rest.position.z
+          ];
+
+          lowerArray[upAxis] += verticalDelta;
+          upperArray[upAxis] += verticalDelta;
+
+          redistributedRootMotion.lower.push(
+            lowerArray[0],
+            lowerArray[1],
+            lowerArray[2]
+          );
+          redistributedRootMotion.upper.push(
+            upperArray[0],
+            upperArray[1],
+            upperArray[2]
+          );
+        }
+      }
 
       // Parent-first order is already guaranteed by specs. Build the desired
       // clean WORLD hierarchy without mutating the actual FBX controls.
@@ -12287,6 +12448,45 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
 
   const tracks = [...baseTracks];
 
+  if (
+    cPosName &&
+    redistributedRootMotion.cPos.length === times.length * 3
+  ) {
+    tracks.push(
+      new THREE.VectorKeyframeTrack(
+        cPosName + '.position',
+        times,
+        redistributedRootMotion.cPos
+      )
+    );
+  }
+
+  if (
+    cRootName &&
+    redistributedRootMotion.lower.length === times.length * 3
+  ) {
+    tracks.push(
+      new THREE.VectorKeyframeTrack(
+        cRootName + '.position',
+        times,
+        redistributedRootMotion.lower
+      )
+    );
+  }
+
+  if (
+    cSpine01Name &&
+    redistributedRootMotion.upper.length === times.length * 3
+  ) {
+    tracks.push(
+      new THREE.VectorKeyframeTrack(
+        cSpine01Name + '.position',
+        times,
+        redistributedRootMotion.upper
+      )
+    );
+  }
+
   for (const entry of entries) {
     if (entry.q.length === times.length * 4) {
       tracks.push(
@@ -12300,8 +12500,8 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
   }
 
   log(
-    'Mixamo → ARP EXPORT ONLY v10: Hips ROT→c_root_master · c_root lower neutral · ' +
-    'Spine→c_spine_01 relative al root_master · c_pos conserva root motion · ' +
+    'Mixamo → ARP EXPORT ONLY v12: rotaciones intactas · c_pos sólo trayectoria de suelo · ' +
+    'altura Hips redistribuida a c_root + c_spine_01 · ' +
     entries.length +
     ' controles recodificados como matrix_basis para el rig original.'
   );
