@@ -496,6 +496,15 @@ const state = {
   },
   dualFbxReady: false,
   actionPackerSourceFiles: [],
+  ueArpBridge: {
+    group: null,
+    mixer: null,
+    action: null,
+    clip: null,
+    nodes: new Map(),
+    links: [],
+    line: null
+  },
   ghost: {
     enabled: false,
     container: null,
@@ -527,6 +536,161 @@ const state = {
   }
 };
 
+
+function disposeUeArpHelperBridge() {
+  const bridge = state.ueArpBridge;
+  if (!bridge) return;
+
+  bridge.action?.stop?.();
+  bridge.mixer?.stopAllAction?.();
+
+  if (bridge.group) {
+    targetView.scene.remove(bridge.group);
+    bridge.group.traverse(object => {
+      object.geometry?.dispose?.();
+      if (Array.isArray(object.material)) {
+        object.material.forEach(material => material?.dispose?.());
+      } else {
+        object.material?.dispose?.();
+      }
+    });
+  }
+
+  bridge.group = null;
+  bridge.mixer = null;
+  bridge.action = null;
+  bridge.clip = null;
+  bridge.nodes = new Map();
+  bridge.links = [];
+  bridge.line = null;
+}
+
+function installUeArpHelperBridge(helperClip, descriptors) {
+  disposeUeArpHelperBridge();
+
+  if (!helperClip?.tracks?.length || !descriptors?.length) return;
+
+  const group = new THREE.Group();
+  group.name = 'UE_ARP_HelperBridge';
+  group.renderOrder = 90;
+
+  const box = state.target.displayRoot
+    ? new THREE.Box3().setFromObject(state.target.displayRoot)
+    : new THREE.Box3();
+
+  const size = box.isEmpty()
+    ? 1
+    : Math.max(box.getSize(new THREE.Vector3()).length(), 0.25);
+
+  const radius = THREE.MathUtils.clamp(size * 0.006, 0.008, 0.035);
+  const sphereGeometry = new THREE.SphereGeometry(radius, 10, 8);
+  const sphereMaterial = new THREE.MeshBasicMaterial({
+    color: 0x4ea1ff,
+    transparent: true,
+    opacity: 0.92,
+    depthTest: false,
+    depthWrite: false,
+    toneMapped: false
+  });
+
+  const nodes = new Map();
+
+  for (const descriptor of descriptors) {
+    const marker = new THREE.Mesh(sphereGeometry, sphereMaterial);
+    marker.name = descriptor.helperName;
+    marker.userData.ueArpHelper = true;
+    marker.renderOrder = 91;
+    group.add(marker);
+    nodes.set(descriptor.helperName, marker);
+  }
+
+  const links = descriptors
+    .filter(descriptor => descriptor.parentHelperName)
+    .map(descriptor => [
+      descriptor.parentHelperName,
+      descriptor.helperName
+    ])
+    .filter(([parent, child]) => nodes.has(parent) && nodes.has(child));
+
+  let line = null;
+
+  if (links.length) {
+    const positions = new Float32Array(links.length * 2 * 3);
+    const geometry = new THREE.BufferGeometry();
+    geometry.setAttribute(
+      'position',
+      new THREE.BufferAttribute(positions, 3)
+    );
+
+    const material = new THREE.LineBasicMaterial({
+      color: 0x4ea1ff,
+      transparent: true,
+      opacity: 0.72,
+      depthTest: false,
+      depthWrite: false
+    });
+
+    line = new THREE.LineSegments(geometry, material);
+    line.name = 'UE_ARP_HelperBridge_Links';
+    line.renderOrder = 90;
+    group.add(line);
+  }
+
+  targetView.scene.add(group);
+
+  const mixer = new THREE.AnimationMixer(group);
+  const action = mixer.clipAction(helperClip).play();
+
+  state.ueArpBridge.group = group;
+  state.ueArpBridge.mixer = mixer;
+  state.ueArpBridge.action = action;
+  state.ueArpBridge.clip = helperClip;
+  state.ueArpBridge.nodes = nodes;
+  state.ueArpBridge.links = links;
+  state.ueArpBridge.line = line;
+
+  mixer.setTime(state.playTime || 0);
+  updateUeArpHelperBridgeOverlay();
+
+  log(
+    'UE -> ARP Helper Bridge visible: ' +
+    descriptors.length +
+    ' helpers / ' +
+    links.length +
+    ' enlaces. Azul = proxy WORLD independiente del rig Target.'
+  );
+}
+
+function updateUeArpHelperBridgeOverlay() {
+  const bridge = state.ueArpBridge;
+  if (!bridge?.group?.visible || !bridge.line) return;
+
+  const attr = bridge.line.geometry?.getAttribute?.('position');
+  if (!attr) return;
+
+  const parentPos = new THREE.Vector3();
+  const childPos = new THREE.Vector3();
+
+  bridge.links.forEach(([parentName, childName], index) => {
+    const parent = bridge.nodes.get(parentName);
+    const child = bridge.nodes.get(childName);
+    if (!parent || !child) return;
+
+    parent.getWorldPosition(parentPos);
+    child.getWorldPosition(childPos);
+
+    const offset = index * 6;
+    attr.array[offset] = parentPos.x;
+    attr.array[offset + 1] = parentPos.y;
+    attr.array[offset + 2] = parentPos.z;
+    attr.array[offset + 3] = childPos.x;
+    attr.array[offset + 4] = childPos.y;
+    attr.array[offset + 5] = childPos.z;
+  });
+
+  attr.needsUpdate = true;
+  bridge.line.geometry.computeBoundingSphere?.();
+}
 
 function sourceFileIdentity(file) {
   return [
@@ -3081,6 +3245,8 @@ function disposeObject(root) {
 }
 
 function clearSlot(slot, view) {
+  disposeUeArpHelperBridge();
+
   if (state.ghost?.container) {
     disposeGhostOverlay({ keepEnabled: true });
   }
@@ -6343,7 +6509,7 @@ function applyRetarget() {
       : usesRigifyPipeline()
         ? buildRigifyOriginalRigTransferClip(state.fkRawClip)
         : usesUeToAutoRigProPipeline()
-          ? buildUeAutoRigProLocalBasisAction(state.fkRawClip)
+          ? buildUeAutoRigProHelperBridgeAction(state.fkRawClip)
           : usesAutoRigProPipeline()
             ? buildAutoRigProOriginalRigTransferClip(state.fkRawClip)
             : state.fkRawClip.clone();
@@ -6352,8 +6518,8 @@ function applyRetarget() {
 
     if (usesUeToAutoRigProPipeline()) {
       log(
-        'UE → Auto-Rig Pro FK: spine_01/spine_02 Source elegidos por altura REST de *_ref; ' +
-        'basis LOCAL UE → ejes *_ref → matrix_basis c_*.'
+        'UE → Auto-Rig Pro FK: Helper Bridge activo · Source WORLD → helpers independientes → ' +
+        '*_ref local → matrix_basis c_*.'
       );
     }
     state.ikOnlyClip = null;
@@ -8986,6 +9152,368 @@ for (const side of ['l', 'r']) {
   }
 }
 
+function buildUeAutoRigProHelperBridgeAction(rawClip) {
+  const src = state.source;
+  const tgt = state.target;
+  const sourceClip = src.activeClip;
+
+  if (!rawClip || !sourceClip || !src.root || !tgt.root) {
+    return rawClip?.clone?.() || rawClip;
+  }
+
+  // New UE -> ARP strategy:
+  // SOURCE WORLD -> independent proxy helpers -> ARP reference-local basis
+  // -> c_* matrix_basis.
+  //
+  // The helper layer is deliberately outside the Target FBX hierarchy. It
+  // cannot inherit ARP helper/constraint transforms that are incomplete after
+  // FBX export, so it gives us a clean diagnostic boundary.
+  const entries = [];
+  const reverseTarget = new Map();
+
+  for (const [runtimeName, bone] of tgt.bones) {
+    reverseTarget.set(bone, runtimeName);
+  }
+
+  const nearestRefParent = refName => {
+    let parent = tgt.bones.get(refName)?.parent || null;
+
+    while (parent) {
+      const runtimeName = reverseTarget.get(parent);
+      const original = runtimeName
+        ? (originalObjectName(parent) || runtimeName)
+        : '';
+
+      if (
+        runtimeName &&
+        /_ref(?:\.|$)/i.test(original)
+      ) {
+        return runtimeName;
+      }
+
+      parent = parent.parent;
+    }
+
+    return '';
+  };
+
+  let helperIndex = 0;
+
+  for (const pair of validMap()) {
+    if (!String(pair.channels || 'ROT').toUpperCase().includes('ROT')) {
+      continue;
+    }
+
+    const sourceBone = src.bones.get(pair.source);
+    const sourceRest = src.rest.get(pair.source);
+    const control = tgt.bones.get(pair.target);
+    const controlRest = tgt.rest.get(pair.target);
+
+    if (!sourceBone || !sourceRest || !control || !controlRest) continue;
+
+    const controlOriginal = originalObjectName(control) || pair.target;
+    const refOriginal =
+      AUTO_RIG_PRO_CONTROL_TO_REFERENCE[controlOriginal] || '';
+
+    if (!refOriginal) continue;
+
+    const refName = findBoneByOriginalExact(tgt, [refOriginal]);
+    const refRest = refName ? tgt.rest.get(refName) : null;
+
+    if (!refName || !refRest) continue;
+
+    const parentRefName = nearestRefParent(refName);
+
+    const refToControl = controlRest.worldQuat.clone()
+      .invert()
+      .multiply(refRest.worldQuat)
+      .normalize();
+
+    entries.push({
+      sourceName: pair.source,
+      sourceRest,
+      controlName: pair.target,
+      controlOriginal,
+      controlRest,
+      refName,
+      refOriginal,
+      refRest,
+      parentRefName,
+      refToControl,
+      refToControlInv: refToControl.clone().invert(),
+      helperName: 'UE_ARP_Helper_' + String(helperIndex++).padStart(3, '0'),
+      parentHelperName: '',
+      q: [],
+      p: [],
+      controlQ: [],
+      previousControl: null
+    });
+  }
+
+  if (entries.length < 12) {
+    log(
+      'UE -> ARP Helper Bridge: referencias insuficientes (' +
+      entries.length +
+      '); fallback al solver local anterior.'
+    );
+    return buildUeAutoRigProLocalBasisAction(rawClip);
+  }
+
+  const entryByRef = new Map(
+    entries.map(entry => [entry.refName, entry])
+  );
+
+  for (const entry of entries) {
+    let cursor = entry.parentRefName;
+
+    while (cursor) {
+      const parentEntry = entryByRef.get(cursor);
+      if (parentEntry) {
+        entry.parentHelperName = parentEntry.helperName;
+        break;
+      }
+      cursor = nearestRefParent(cursor);
+    }
+  }
+
+  const fps = Math.max(
+    1,
+    Math.min(120, Number($('fps').value) || 30)
+  );
+
+  const frameCount = Math.max(
+    2,
+    Math.ceil(sourceClip.duration * fps) + 1
+  );
+
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(sourceClip.duration, i / fps)
+  );
+
+  restoreRest(src);
+
+  const sourceMixer = new THREE.AnimationMixer(src.root);
+  const sourceAction = sourceMixer.clipAction(sourceClip).play();
+
+  const helperWorldByRef = new Map();
+  const sourcePoseQ = new THREE.Quaternion();
+  const worldDeltaQ = new THREE.Quaternion();
+  const helperWorldQ = new THREE.Quaternion();
+  const parentHelperQ = new THREE.Quaternion();
+  const restRelativeQ = new THREE.Quaternion();
+  const poseRelativeQ = new THREE.Quaternion();
+  const refBasisQ = new THREE.Quaternion();
+  const controlBasisQ = new THREE.Quaternion();
+  const controlLocalQ = new THREE.Quaternion();
+  const sourcePoseP = new THREE.Vector3();
+  const helperWorldP = new THREE.Vector3();
+
+  try {
+    for (const time of times) {
+      restoreRest(src);
+      sourceMixer.setTime(Number(time));
+      updateSlotWorld(src);
+
+      helperWorldByRef.clear();
+
+      // Stage A: every helper independently follows its Source bone in WORLD.
+      for (const entry of entries) {
+        const sourceBone = src.bones.get(entry.sourceName);
+        if (!sourceBone) continue;
+
+        sourceBone.getWorldQuaternion(sourcePoseQ).normalize();
+
+        worldDeltaQ.copy(sourcePoseQ)
+          .multiply(entry.sourceRest.worldQuat.clone().invert())
+          .normalize();
+
+        helperWorldQ.copy(worldDeltaQ)
+          .multiply(entry.refRest.worldQuat)
+          .normalize();
+
+        sourceBone.getWorldPosition(sourcePoseP);
+
+        helperWorldP.copy(entry.refRest.worldPos)
+          .add(
+            sourcePoseP.clone().sub(entry.sourceRest.worldPos)
+          );
+
+        helperWorldByRef.set(entry.refName, {
+          q: helperWorldQ.clone(),
+          p: helperWorldP.clone()
+        });
+
+        entry.q.push(
+          helperWorldQ.x,
+          helperWorldQ.y,
+          helperWorldQ.z,
+          helperWorldQ.w
+        );
+
+        entry.p.push(
+          helperWorldP.x,
+          helperWorldP.y,
+          helperWorldP.z
+        );
+      }
+
+      // Stage B: ARP controls read ONLY the helper/reference hierarchy.
+      for (const entry of entries) {
+        const helperPose = helperWorldByRef.get(entry.refName);
+        if (!helperPose) continue;
+
+        const parentRest = entry.parentRefName
+          ? tgt.rest.get(entry.parentRefName)
+          : null;
+
+        const parentHelperPose = entry.parentRefName
+          ? helperWorldByRef.get(entry.parentRefName)
+          : null;
+
+        if (parentRest && parentHelperPose) {
+          restRelativeQ.copy(parentRest.worldQuat)
+            .invert()
+            .multiply(entry.refRest.worldQuat)
+            .normalize();
+
+          parentHelperQ.copy(parentHelperPose.q).normalize();
+
+          poseRelativeQ.copy(parentHelperQ)
+            .invert()
+            .multiply(helperPose.q)
+            .normalize();
+
+          refBasisQ.copy(restRelativeQ)
+            .invert()
+            .multiply(poseRelativeQ)
+            .normalize();
+        } else {
+          refBasisQ.copy(entry.refRest.worldQuat)
+            .invert()
+            .multiply(helperPose.q)
+            .normalize();
+        }
+
+        // Same physical local rotation, expressed in the animator control's
+        // actual channel axes exactly once.
+        controlBasisQ.copy(entry.refToControl)
+          .multiply(refBasisQ)
+          .multiply(entry.refToControlInv)
+          .normalize();
+
+        controlLocalQ.copy(entry.controlRest.quaternion)
+          .multiply(controlBasisQ)
+          .normalize();
+
+        if (
+          entry.previousControl &&
+          entry.previousControl.dot(controlLocalQ) < 0
+        ) {
+          controlLocalQ.x *= -1;
+          controlLocalQ.y *= -1;
+          controlLocalQ.z *= -1;
+          controlLocalQ.w *= -1;
+        }
+
+        entry.controlQ.push(
+          controlLocalQ.x,
+          controlLocalQ.y,
+          controlLocalQ.z,
+          controlLocalQ.w
+        );
+
+        entry.previousControl = controlLocalQ.clone();
+      }
+    }
+  } finally {
+    sourceAction.stop();
+    sourceMixer.stopAllAction();
+    restoreRest(src);
+  }
+
+  const controlReplacement = new Map();
+  const helperTracks = [];
+
+  for (const entry of entries) {
+    if (entry.controlQ.length === times.length * 4) {
+      const trackName = entry.controlName + '.quaternion';
+
+      controlReplacement.set(
+        trackName,
+        new THREE.QuaternionKeyframeTrack(
+          trackName,
+          times,
+          entry.controlQ
+        )
+      );
+    }
+
+    if (entry.q.length === times.length * 4) {
+      helperTracks.push(
+        new THREE.QuaternionKeyframeTrack(
+          entry.helperName + '.quaternion',
+          times,
+          entry.q
+        )
+      );
+    }
+
+    if (entry.p.length === times.length * 3) {
+      helperTracks.push(
+        new THREE.VectorKeyframeTrack(
+          entry.helperName + '.position',
+          times,
+          entry.p
+        )
+      );
+    }
+  }
+
+  const controlTracks = rawClip.tracks.map(track =>
+    controlReplacement.get(track.name) || track.clone()
+  );
+
+  const existing = new Set(
+    controlTracks.map(track => track.name)
+  );
+
+  for (const [trackName, track] of controlReplacement) {
+    if (!existing.has(trackName)) controlTracks.push(track);
+  }
+
+  const helperClip = new THREE.AnimationClip(
+    'UE_ARP_HelperBridge_Debug',
+    sourceClip.duration,
+    helperTracks
+  );
+
+  installUeArpHelperBridge(
+    helperClip,
+    entries.map(entry => ({
+      helperName: entry.helperName,
+      parentHelperName: entry.parentHelperName,
+      controlOriginal: entry.controlOriginal,
+      sourceName: entry.sourceName,
+      refOriginal: entry.refOriginal
+    }))
+  );
+
+  log(
+    'UE -> ARP Helper Bridge v1: ' +
+    controlReplacement.size +
+    '/' +
+    entries.length +
+    ' controles. SOURCE WORLD -> helper proxy -> *_ref local -> c_* basis.'
+  );
+
+  return new THREE.AnimationClip(
+    'Retargeted_FK',
+    rawClip.duration,
+    controlTracks
+  );
+}
+
 function buildUeAutoRigProLocalBasisAction(rawClip) {
   const src = state.source;
   const tgt = state.target;
@@ -10991,6 +11519,10 @@ function seek(time) {
   state.playTime = THREE.MathUtils.clamp(time, 0, duration || 0);
   if (state.source.mixer && state.source.activeClip) state.source.mixer.setTime(state.playTime);
   if (state.target.mixer && state.targetPreviewClip) state.target.mixer.setTime(state.playTime);
+  if (state.ueArpBridge?.mixer && state.ueArpBridge?.clip) {
+    state.ueArpBridge.mixer.setTime(state.playTime);
+    updateUeArpHelperBridgeOverlay();
+  }
   applyTargetRigRuntime();
   updateGhostOverlayPose();
   updateRigOverlays();
@@ -11315,6 +11847,7 @@ function animate(now) {
 
   applyTargetRigRuntime();
   updateGhostOverlayPose();
+  updateUeArpHelperBridgeOverlay();
   updateRigOverlays();
   syncRestPoseGizmoThickness();
   updateRestPoseJointMarkers();
