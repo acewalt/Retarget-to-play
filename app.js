@@ -10566,10 +10566,11 @@ const AUTO_RIG_PRO_LOGICAL_PARENT = {
   // these controls behave like the anatomical reference skeleton.
   'c_root.x': 'c_root_master.x',
 
-  // In the actual ARP hierarchy c_root.x and c_spine_01.x are siblings
-  // below c_root_master.x. Using c_root.x here subtracts pelvis/root rotation
-  // from spine_01 during copy-back and makes the exported torso look rigid.
-  'c_spine_01.x': 'c_root_master.x',
+  // Original-rig / anatomical carry, not raw FBX parenting.
+  // root_ref.x -> spine_01_ref.x, so c_spine_01.x must be encoded relative
+  // to c_root.x exactly like CloudRig encodes controls against their logical
+  // parent rather than their static FBX helper parent.
+  'c_spine_01.x': 'c_root.x',
   'c_spine_02.x': 'c_spine_01.x',
 
   'c_neck.x': 'c_spine_02.x',
@@ -11619,6 +11620,11 @@ function buildAutoRigProOriginalRigTransferClip(clip) {
     // then solve every control from that same evaluated pose. The previous
     // implementation evaluated the entire timeline once PER CONTROL.
     for (const time of times) {
+      // CloudRig parity: every sample starts from the pristine imported REST.
+      // ARP has hundreds of untracked helper/stretch/twist bones; without this,
+      // state left by the previous sample can leak into the WORLD pose used to
+      // derive matrix_basis for the original Blender rig.
+      restoreRest(tgt);
       mixer.setTime(time);
       updateSlotWorld(tgt);
 
@@ -12384,9 +12390,12 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
     usesAutoRigProPipeline() &&
     state.activePresetId === 'mixamo_to_arp'
   ) {
-    const universal = buildMixamoToArpUniversalOriginalRigClip();
+    // CloudRig parity: export exactly the Action the user chose.
+    // Transfer produces FK. FK->IK remains an explicit user operation instead
+    // of silently mixing both solvers into the copy-back Action.
+    const selectedRuntimeClip = state.exportClip || state.fkClip;
     const controlClip = buildOriginalRigControlOnlyClip(
-      withTargetNeutralBaseline(universal)
+      withTargetNeutralBaseline(selectedRuntimeClip)
     );
 
     if (controlClip?.tracks?.length) {
@@ -12396,7 +12405,10 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
         controlClip,
         state.target
       );
-      originalRigAction.name = 'Retargeted_OriginalRig_FK_IK';
+      originalRigAction.name =
+        selectedRuntimeClip === state.fkClip
+          ? 'Retargeted_OriginalRig_FK'
+          : (selectedRuntimeClip.name || 'Retargeted_OriginalRig');
     }
   } else {
     const exportWithNeutralBase = withTargetNeutralBaseline(state.exportClip);
@@ -12555,36 +12567,39 @@ async function exportTargetFbx() {
         usesAutoRigProPipeline() &&
         state.activePresetId === 'mixamo_to_arp'
       ) {
-        const universalRuntime = buildMixamoToArpUniversalOriginalRigClip();
-        const universalControl = buildOriginalRigControlOnlyClip(
-          withTargetNeutralBaseline(universalRuntime)
+        const selectedRuntimeClip = state.exportClip || state.fkClip;
+        const controlRuntime = buildOriginalRigControlOnlyClip(
+          withTargetNeutralBaseline(selectedRuntimeClip)
         );
 
-        if (!universalControl?.tracks?.length) {
+        if (!controlRuntime?.tracks?.length) {
           throw new Error(
-            'Mixamo → Auto-Rig Pro: no pude construir la Action FK+IK universal.'
+            'Mixamo → Auto-Rig Pro: no pude construir la Action para el rig original.'
           );
         }
 
-        logMixamoArpExportSpineDiagnostic(
-          universalControl
-        );
+        logMixamoArpExportSpineDiagnostic(controlRuntime);
 
-        const universal = createOriginalNameExportClip(
-          universalControl,
+        const originalRigClip = createOriginalNameExportClip(
+          controlRuntime,
           state.target
         );
 
-        universal.name = 'Retargeted_OriginalRig_FK_IK';
+        const actionName =
+          selectedRuntimeClip === state.fkClip
+            ? 'Retargeted_OriginalRig_FK'
+            : (selectedRuntimeClip.name || 'Retargeted_OriginalRig');
 
-        // ONE action only. No DEF preview. The FBX is an Action carrier for
-        // the original ARP .blend and includes both kinematic solutions.
+        originalRigClip.name = actionName;
+
+        // Same philosophy as the working CloudRig copy-back:
+        // one control Action, no DEF companion, no automatic IK contamination.
         exactActions = [{
-          clip: universal,
-          actionName: 'Retargeted_OriginalRig_FK_IK',
+          clip: originalRigClip,
+          actionName,
           includeControlPositions: true
         }];
-        currentActionName = 'Retargeted_OriginalRig_FK_IK';
+        currentActionName = actionName;
       } else {
         exactActions = [
           {
@@ -12650,9 +12665,9 @@ async function exportTargetFbx() {
         state.activePresetId === 'mixamo_to_arp'
       ) {
         log(
-          `Mixamo → Auto-Rig Pro EXPORT universal: [${clipNames}] · ` +
+          `Mixamo → Auto-Rig Pro EXPORT copy-back: [${clipNames}] · ` +
           `${report.curveNodes} CurveNodes · ${report.curves} Curves · ` +
-          'FK + IK + POLE en una sola Action para el rig ARP original.'
+          'misma estrategia que CloudRig: Action de controles contra parents funcionales.'
         );
       } else {
         log(
