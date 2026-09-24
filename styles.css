@@ -1825,8 +1825,7 @@ h2,p{margin:0}
   }
 }
 
-
-/* Mapping workspace wide layout: hide workflow rail and stack Source/Target previews */
+/* Mapping workspace wide layout: hide workflow rail and place Source/Target previews side by side */
 @media(min-width:901px){
   /* Mapping does not need the step/progress rail. Reclaim that width while
      keeping the settings/export rail available on the right. */
@@ -1852,15 +1851,15 @@ h2,p{margin:0}
     grid-column:2;
   }
 
-  /* Left strip follows the requested composition: search at top, then
-     Source canvas and Target canvas stacked vertically. */
+  /* Preview block on the left, mapping table on the right. */
   .main-workspace[data-view="mappings"] .mapping-expandable.mapping-workbench{
-    grid-template-columns:clamp(270px,22vw,340px) minmax(0,1fr);
+    grid-template-columns:clamp(520px,39vw,660px) minmax(0,1fr);
   }
 
   .main-workspace[data-view="mappings"] .mapping-preview-column{
     display:grid;
     grid-template-rows:auto minmax(0,1fr);
+    min-width:0;
   }
 
   .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-skeleton-preview{
@@ -1869,21 +1868,31 @@ h2,p{margin:0}
     min-height:0;
   }
 
+  /* SOURCE and TARGET are horizontal siblings, exactly as in the sketch. */
   .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-grid{
     display:grid;
-    grid-template-columns:1fr;
-    grid-template-rows:minmax(0,1fr) minmax(0,1fr);
+    grid-template-columns:minmax(0,1fr) minmax(0,1fr);
+    grid-template-rows:minmax(0,1fr);
     min-height:0;
     height:100%;
+    align-items:stretch;
   }
 
   .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-pane{
+    min-width:0;
     min-height:0;
     grid-template-rows:32px minmax(0,1fr);
+    overflow:hidden;
+    border-top:0;
+  }
+
+  .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-pane + .mapping-preview-pane{
+    border-top:0;
+    border-left:1px solid var(--border);
   }
 
   .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-pane canvas{
-    width:min(100%, calc((100dvh - 292px) / 2));
+    width:min(100%, calc((100dvw - 760px) / 2));
     max-width:100%;
     height:auto;
     aspect-ratio:1 / 1;
@@ -1899,6 +1908,10 @@ h2,p{margin:0}
   }
 
   .main-workspace[data-view="mappings"] .mapping-expandable.mapping-workbench{
-    grid-template-columns:clamp(250px,22vw,310px) minmax(0,1fr);
+    grid-template-columns:clamp(430px,40vw,560px) minmax(0,1fr);
+  }
+
+  .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-pane canvas{
+    width:min(100%, calc((100dvw - 650px) / 2));
   }
 }
