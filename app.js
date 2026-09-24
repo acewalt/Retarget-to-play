@@ -6210,8 +6210,8 @@ function applyRetarget() {
 
     if (usesUeToAutoRigProPipeline()) {
       log(
-        'UE → Auto-Rig Pro FK: basis LOCAL del Source respecto a su parent anatómico → ' +
-        'ejes anatómicos *_ref de ARP → matrix_basis c_* (sin pose WORLD *_ref).'
+        'UE → Auto-Rig Pro FK: c_root y c_spine_01 resueltos como ramas separadas de c_root_master; ' +
+        'basis LOCAL UE → ejes *_ref → matrix_basis c_*.'
       );
     }
     state.ikOnlyClip = null;
@@ -8947,6 +8947,16 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
       sourceParentName = sourceRootName;
     }
 
+    // Critical ARP split:
+    // c_root.x and c_spine_01.x are separate branches below c_root_master.x
+    // in the supplied rig. c_spine_01.x must therefore carry the complete
+    // UE orientation from root -> pelvis -> spine_01..spine_03. Treating
+    // pelvis as its mapped parent removes the pelvis compensation and is what
+    // produced the permanent forward-folded torso seen in the Blender tests.
+    if (item.controlOriginal === 'c_spine_01.x' && sourceRootName) {
+      sourceParentName = sourceRootName;
+    }
+
     // Fallback only for a control outside the known anatomical table.
     if (!sourceParentName) {
       sourceParentName = nearestSourceAncestor(item.sourceName);
@@ -9135,11 +9145,11 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
   }
 
   log(
-    'UE -> Auto-Rig Pro local-basis solver v5: ' +
+    'UE -> Auto-Rig Pro local-basis solver v6: ' +
     replacements.size +
     '/' +
     entries.length +
-    ' controles. UE mapped-parent local basis -> *_ref anatomical axes -> c_* matrix_basis.'
+    ' controles. UE local basis + ARP split root/spine -> *_ref axes -> c_* matrix_basis.'
   );
 
   return new THREE.AnimationClip(
