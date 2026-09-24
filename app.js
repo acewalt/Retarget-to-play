@@ -10566,7 +10566,10 @@ const AUTO_RIG_PRO_LOGICAL_PARENT = {
   // these controls behave like the anatomical reference skeleton.
   'c_root.x': 'c_root_master.x',
 
-  'c_spine_01.x': 'c_root.x',
+  // In the actual ARP hierarchy c_root.x and c_spine_01.x are siblings
+  // below c_root_master.x. Using c_root.x here subtracts pelvis/root rotation
+  // from spine_01 during copy-back and makes the exported torso look rigid.
+  'c_spine_01.x': 'c_root_master.x',
   'c_spine_02.x': 'c_spine_01.x',
 
   'c_neck.x': 'c_spine_02.x',
@@ -12110,6 +12113,82 @@ function buildOriginalRigLowerFrameClip(sourceClip) {
   );
 }
 
+function quaternionTrackMotionDegrees(track) {
+  if (
+    !track ||
+    !track.values ||
+    track.values.length < 8
+  ) {
+    return 0;
+  }
+
+  const first = new THREE.Quaternion(
+    track.values[0],
+    track.values[1],
+    track.values[2],
+    track.values[3]
+  ).normalize();
+
+  let maxAngle = 0;
+  const q = new THREE.Quaternion();
+
+  for (let i = 0; i < track.values.length; i += 4) {
+    q.set(
+      track.values[i],
+      track.values[i + 1],
+      track.values[i + 2],
+      track.values[i + 3]
+    ).normalize();
+
+    maxAngle = Math.max(
+      maxAngle,
+      THREE.MathUtils.radToDeg(first.angleTo(q))
+    );
+  }
+
+  return maxAngle;
+}
+
+function logMixamoArpExportSpineDiagnostic(clip) {
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !clip
+  ) {
+    return;
+  }
+
+  const spineRuntime = findBoneByOriginalExact(
+    state.target,
+    ['c_spine_01.x']
+  );
+
+  const spineTrack = clip.tracks.find(track => {
+    const parsed = parseTrackTarget(track.name);
+    return (
+      parsed?.nodeName === spineRuntime &&
+      parsed?.property === 'quaternion'
+    );
+  });
+
+  if (!spineTrack) {
+    log(
+      'Mixamo → ARP EXPORT diagnóstico: ERROR · c_spine_01.x no tiene curva quaternion.'
+    );
+    return;
+  }
+
+  const degrees = quaternionTrackMotionDegrees(spineTrack);
+
+  log(
+    'Mixamo → ARP EXPORT diagnóstico: c_spine_01.x sí está animado · ' +
+    'movimiento angular máximo=' +
+    degrees.toFixed(2) +
+    '° · keys=' +
+    spineTrack.times.length +
+    '.'
+  );
+}
+
 function buildOriginalRigControlOnlyClip(clip) {
   if (!clip) return null;
 
@@ -12122,11 +12201,26 @@ function buildOriginalRigControlOnlyClip(clip) {
       .map(pair => pair.target)
   );
 
-  // FK→IK currently exists only for CloudRig. Include its generated controls
-  // even though they were not original FK mapping rows.
+  // Generated IK / pole controls are not part of the original FK Bone Map,
+  // so explicitly whitelist them when they are present in the clip.
   for (const track of state.ikOnlyClip?.tracks || []) {
     const parsed = parseTrackTarget(track.name);
     if (parsed) allowedRuntimeNames.add(parsed.nodeName);
+  }
+
+  if (
+    usesAutoRigProPipeline() &&
+    state.activePresetId === 'mixamo_to_arp'
+  ) {
+    for (const chain of AUTO_RIG_PRO_REFERENCE_IK_CHAINS) {
+      for (const originalName of [chain.ik, chain.pole]) {
+        const runtimeName = findBoneByOriginalExact(
+          state.target,
+          [originalName]
+        );
+        if (runtimeName) allowedRuntimeNames.add(runtimeName);
+      }
+    }
   }
 
   const tracks = clip.tracks
@@ -12296,6 +12390,8 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
     );
 
     if (controlClip?.tracks?.length) {
+      logMixamoArpExportSpineDiagnostic(controlClip);
+
       originalRigAction = createOriginalNameExportClip(
         controlClip,
         state.target
@@ -12469,6 +12565,10 @@ async function exportTargetFbx() {
             'Mixamo → Auto-Rig Pro: no pude construir la Action FK+IK universal.'
           );
         }
+
+        logMixamoArpExportSpineDiagnostic(
+          universalControl
+        );
 
         const universal = createOriginalNameExportClip(
           universalControl,
