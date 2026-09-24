@@ -10582,20 +10582,24 @@ const AUTO_RIG_PRO_LOGICAL_PARENT = {
   // these controls behave like the anatomical reference skeleton.
   'c_root.x': 'c_root_master.x',
 
-  // Original-rig / anatomical carry used by the existing Mixamo->ARP path.
-  'c_spine_01.x': 'c_root.x',
+  // Actual ARP control hierarchy: c_root.x and c_spine_01.x are siblings
+  // below c_root_master.x.
+  'c_spine_01.x': 'c_root_master.x',
   'c_spine_02.x': 'c_spine_01.x',
 
   'c_neck.x': 'c_spine_02.x',
   'c_head.x': 'c_neck.x',
 
   'c_shoulder.l': 'c_spine_02.x',
-  'c_arm_fk.l': 'c_shoulder.l',
+  // c_arm_fk.l is also a child of spine_02.x in the actual ARP hierarchy.
+  // It does NOT inherit from c_shoulder.l.
+  'c_arm_fk.l': 'c_spine_02.x',
   'c_forearm_fk.l': 'c_arm_fk.l',
   'c_hand_fk.l': 'c_forearm_fk.l',
 
   'c_shoulder.r': 'c_spine_02.x',
-  'c_arm_fk.r': 'c_shoulder.r',
+  // Same structure on the right side.
+  'c_arm_fk.r': 'c_spine_02.x',
   'c_forearm_fk.r': 'c_arm_fk.r',
   'c_hand_fk.r': 'c_forearm_fk.r',
 
@@ -10623,6 +10627,7 @@ for (const side of ['l', 'r']) {
 
 
 const AUTO_RIG_PRO_CONTROL_TO_REFERENCE = {
+  'c_root_master.x': 'root_ref.x',
   'c_root.x': 'root_ref.x',
   'c_spine_01.x': 'spine_01_ref.x',
   'c_spine_02.x': 'spine_02_ref.x',
@@ -11755,13 +11760,13 @@ function buildMixamoAutoRigProReferenceCopyBackClip(rawControlClip) {
   );
 
   log(
-    'Mixamo → ARP ref copy-back: ' +
+    'Mixamo → ARP ref copy-back v2: ' +
     replacements.size +
     '/' +
     entries.length +
-    ' controles reconstruidos directamente desde *_ref · ' +
+    ' controles desde *_ref · ' +
     times.length +
-    ' frames.'
+    ' frames · spine01 parent=root_ref · arm_fk parent=spine_02_ref.'
   );
 
   return new THREE.AnimationClip(
