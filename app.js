@@ -6201,7 +6201,7 @@ function applyRetarget() {
       : usesRigifyPipeline()
         ? buildRigifyOriginalRigTransferClip(state.fkRawClip)
         : usesUeToAutoRigProPipeline()
-          ? buildUeAutoRigProReferenceAction(state.fkRawClip)
+          ? buildUeAutoRigProLocalBasisAction(state.fkRawClip)
           : usesAutoRigProPipeline()
             ? buildAutoRigProOriginalRigTransferClip(state.fkRawClip)
             : state.fkRawClip.clone();
@@ -6210,8 +6210,8 @@ function applyRetarget() {
 
     if (usesUeToAutoRigProPipeline()) {
       log(
-        'UE → Auto-Rig Pro FK: Source WORLD → jerarquía *_ref → ' +
-        'matrix_basis directo de referencia (sin doble cambio de ejes).'
+        'UE → Auto-Rig Pro FK: basis LOCAL del Source respecto a su parent anatómico → ' +
+        'ejes c_* de ARP → matrix_basis (sin reconstrucción WORLD *_ref).'
       );
     }
     state.ikOnlyClip = null;
@@ -8844,7 +8844,7 @@ for (const side of ['l', 'r']) {
   }
 }
 
-function buildUeAutoRigProReferenceAction(rawClip) {
+function buildUeAutoRigProLocalBasisAction(rawClip) {
   const src = state.source;
   const tgt = state.target;
   const sourceClip = src.activeClip;
@@ -8853,39 +8853,36 @@ function buildUeAutoRigProReferenceAction(rawClip) {
     return rawClip?.clone?.() || rawClip;
   }
 
+  // UE -> ARP is deliberately solved in SOURCE LOCAL / anatomical space.
+  //
+  // Previous attempts reconstructed each ARP control from a WORLD delta and
+  // then tried to recover Blender's matrix_basis through either:
+  //   1) the raw FBX control hierarchy,
+  //   2) a guessed functional parent hierarchy, or
+  //   3) the *_ref WORLD pose.
+  //
+  // That works for CloudRig because its logical carry hierarchy is known, but
+  // ARP interleaves c_* controls, deform bones and helper bones. A WORLD solve
+  // can therefore attribute a parent's rotation to the child a second time.
+  //
+  // Here each c_* control receives only the LOCAL motion of its corresponding
+  // UE anatomical segment:
+  //
+  //   sourceBasis =
+  //     inverse(sourceRestRelativeToMappedParent) *
+  //     sourcePoseRelativeToMappedParent
+  //
+  // Then that basis is expressed in the actual ARP control bone axes and
+  // written as:
+  //
+  //   FBX local = controlRestLocal * matrix_basis
+  //
+  // This also intentionally collapses skipped UE chains:
+  // pelvis -> spine_03 becomes c_spine_01, spine_03 -> spine_05 becomes
+  // c_spine_02, spine_05 -> neck_02 becomes c_neck, etc.
   const sourceTracks = rawClip.tracks.map(track => track.clone());
-  const reverseTarget = new Map();
 
-  for (const [name, bone] of tgt.bones) {
-    reverseTarget.set(bone, name);
-  }
-
-  const refParentCache = new Map();
-
-  const resolveRefParent = refName => {
-    if (!refName) return '';
-    if (refParentCache.has(refName)) return refParentCache.get(refName);
-
-    let parent = tgt.bones.get(refName)?.parent || null;
-
-    while (parent) {
-      const runtimeName = reverseTarget.get(parent);
-      const original = runtimeName
-        ? (originalObjectName(parent) || runtimeName)
-        : '';
-
-      if (runtimeName && String(original).includes('_ref')) {
-        refParentCache.set(refName, runtimeName);
-        return runtimeName;
-      }
-
-      parent = parent.parent;
-    }
-
-    refParentCache.set(refName, '');
-    return '';
-  };
-
+  const pairByControlOriginal = new Map();
   const entries = [];
 
   for (const pair of validMap()) {
@@ -8901,25 +8898,87 @@ function buildUeAutoRigProReferenceAction(rawClip) {
     if (!sourceBone || !sourceRest || !control || !controlRest) continue;
 
     const controlOriginal = originalObjectName(control) || pair.target;
-    const refOriginal = AUTO_RIG_PRO_CONTROL_TO_REFERENCE[controlOriginal];
-    if (!refOriginal) continue;
 
-    const refName = findBoneByOriginalExact(tgt, [refOriginal]);
-    const refRest = refName ? tgt.rest.get(refName) : null;
-    if (!refName || !refRest) continue;
-
-    const parentRefName = resolveRefParent(refName);
-
-    entries.push({
+    pairByControlOriginal.set(controlOriginal, {
+      pair,
       sourceName: pair.source,
+      sourceBone,
       sourceRest,
       controlName: pair.target,
-      controlOriginal,
+      control,
       controlRest,
-      refName,
-      refOriginal,
-      refRest,
-      parentRefName,
+      controlOriginal
+    });
+  }
+
+  const sourceRootName =
+    findBoneByOriginalExact(src, ['root']) ||
+    findSemanticBone(src, 'root') ||
+    '';
+
+  const reverseSource = new Map();
+  for (const [runtimeName, bone] of src.bones) {
+    reverseSource.set(bone, runtimeName);
+  }
+
+  const nearestSourceAncestor = sourceName => {
+    let parent = src.bones.get(sourceName)?.parent || null;
+
+    while (parent) {
+      const runtimeName = reverseSource.get(parent);
+      if (runtimeName && src.rest.has(runtimeName)) return runtimeName;
+      parent = parent.parent;
+    }
+
+    return '';
+  };
+
+  for (const item of pairByControlOriginal.values()) {
+    const parentControlOriginal =
+      AUTO_RIG_PRO_LOGICAL_PARENT[item.controlOriginal] || '';
+
+    let sourceParentName =
+      pairByControlOriginal.get(parentControlOriginal)?.sourceName || '';
+
+    // c_root.x represents UE pelvis rotation while UE root carries the
+    // locomotion frame. The preset maps root only for translation, so it is
+    // not present in pairByControlOriginal and must be supplied explicitly.
+    if (item.controlOriginal === 'c_root.x' && sourceRootName) {
+      sourceParentName = sourceRootName;
+    }
+
+    // Fallback only for a control outside the known anatomical table.
+    if (!sourceParentName) {
+      sourceParentName = nearestSourceAncestor(item.sourceName);
+    }
+
+    const sourceParentRest = sourceParentName
+      ? src.rest.get(sourceParentName)
+      : null;
+
+    const sourceRestRelative = sourceParentRest
+      ? sourceParentRest.worldQuat.clone()
+          .invert()
+          .multiply(item.sourceRest.worldQuat)
+          .normalize()
+      : item.sourceRest.worldQuat.clone().normalize();
+
+    // Coordinate transform from UE bone-local axes to this ARP c_* control's
+    // rotation-channel axes. Unlike the failed *_ref WORLD reconstruction,
+    // this conversion is applied to a LOCAL basis delta exactly once.
+    const sourceToControl = item.controlRest.worldQuat.clone()
+      .invert()
+      .multiply(item.sourceRest.worldQuat)
+      .normalize();
+
+    entries.push({
+      ...item,
+      sourceParentName,
+      sourceParentRest,
+      sourceRestRelative,
+      sourceRestRelativeInv: sourceRestRelative.clone().invert(),
+      sourceToControl,
+      sourceToControlInv: sourceToControl.clone().invert(),
       values: [],
       previous: null
     });
@@ -8927,9 +8986,9 @@ function buildUeAutoRigProReferenceAction(rawClip) {
 
   if (entries.length < 12) {
     log(
-      'UE -> ARP *_ref solver: referencias insuficientes (' +
+      'UE -> ARP local-basis solver: controles insuficientes (' +
       entries.length +
-      '), usando fallback anterior.'
+      '), usando fallback OriginalRig.'
     );
     return buildAutoRigProOriginalRigTransferClip(rawClip);
   }
@@ -8938,20 +8997,27 @@ function buildUeAutoRigProReferenceAction(rawClip) {
     1,
     Math.min(120, Number($('fps').value) || 30)
   );
+
   const frameCount = Math.max(
     2,
     Math.ceil(sourceClip.duration * fps) + 1
   );
+
   const times = Array.from(
     { length: frameCount },
     (_, i) => Math.min(sourceClip.duration, i / fps)
   );
 
-  // Use an isolated mixer. The viewport Source mixer may already contain
-  // playback state, so using it here can contaminate the sampled WORLD pose.
   restoreRest(src);
   const sourceMixer = new THREE.AnimationMixer(src.root);
   const sourceAction = sourceMixer.clipAction(sourceClip).play();
+
+  const childWorld = new THREE.Quaternion();
+  const parentWorld = new THREE.Quaternion();
+  const sourcePoseRelative = new THREE.Quaternion();
+  const sourceBasis = new THREE.Quaternion();
+  const controlBasis = new THREE.Quaternion();
+  const exportLocal = new THREE.Quaternion();
 
   try {
     for (const time of times) {
@@ -8959,117 +9025,37 @@ function buildUeAutoRigProReferenceAction(rawClip) {
       sourceMixer.setTime(Number(time));
       updateSlotWorld(src);
 
-      const desiredRefWorld = new Map();
-
       for (const entry of entries) {
         const sourceBone = src.bones.get(entry.sourceName);
         if (!sourceBone) continue;
 
-        const sourcePoseWorld = sourceBone
-          .getWorldQuaternion(new THREE.Quaternion())
-          .normalize();
+        sourceBone.getWorldQuaternion(childWorld).normalize();
 
-        // Same WORLD-delta convention used by the working UE -> CloudRig bake.
-        const worldDelta = sourcePoseWorld.clone()
-          .multiply(entry.sourceRest.worldQuat.clone().invert())
-          .normalize();
+        if (entry.sourceParentName) {
+          const sourceParent = src.bones.get(entry.sourceParentName);
+          if (!sourceParent) continue;
 
-        desiredRefWorld.set(
-          entry.refName,
-          worldDelta
-            .multiply(entry.refRest.worldQuat.clone())
-            .normalize()
-        );
-      }
+          sourceParent.getWorldQuaternion(parentWorld).normalize();
 
-      const poseCache = new Map();
-
-      const refPose = refName => {
-        if (!refName) return null;
-
-        if (poseCache.has(refName)) {
-          return poseCache.get(refName).clone();
-        }
-
-        const direct = desiredRefWorld.get(refName);
-        if (direct) {
-          poseCache.set(refName, direct.clone());
-          return direct.clone();
-        }
-
-        const rest = tgt.rest.get(refName);
-        if (!rest) return null;
-
-        const parentName = resolveRefParent(refName);
-
-        if (!parentName) {
-          const pose = rest.worldQuat.clone();
-          poseCache.set(refName, pose.clone());
-          return pose;
-        }
-
-        const parentRest = tgt.rest.get(parentName);
-        const parentPose = refPose(parentName);
-
-        if (!parentRest || !parentPose) {
-          const pose = rest.worldQuat.clone();
-          poseCache.set(refName, pose.clone());
-          return pose;
-        }
-
-        const restRelative = parentRest.worldQuat.clone()
-          .invert()
-          .multiply(rest.worldQuat)
-          .normalize();
-
-        const pose = parentPose
-          .multiply(restRelative)
-          .normalize();
-
-        poseCache.set(refName, pose.clone());
-        return pose;
-      };
-
-      for (const entry of entries) {
-        const childPose = desiredRefWorld.get(entry.refName);
-        if (!childPose) continue;
-
-        let refBasis;
-
-        if (entry.parentRefName) {
-          const parentRest = tgt.rest.get(entry.parentRefName);
-          const parentPose = refPose(entry.parentRefName);
-
-          if (!parentRest || !parentPose) continue;
-
-          const restRelative = parentRest.worldQuat.clone()
+          sourcePoseRelative.copy(parentWorld)
             .invert()
-            .multiply(entry.refRest.worldQuat)
-            .normalize();
-
-          const poseRelative = parentPose.clone()
-            .invert()
-            .multiply(childPose)
-            .normalize();
-
-          refBasis = restRelative.clone()
-            .invert()
-            .multiply(poseRelative)
+            .multiply(childWorld)
             .normalize();
         } else {
-          refBasis = entry.refRest.worldQuat.clone()
-            .invert()
-            .multiply(childPose)
-            .normalize();
+          sourcePoseRelative.copy(childWorld);
         }
 
-        // Auto-Rig Pro's c_* animator controls are authored from the *_ref
-        // anatomical bones. The reference-local delta is the matrix_basis
-        // delta we need. Do NOT conjugate it through the raw FBX control
-        // world orientation: that applies the axis conversion twice and was
-        // the source of the torso/head facing the wrong direction.
-        const exportLocal = entry.controlRest.quaternion.clone()
-          .multiply(refBasis)
+        sourceBasis.copy(entry.sourceRestRelativeInv)
+          .multiply(sourcePoseRelative)
+          .normalize();
+
+        controlBasis.copy(entry.sourceToControl)
+          .multiply(sourceBasis)
+          .multiply(entry.sourceToControlInv)
+          .normalize();
+
+        exportLocal.copy(entry.controlRest.quaternion)
+          .multiply(controlBasis)
           .normalize();
 
         if (entry.previous && entry.previous.dot(exportLocal) < 0) {
@@ -9117,17 +9103,16 @@ function buildUeAutoRigProReferenceAction(rawClip) {
   );
 
   const existing = new Set(tracks.map(track => track.name));
-
   for (const [trackName, track] of replacements) {
     if (!existing.has(trackName)) tracks.push(track);
   }
 
   log(
-    'UE -> Auto-Rig Pro *_ref solver v3: ' +
+    'UE -> Auto-Rig Pro local-basis solver v4: ' +
     replacements.size +
     '/' +
     entries.length +
-    ' controles. Source WORLD -> *_ref local basis -> c_* (sin doble conversión de ejes).'
+    ' controles. UE mapped-parent local basis -> c_* axes -> matrix_basis.'
   );
 
   return new THREE.AnimationClip(
