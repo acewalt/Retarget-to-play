@@ -9829,21 +9829,79 @@ function exportBlenderXYZAction() {
   log(`Blender Action: ${suffix} generado desde deltas WORLD del viewport para el rig original.`);
 }
 
+function buildUeAutoRigProCopyBackAction() {
+  if (!usesUeToAutoRigProPipeline()) return null;
+
+  // IMPORTANT: for UE -> ARP the exported FBX is only an Action carrier.
+  // The user imports it into Blender and assigns that Action to the ORIGINAL
+  // Auto-Rig Pro rig. Therefore do NOT merge the Target neutral/base Action,
+  // DEF preview, helpers or any other FBX channels into this Action.
+  //
+  // state.fkClip is already encoded as:
+  //   raw FBX control rest-local * ORIGINAL ARP matrix_basis
+  // so the exact FBX exporter can round-trip it through Blender and the
+  // resulting Action can be copied directly to the original c_* controls.
+  const source = state.fkClip || state.exportClip;
+  if (!source) return null;
+
+  const allowedRuntimeNames = new Set(
+    state.boneMap
+      .filter(isPairValid)
+      .map(pair => pair.target)
+  );
+
+  const tracks = source.tracks
+    .filter(track => {
+      const parsed = parseTrackTarget(track.name);
+      if (!parsed || !allowedRuntimeNames.has(parsed.nodeName)) return false;
+
+      // Copy-back Action: only animator-control transforms.
+      // No helper/DEF/neutral tracks.
+      return (
+        parsed.property === 'quaternion' ||
+        parsed.property === 'position'
+      );
+    })
+    .map(track => track.clone());
+
+  if (!tracks.length) return null;
+
+  const runtimeClip = new THREE.AnimationClip(
+    'Retargeted_OriginalRig_FK',
+    source.duration,
+    tracks
+  );
+
+  return createOriginalNameExportClip(
+    runtimeClip,
+    state.target
+  );
+}
+
 function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
   if (!state.target.root || !state.exportClip || !state.target.originalBuffer) {
     throw new Error('Falta Target, retarget o FBX original.');
   }
 
-  const exportWithNeutralBase = withTargetNeutralBaseline(state.exportClip);
-  const controlClip = buildOriginalRigControlOnlyClip(exportWithNeutralBase);
-  if (!controlClip || !controlClip.tracks.length) {
-    throw new Error('No pude construir la Action de controles del rig original.');
+  let originalRigAction;
+
+  if (usesUeToAutoRigProPipeline()) {
+    originalRigAction = buildUeAutoRigProCopyBackAction();
+  } else {
+    const exportWithNeutralBase = withTargetNeutralBaseline(state.exportClip);
+    const controlClip = buildOriginalRigControlOnlyClip(exportWithNeutralBase);
+
+    if (controlClip?.tracks?.length) {
+      originalRigAction = createOriginalNameExportClip(
+        controlClip,
+        state.target
+      );
+    }
   }
 
-  const originalRigAction = createOriginalNameExportClip(
-    controlClip,
-    state.target
-  );
+  if (!originalRigAction || !originalRigAction.tracks.length) {
+    throw new Error('No pude construir la Action de controles del rig original.');
+  }
 
   const result = injectAnimationsIntoOriginalFBX(
     state.target.originalBuffer,
@@ -9964,39 +10022,64 @@ async function exportTargetFbx() {
         `(DEF baked=${clean.defTracks}). Este FBX contiene UNA Action standalone por diseño.`
       );
     } else if (exportMode === 'exact') {
-      const exactActions = [
-        {
-          clip: exportClip,
-          actionName: exportClip.name || 'Retargeted_FK',
-          includeControlPositions: true
+      let exactActions;
+      let currentActionName;
+
+      if (usesUeToAutoRigProPipeline()) {
+        const copyBack = buildUeAutoRigProCopyBackAction();
+
+        if (!copyBack?.tracks?.length) {
+          throw new Error(
+            'UE → Auto-Rig Pro: no pude construir la Action copy-back para el rig original.'
+          );
         }
-      ];
 
-      let currentActionName = exportClip.name || 'Retargeted_FK';
+        // UE -> ARP special export:
+        // ONE Action only. No neutral baseline. No DEF preview. No helper curves.
+        // This FBX is deliberately an Action carrier for Blender.
+        exactActions = [{
+          clip: copyBack,
+          actionName: 'Retargeted_OriginalRig_FK',
+          includeControlPositions: true
+        }];
+        currentActionName = 'Retargeted_OriginalRig_FK';
+      } else {
+        exactActions = [
+          {
+            clip: exportClip,
+            actionName: exportClip.name || 'Retargeted_FK',
+            includeControlPositions: true
+          }
+        ];
 
-      if (
-        (
-          usesCloudRigPipeline() ||
-          usesMixamoControlRigPipeline() ||
-          usesAutoRigProPipeline()
-        ) &&
-        $('includeDefPreview')?.checked
-      ) {
-        const defPreview = usesEmbeddedDeformControlRigPipeline()
-          ? state.deformPreviewClip
-          : bakeDeformPreviewClip();
+        currentActionName = exportClip.name || 'Retargeted_FK';
 
-        if (defPreview) {
-          const originalDefPreview = createOriginalNameExportClip(defPreview, state.target);
-          exactActions.push({
-            clip: originalDefPreview,
-            actionName: 'Retargeted_DEF_Preview',
-            includeDeformPositions: true
-          });
+        if (
+          (
+            usesCloudRigPipeline() ||
+            usesMixamoControlRigPipeline() ||
+            usesAutoRigProPipeline()
+          ) &&
+          $('includeDefPreview')?.checked
+        ) {
+          const defPreview = usesEmbeddedDeformControlRigPipeline()
+            ? state.deformPreviewClip
+            : bakeDeformPreviewClip();
 
-          // Al abrir el FBX standalone, esta Action es la que mueve la malla
-          // sin necesitar constraints de Blender.
-          currentActionName = 'Retargeted_DEF_Preview';
+          if (defPreview) {
+            const originalDefPreview = createOriginalNameExportClip(
+              defPreview,
+              state.target
+            );
+
+            exactActions.push({
+              clip: originalDefPreview,
+              actionName: 'Retargeted_DEF_Preview',
+              includeDeformPositions: true
+            });
+
+            currentActionName = 'Retargeted_DEF_Preview';
+          }
         }
       }
 
@@ -10013,11 +10096,20 @@ async function exportTargetFbx() {
       report = result.report;
 
       const clipNames = report.clips.map(c => c.name).join(', ');
-      log(
-        `FBX EXACTO: Target original + Actions [${clipNames}]. ` +
-        `Stacks=${report.stacks}, CurveNodes=${report.curveNodes}, Curves=${report.curves}. ` +
-        'Lcl Rotation preserva RotationOrder y revierte Pre/PostRotation del FBX original.'
-      );
+
+      if (usesUeToAutoRigProPipeline()) {
+        log(
+          `UE → Auto-Rig Pro EXPORT copy-back: [${clipNames}] · ` +
+          `${report.curveNodes} CurveNodes · ${report.curves} Curves. ` +
+          'FBX contiene UNA sola Action de controles c_* para copiar al rig ARP original.'
+        );
+      } else {
+        log(
+          `FBX EXACTO: Target original + Actions [${clipNames}]. ` +
+          `Stacks=${report.stacks}, CurveNodes=${report.curveNodes}, Curves=${report.curves}. ` +
+          'Lcl Rotation preserva RotationOrder y revierte Pre/PostRotation del FBX original.'
+        );
+      }
     } else {
       state.target.mixer?.stopAllAction();
       restoreRest(state.target);
@@ -10081,7 +10173,11 @@ async function exportTargetFbx() {
       exportMode === 'clean'
         ? `${base}_retarget_clean.fbx`
         : exportMode === 'exact'
-          ? `${base}_retarget_exact.fbx`
+          ? (
+              usesUeToAutoRigProPipeline()
+                ? `${base}_UE_to_ARP_OriginalRig_Action.fbx`
+                : `${base}_retarget_exact.fbx`
+            )
           : `${base}_retarget_legacy.fbx`
     );
 
@@ -10103,7 +10199,11 @@ async function exportTargetFbx() {
       );
     }
 
-    if ((exportMode === 'clean' || exportMode === 'exact') && $('downloadOriginalRigAction')?.checked) {
+    if (
+      !usesUeToAutoRigProPipeline() &&
+      (exportMode === 'clean' || exportMode === 'exact') &&
+      $('downloadOriginalRigAction')?.checked
+    ) {
       const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
       const originalRigRotationMode =
         $('rotationMode')?.value === 'quaternion' ? 'quaternion' : 'xyz';
