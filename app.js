@@ -5723,6 +5723,22 @@ function applyTargetRigRuntime() {
     return;
   }
 
+  // Auto-Rig Pro preview is already a DIRECT bake on the embedded deform
+  // skeleton. Running WaltRig FK->DEF again on top of those tracks applies a
+  // second deformation pass and produces the characteristic stretched /
+  // exploded limbs seen in Mixamo -> ARP.
+  //
+  // Do not call resetDriven() here: the current AnimationMixer frame owns the
+  // deform transforms and must remain untouched.
+  if (
+    usesAutoRigProPipeline() &&
+    state.deformPreviewClip &&
+    state.targetPreviewClip
+  ) {
+    runtime.enabled = false;
+    return;
+  }
+
   runtime.enabled = $('previewDeform')?.checked ?? true;
 
   if (runtime.enabled) {
