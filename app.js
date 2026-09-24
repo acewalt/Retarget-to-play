@@ -506,6 +506,13 @@ const state = {
     skinOverrides: [],
     skinOverrideTargetRoot: null
   },
+  arpPreviewClone: {
+    visual: null,
+    refPairs: [],
+    driven: [],
+    hiddenOriginalMeshes: [],
+    lastTime: NaN
+  },
   ghost: {
     enabled: false,
     container: null,
@@ -3249,6 +3256,7 @@ function clearSlot(slot, view) {
   disposeUeArpHelperBridge();
 
   if (slot.kind === 'target') {
+    disposeAutoRigProPreviewClone();
     restoreAutoRigProSkinMatrixOverrides();
     state.arpSkinPreviewCache.targetRoot = null;
     state.arpSkinPreviewCache.weightedNames = null;
@@ -5553,6 +5561,325 @@ function ensureAutoRigProSkinMatrixOverrides() {
   return overrides.length > 0;
 }
 
+function disposeAutoRigProPreviewClone() {
+  const preview = state.arpPreviewClone;
+  if (!preview) return;
+
+  for (const entry of preview.hiddenOriginalMeshes || []) {
+    if (entry?.object) entry.object.visible = entry.visible;
+  }
+
+  if (preview.visual) {
+    targetView.scene.remove(preview.visual);
+
+    preview.visual.traverse(object => {
+      // Geometry is shared by SkeletonUtils.clone; do not dispose it here.
+      if (object.userData?.arpPreviewCloneMaterial) {
+        const materials = Array.isArray(object.material)
+          ? object.material
+          : [object.material];
+
+        for (const material of materials) {
+          if (material && material !== viewportWhiteMaterial) {
+            material.dispose?.();
+          }
+        }
+      }
+    });
+  }
+
+  preview.visual = null;
+  preview.refPairs = [];
+  preview.driven = [];
+  preview.hiddenOriginalMeshes = [];
+  preview.lastTime = NaN;
+}
+
+function ensureAutoRigProPreviewClone() {
+  const preview = state.arpPreviewClone;
+  const tgt = state.target;
+
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !tgt?.root ||
+    !state.targetPreviewClip
+  ) {
+    disposeAutoRigProPreviewClone();
+    return false;
+  }
+
+  if (preview.visual) return true;
+
+  // Never combine the clone approach with the previous Skeleton.update
+  // experiment. The original ARP skeleton must remain completely untouched.
+  restoreAutoRigProSkinMatrixOverrides();
+
+  const originalVisual = tgt.displayRoot || tgt.root;
+  if (!originalVisual) return false;
+
+  updateSlotWorld(tgt);
+
+  const visual = cloneSkeleton(originalVisual);
+  visual.name = 'AutoRigPro_PreviewClone';
+  visual.userData.arpPreviewClone = true;
+
+  // Show only the actual skinned character from the clone. Control shapes and
+  // helper meshes remain on the original asset (which is hidden below).
+  visual.traverse(object => {
+    if (object.isLine || object.isLineSegments || object.isPoints) {
+      object.visible = false;
+      return;
+    }
+
+    if (object.isMesh && !object.isSkinnedMesh) {
+      object.visible = false;
+      return;
+    }
+
+    if (object.isSkinnedMesh) {
+      object.frustumCulled = false;
+    }
+  });
+
+  targetView.scene.add(visual);
+  visual.updateMatrixWorld(true);
+
+  // Hide the original rendered meshes, but leave its bones alive so the
+  // existing target AnimationMixer can keep evaluating the clean *_ref clip.
+  const hiddenOriginalMeshes = [];
+  originalVisual.traverse(object => {
+    if (!object.isMesh) return;
+
+    hiddenOriginalMeshes.push({
+      object,
+      visible: object.visible
+    });
+    object.visible = false;
+  });
+
+  const cloneBones = collectBones(visual);
+  const weightedNames = autoRigProWeightedSkinBoneNames();
+
+  // Pair every animated reference bone from the ORIGINAL target with its clone.
+  const refPairs = [];
+  const refRuntimeNames = new Set();
+
+  for (const [runtimeName, bone] of tgt.bones) {
+    const original = originalObjectName(bone) || runtimeName;
+    if (!/_ref(?:\.|$)/i.test(original)) continue;
+
+    const cloneBone = cloneBones.get(runtimeName);
+    if (!cloneBone) continue;
+
+    refPairs.push({
+      source: bone,
+      clone: cloneBone,
+      runtimeName,
+      original
+    });
+    refRuntimeNames.add(runtimeName);
+  }
+
+  // Reference lookup for fallback assignment.
+  const referenceEntries = refPairs
+    .map(pair => {
+      const rest = tgt.rest.get(pair.runtimeName);
+      if (!rest) return null;
+      return {
+        ...pair,
+        rest
+      };
+    })
+    .filter(Boolean);
+
+  const sideOf = name => {
+    const n = String(name || '').toLowerCase();
+    if (/\.l$|_l$/.test(n)) return 'l';
+    if (/\.r$|_r$/.test(n)) return 'r';
+    return '';
+  };
+
+  const nearestReference = (runtimeName, original) => {
+    const rest = tgt.rest.get(runtimeName);
+    if (!rest) return null;
+
+    const side = sideOf(original);
+    let candidates = referenceEntries.filter(entry => {
+      const refSide = sideOf(entry.original);
+      return side ? refSide === side : !refSide;
+    });
+
+    if (!candidates.length) candidates = referenceEntries;
+
+    let best = null;
+    let bestDistance = Infinity;
+
+    for (const entry of candidates) {
+      const distance = rest.worldPos.distanceToSquared(
+        entry.rest.worldPos
+      );
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        best = entry;
+      }
+    }
+
+    return best;
+  };
+
+  // Build a unique list of weighted clone bones across all SkinnedMeshes.
+  const drivenByName = new Map();
+
+  visual.traverse(object => {
+    if (!object.isSkinnedMesh || !object.skeleton?.bones) return;
+
+    for (const bone of object.skeleton.bones) {
+      if (!bone?.name || !weightedNames.has(bone.name)) continue;
+      if (!drivenByName.has(bone.name)) {
+        drivenByName.set(bone.name, bone);
+      }
+    }
+  });
+
+  const driven = [];
+  let explicitCount = 0;
+  let fallbackCount = 0;
+
+  for (const [runtimeName, cloneBone] of drivenByName) {
+    const originalBone = tgt.bones.get(runtimeName);
+    const original = originalObjectName(originalBone) || runtimeName;
+
+    let refOriginal = autoRigProReferenceForSkinBone(original);
+    let refRuntimeName = refOriginal
+      ? findBoneByOriginalExact(tgt, [refOriginal])
+      : '';
+
+    let refEntry = refRuntimeName
+      ? referenceEntries.find(
+          entry => entry.runtimeName === refRuntimeName
+        )
+      : null;
+
+    if (refEntry) {
+      explicitCount++;
+    } else {
+      refEntry = nearestReference(runtimeName, original);
+      if (refEntry) {
+        refRuntimeName = refEntry.runtimeName;
+        refOriginal = refEntry.original;
+        fallbackCount++;
+      }
+    }
+
+    if (!refEntry) continue;
+
+    // Capture exact bind/rest WORLD before detaching this bone.
+    visual.updateMatrixWorld(true);
+    const bindWorld = cloneBone.matrixWorld.clone();
+
+    driven.push({
+      runtimeName,
+      original,
+      bone: cloneBone,
+      refBone: refEntry.clone,
+      refRuntimeName,
+      refOriginal,
+      refRestWorldInv: refEntry.clone.matrixWorld.clone().invert(),
+      bindWorld
+    });
+  }
+
+  // Flatten ONLY weighted skin bones. Their WORLD rest transforms are
+  // preserved by attach(), therefore existing boneInverses stay valid.
+  // Once flat, no c_*/stretch/twist parent can distort them during playback.
+  driven.sort((a, b) =>
+    boneDepth(a.bone) - boneDepth(b.bone)
+  );
+
+  for (const entry of driven) {
+    if (!entry.bone?.parent) continue;
+    visual.attach(entry.bone);
+  }
+
+  visual.updateMatrixWorld(true);
+
+  preview.visual = visual;
+  preview.refPairs = refPairs;
+  preview.driven = driven;
+  preview.hiddenOriginalMeshes = hiddenOriginalMeshes;
+  preview.lastTime = NaN;
+
+  log(
+    'Mixamo → ARP isolated preview clone: ' +
+    driven.length +
+    ' weighted bones flat · ' +
+    explicitCount +
+    ' por nombre · ' +
+    fallbackCount +
+    ' por referencia REST cercana.'
+  );
+
+  return true;
+}
+
+function updateAutoRigProPreviewClone(force = false) {
+  const preview = state.arpPreviewClone;
+
+  if (
+    !preview?.visual ||
+    state.activePresetId !== 'mixamo_to_arp'
+  ) {
+    return false;
+  }
+
+  if (!force && preview.lastTime === state.playTime) {
+    return true;
+  }
+
+  // Mirror only the clean animated *_ref hierarchy from the original target.
+  for (const pair of preview.refPairs) {
+    pair.clone.position.copy(pair.source.position);
+    pair.clone.quaternion.copy(pair.source.quaternion);
+    pair.clone.scale.copy(pair.source.scale);
+  }
+
+  preview.visual.updateMatrixWorld(true);
+
+  const desiredWorld = new THREE.Matrix4();
+  const desiredLocal = new THREE.Matrix4();
+  const parentInv = new THREE.Matrix4();
+
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+
+  // Each weighted bone is flat/independent. Apply the clean reference delta
+  // to its own original bind transform.
+  for (const entry of preview.driven) {
+    desiredWorld.copy(entry.refBone.matrixWorld)
+      .multiply(entry.refRestWorldInv)
+      .multiply(entry.bindWorld);
+
+    if (entry.bone.parent) {
+      parentInv.copy(entry.bone.parent.matrixWorld).invert();
+      desiredLocal.copy(parentInv).multiply(desiredWorld);
+    } else {
+      desiredLocal.copy(desiredWorld);
+    }
+
+    desiredLocal.decompose(position, quaternion, scale);
+
+    entry.bone.position.copy(position);
+    entry.bone.quaternion.copy(quaternion).normalize();
+    entry.bone.scale.copy(scale);
+  }
+
+  preview.visual.updateMatrixWorld(true);
+  preview.lastTime = state.playTime;
+
+  return true;
+}
+
 function resetAutoRigProReferenceSkinPreview() {
   const tgt = state.target;
   if (!tgt?.root) return;
@@ -6744,17 +7071,23 @@ function applyTargetRigRuntime() {
     const enabled = $('previewDeform')?.checked ?? true;
 
     if (state.activePresetId === 'mixamo_to_arp') {
+      // Keep the original ARP asset as an animation oracle only. The visible
+      // preview is an isolated clone whose weighted bones are detached from
+      // the problematic FBX helper hierarchy.
+      restoreAutoRigProSkinMatrixOverrides();
+
       if (enabled && state.targetPreviewClip) {
-        // The target mixer animates only the clean *_ref hierarchy.
-        // The renderer then receives final skin matrices directly from it.
-        ensureAutoRigProSkinMatrixOverrides();
+        if (ensureAutoRigProPreviewClone()) {
+          updateAutoRigProPreviewClone();
+        }
       } else {
-        restoreAutoRigProSkinMatrixOverrides();
+        disposeAutoRigProPreviewClone();
       }
 
       return;
     }
 
+    disposeAutoRigProPreviewClone();
     restoreAutoRigProSkinMatrixOverrides();
 
     if (!state.targetPreviewClip) {
@@ -6771,8 +7104,8 @@ function applyTargetRigRuntime() {
     return;
   }
 
-  // Preset/target changed away from ARP: never leave a Skeleton.update patch
-  // attached to a previous Target.
+  // Preset/target changed away from ARP: remove all ARP preview-only state.
+  disposeAutoRigProPreviewClone();
   restoreAutoRigProSkinMatrixOverrides();
 
   const runtime = state.target.rigRuntime;
