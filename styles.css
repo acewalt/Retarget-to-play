@@ -1853,7 +1853,9 @@ h2,p{margin:0}
 
   /* Preview block on the left, mapping table on the right. */
   .main-workspace[data-view="mappings"] .mapping-expandable.mapping-workbench{
-    grid-template-columns:clamp(520px,39vw,660px) minmax(0,1fr);
+    /* Give the two preview canvases more horizontal room; Bone Mapping
+       still retains the flexible remainder. */
+    grid-template-columns:clamp(680px,48vw,860px) minmax(0,1fr);
   }
 
   .main-workspace[data-view="mappings"] .mapping-preview-column{
@@ -1892,7 +1894,7 @@ h2,p{margin:0}
   }
 
   .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-pane canvas{
-    width:min(100%, calc((100dvw - 760px) / 2));
+    width:min(100%, calc((100dvw - 610px) / 2));
     max-width:100%;
     height:auto;
     aspect-ratio:1 / 1;
@@ -1908,10 +1910,10 @@ h2,p{margin:0}
   }
 
   .main-workspace[data-view="mappings"] .mapping-expandable.mapping-workbench{
-    grid-template-columns:clamp(430px,40vw,560px) minmax(0,1fr);
+    grid-template-columns:clamp(560px,48vw,700px) minmax(0,1fr);
   }
 
   .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-pane canvas{
-    width:min(100%, calc((100dvw - 650px) / 2));
+    width:min(100%, calc((100dvw - 560px) / 2));
   }
 }
