@@ -11601,6 +11601,379 @@ function buildMixamoAutoRigProCleanCopyBackClip(rawControlClip) {
     return rawControlClip?.clone?.() || rawControlClip;
   }
 
+  // CloudRig-style clean-hierarchy bake for ARP.
+  //
+  // ARP splits Mixamo Hips into TWO sibling branches:
+  //   c_root.x      -> lower body
+  //   c_spine_01.x  -> upper body
+  //
+  // c_root_master.x stays neutral. The common Hips/root_ref delta is therefore
+  // carried independently by both sibling branches instead of rotating the
+  // entire rig as one rigid object.
+  const specs = [
+    ['c_root.x', 'root_ref.x', null],
+    ['c_spine_01.x', 'spine_01_ref.x', null],
+    ['c_spine_02.x', 'spine_02_ref.x', 'c_spine_01.x'],
+
+    ['c_neck.x', 'neck_ref.x', 'c_spine_02.x'],
+    ['c_head.x', 'head_ref.x', 'c_neck.x'],
+
+    ['c_shoulder.l', 'shoulder_ref.l', 'c_spine_02.x'],
+    // Actual ARP FBX: c_arm_fk is a sibling of c_shoulder below spine_02.x.
+    ['c_arm_fk.l', 'arm_ref.l', 'c_spine_02.x'],
+    ['c_forearm_fk.l', 'forearm_ref.l', 'c_arm_fk.l'],
+    ['c_hand_fk.l', 'hand_ref.l', 'c_forearm_fk.l'],
+
+    ['c_shoulder.r', 'shoulder_ref.r', 'c_spine_02.x'],
+    ['c_arm_fk.r', 'arm_ref.r', 'c_spine_02.x'],
+    ['c_forearm_fk.r', 'forearm_ref.r', 'c_arm_fk.r'],
+    ['c_hand_fk.r', 'hand_ref.r', 'c_forearm_fk.r'],
+
+    ['c_thigh_fk.l', 'thigh_ref.l', 'c_root.x'],
+    ['c_leg_fk.l', 'leg_ref.l', 'c_thigh_fk.l'],
+    ['c_foot_fk.l', 'foot_ref.l', 'c_leg_fk.l'],
+    ['c_toes_fk.l', 'toes_ref.l', 'c_foot_fk.l'],
+
+    ['c_thigh_fk.r', 'thigh_ref.r', 'c_root.x'],
+    ['c_leg_fk.r', 'leg_ref.r', 'c_thigh_fk.r'],
+    ['c_foot_fk.r', 'foot_ref.r', 'c_leg_fk.r'],
+    ['c_toes_fk.r', 'toes_ref.r', 'c_foot_fk.r']
+  ];
+
+  for (const side of ['l', 'r']) {
+    for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
+      for (let i = 1; i <= 3; i++) {
+        const control = 'c_' + finger + i + '.' + side;
+        const ref = finger + i + '_ref.' + side;
+        const parent =
+          i === 1
+            ? 'c_hand_fk.' + side
+            : 'c_' + finger + (i - 1) + '.' + side;
+        specs.push([control, ref, parent]);
+      }
+    }
+  }
+
+  restoreRest(tgt);
+  updateSlotWorld(tgt);
+
+  const rootMasterName =
+    findBoneByOriginalExact(tgt, ['c_root_master.x']);
+
+  const rootMaster = rootMasterName
+    ? tgt.bones.get(rootMasterName)
+    : null;
+
+  const rootMasterRest = rootMasterName
+    ? tgt.rest.get(rootMasterName)
+    : null;
+
+  const entries = [];
+
+  for (const [controlOriginal, refOriginal, parentControlOriginal] of specs) {
+    const controlName = findBoneByOriginalExact(tgt, [controlOriginal]);
+    const refName = findBoneByOriginalExact(tgt, [refOriginal]);
+
+    if (!controlName || !refName) continue;
+
+    const control = tgt.bones.get(controlName);
+    const ref = tgt.bones.get(refName);
+    const controlRest = tgt.rest.get(controlName);
+    const refRest = tgt.rest.get(refName);
+
+    if (!control || !ref || !controlRest || !refRest) continue;
+
+    const parentControlName = parentControlOriginal
+      ? findBoneByOriginalExact(tgt, [parentControlOriginal])
+      : rootMasterName;
+
+    const parentControl = parentControlName
+      ? tgt.bones.get(parentControlName)
+      : null;
+
+    const controlRestWorld = new THREE.Matrix4().compose(
+      controlRest.worldPos,
+      controlRest.worldQuat,
+      controlRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    const refRestWorld = new THREE.Matrix4().compose(
+      refRest.worldPos,
+      refRest.worldQuat,
+      refRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    const parentRestWorld = parentControlName
+      ? (
+          parentControlName === rootMasterName && rootMasterRest
+            ? new THREE.Matrix4().compose(
+                rootMasterRest.worldPos,
+                rootMasterRest.worldQuat,
+                rootMasterRest.worldScale || new THREE.Vector3(1, 1, 1)
+              )
+            : (() => {
+                const parentRest = tgt.rest.get(parentControlName);
+                return parentRest
+                  ? new THREE.Matrix4().compose(
+                      parentRest.worldPos,
+                      parentRest.worldQuat,
+                      parentRest.worldScale || new THREE.Vector3(1, 1, 1)
+                    )
+                  : null;
+              })()
+        )
+      : null;
+
+    const logicalRestLocal = parentRestWorld
+      ? parentRestWorld.clone().invert().multiply(controlRestWorld)
+      : controlRestWorld.clone();
+
+    const logicalRestPosition = new THREE.Vector3();
+    const logicalRestQuaternion = new THREE.Quaternion();
+    const logicalRestScale = new THREE.Vector3();
+    logicalRestLocal.decompose(
+      logicalRestPosition,
+      logicalRestQuaternion,
+      logicalRestScale
+    );
+    logicalRestQuaternion.normalize();
+
+    entries.push({
+      controlOriginal,
+      controlName,
+      control,
+      controlRest,
+      refOriginal,
+      refName,
+      ref,
+      refRestWorldInv: refRestWorld.clone().invert(),
+      controlRestWorld,
+      parentControlOriginal,
+      parentControlName,
+      parentControl,
+      logicalRestQuaternion,
+      logicalRestQuaternionInv: logicalRestQuaternion.clone().invert(),
+      q: [],
+      previousQ: null,
+      desiredWorld: new THREE.Matrix4()
+    });
+  }
+
+  if (!entries.length) {
+    return buildMixamoAutoRigProReferenceCopyBackClip(rawControlClip);
+  }
+
+  const entryByControl = new Map(
+    entries.map(entry => [entry.controlName, entry])
+  );
+
+  const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
+  const frameCount = Math.max(
+    2,
+    Math.ceil(refClip.duration * fps) + 1
+  );
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(refClip.duration, i / fps)
+  );
+
+  const baseTracks = rawControlClip.tracks
+    .filter(track => {
+      const parsed = parseTrackTarget(track.name);
+      if (!parsed) return true;
+
+      if (
+        entryByControl.has(parsed.nodeName) &&
+        parsed.property === 'quaternion'
+      ) {
+        return false;
+      }
+
+      // c_root_master is a global carrier, not the Mixamo pelvis.
+      if (
+        rootMasterName &&
+        parsed.nodeName === rootMasterName &&
+        parsed.property === 'quaternion'
+      ) {
+        return false;
+      }
+
+      return true;
+    })
+    .map(track => track.clone());
+
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(refClip).play();
+
+  const refDelta = new THREE.Matrix4();
+  const parentWorldInv = new THREE.Matrix4();
+  const logicalPoseLocal = new THREE.Matrix4();
+
+  const logicalPosePosition = new THREE.Vector3();
+  const logicalPoseQuaternion = new THREE.Quaternion();
+  const logicalPoseScale = new THREE.Vector3();
+
+  const basisDelta = new THREE.Quaternion();
+  const exportLocal = new THREE.Quaternion();
+
+  try {
+    for (const time of times) {
+      restoreRest(tgt);
+      mixer.setTime(Number(time));
+      updateSlotWorld(tgt);
+
+      // First compute the desired WORLD matrix of every clean control from
+      // the corresponding correct *_ref pose.
+      for (const entry of entries) {
+        refDelta.copy(entry.ref.matrixWorld)
+          .multiply(entry.refRestWorldInv);
+
+        entry.desiredWorld.copy(refDelta)
+          .multiply(entry.controlRestWorld);
+      }
+
+      // Then encode each control against the desired parent of the CLEAN
+      // hierarchy, exactly like CloudRig's bakeCleanHierarchyControlClip().
+      for (const entry of entries) {
+        let parentWorld = null;
+
+        if (entry.parentControlName) {
+          const parentEntry = entryByControl.get(entry.parentControlName);
+
+          if (parentEntry) {
+            parentWorld = parentEntry.desiredWorld;
+          } else if (
+            rootMasterName &&
+            entry.parentControlName === rootMasterName &&
+            rootMasterRest
+          ) {
+            parentWorld = new THREE.Matrix4().compose(
+              rootMasterRest.worldPos,
+              rootMasterRest.worldQuat,
+              rootMasterRest.worldScale || new THREE.Vector3(1,1,1)
+            );
+          } else if (entry.parentControl) {
+            parentWorld = entry.parentControl.matrixWorld;
+          }
+        }
+
+        if (parentWorld) {
+          parentWorldInv.copy(parentWorld).invert();
+          logicalPoseLocal.copy(parentWorldInv).multiply(entry.desiredWorld);
+        } else {
+          logicalPoseLocal.copy(entry.desiredWorld);
+        }
+
+        logicalPoseLocal.decompose(
+          logicalPosePosition,
+          logicalPoseQuaternion,
+          logicalPoseScale
+        );
+        logicalPoseQuaternion.normalize();
+
+        // EXACT CloudRig copy-back formula:
+        // logicalPose = logicalRest * matrix_basis
+        // matrix_basis = inverse(logicalRest) * logicalPose
+        basisDelta.copy(entry.logicalRestQuaternionInv)
+          .multiply(logicalPoseQuaternion)
+          .normalize();
+
+        // The FBX carrier still uses the control's REAL imported REST local.
+        // Write restLocal * matrix_basis so Blender FBX import recovers the
+        // same pose-channel rotation when this Action is assigned to the
+        // original Auto Rig Pro rig.
+        exportLocal.copy(entry.controlRest.quaternion)
+          .multiply(basisDelta)
+          .normalize();
+
+        if (
+          entry.previousQ &&
+          entry.previousQ.dot(exportLocal) < 0
+        ) {
+          exportLocal.x *= -1;
+          exportLocal.y *= -1;
+          exportLocal.z *= -1;
+          exportLocal.w *= -1;
+        }
+
+        entry.q.push(
+          exportLocal.x,
+          exportLocal.y,
+          exportLocal.z,
+          exportLocal.w
+        );
+        entry.previousQ = exportLocal.clone();
+      }
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    restoreRest(tgt);
+  }
+
+  const tracks = [...baseTracks];
+
+  // Keep c_root_master rotation neutral for the whole Action.
+  if (rootMasterName && rootMasterRest) {
+    const qValues = [];
+    for (let i = 0; i < times.length; i++) {
+      qValues.push(
+        rootMasterRest.quaternion.x,
+        rootMasterRest.quaternion.y,
+        rootMasterRest.quaternion.z,
+        rootMasterRest.quaternion.w
+      );
+    }
+
+    tracks.push(
+      new THREE.QuaternionKeyframeTrack(
+        rootMasterName + '.quaternion',
+        times,
+        qValues
+      )
+    );
+  }
+
+  for (const entry of entries) {
+    if (entry.q.length === times.length * 4) {
+      tracks.push(
+        new THREE.QuaternionKeyframeTrack(
+          entry.controlName + '.quaternion',
+          times,
+          entry.q
+        )
+      );
+    }
+  }
+
+  log(
+    'Mixamo → ARP clean split: root_master neutral · root_ref→c_root lower · ' +
+    'spine_01_ref→c_spine_01 upper · ' +
+    entries.length +
+    ' controles · logicalPose→matrix_basis→realRestLocal, fórmula CloudRig exacta.'
+  );
+
+  return new THREE.AnimationClip(
+    'Retargeted_FK',
+    refClip.duration,
+    tracks
+  );
+}
+
+
+function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
+  const tgt = state.target;
+  const refClip = state.deformPreviewClip;
+
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !rawControlClip ||
+    !refClip ||
+    !tgt.root
+  ) {
+    return rawControlClip?.clone?.() || rawControlClip;
+  }
+
   // Mixamo -> Auto-Rig Pro copy-back for the ORIGINAL Blender rig.
   //
   // The important ARP split, confirmed by the original hierarchy, is:
@@ -11927,7 +12300,7 @@ function buildMixamoAutoRigProCleanCopyBackClip(rawControlClip) {
   }
 
   log(
-    'Mixamo → ARP OriginalRig v10: Hips ROT→c_root_master · c_root lower neutral · ' +
+    'Mixamo → ARP EXPORT ONLY v10: Hips ROT→c_root_master · c_root lower neutral · ' +
     'Spine→c_spine_01 relative al root_master · c_pos conserva root motion · ' +
     entries.length +
     ' controles recodificados como matrix_basis para el rig original.'
@@ -13108,10 +13481,25 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
     usesAutoRigProPipeline() &&
     state.activePresetId === 'mixamo_to_arp'
   ) {
-    // CloudRig parity: export exactly the Action the user chose.
-    // Transfer produces FK. FK->IK remains an explicit user operation instead
-    // of silently mixing both solvers into the copy-back Action.
-    const selectedRuntimeClip = state.exportClip || state.fkClip;
+    // IMPORTANT: keep Transfer/viewport EXACTLY on the known-good Mixamo→ARP
+    // solver. Recode only the FBX Action that will be copied to the ORIGINAL
+    // Auto-Rig Pro armature in Blender.
+    //
+    // FK export uses the untouched raw retarget as input, then applies the
+    // original-rig c_root_master/c_root/c_spine split only here.
+    // If the user explicitly converted FK→IK, preserve that selected IK Action
+    // instead of silently replacing it with a new FK solve.
+    const isFkExport =
+      !state.ikOnlyClip ||
+      state.exportClip === state.fkClip ||
+      state.exportClip?.name === 'Retargeted_FK';
+
+    const selectedRuntimeClip = isFkExport
+      ? buildMixamoAutoRigProOriginalRigExportClip(
+          state.fkRawClip || state.fkClip
+        )
+      : (state.exportClip || state.fkClip);
+
     const controlClip = buildOriginalRigControlOnlyClip(
       withTargetNeutralBaseline(selectedRuntimeClip)
     );
@@ -13123,10 +13511,9 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
         controlClip,
         state.target
       );
-      originalRigAction.name =
-        selectedRuntimeClip === state.fkClip
-          ? 'Retargeted_OriginalRig_FK'
-          : (selectedRuntimeClip.name || 'Retargeted_OriginalRig');
+      originalRigAction.name = isFkExport
+        ? 'Retargeted_OriginalRig_FK'
+        : (selectedRuntimeClip.name || 'Retargeted_OriginalRig');
     }
   } else {
     const exportWithNeutralBase = withTargetNeutralBaseline(state.exportClip);
