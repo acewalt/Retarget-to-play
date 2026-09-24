@@ -6200,16 +6200,18 @@ function applyRetarget() {
       ? buildOriginalRigTransferClip(state.fkRawClip)
       : usesRigifyPipeline()
         ? buildRigifyOriginalRigTransferClip(state.fkRawClip)
-        : usesAutoRigProPipeline()
-          ? buildAutoRigProOriginalRigTransferClip(state.fkRawClip)
-          : state.fkRawClip.clone();
+        : usesUeToAutoRigProPipeline()
+          ? buildUeAutoRigProReferenceAction(state.fkRawClip)
+          : usesAutoRigProPipeline()
+            ? buildAutoRigProOriginalRigTransferClip(state.fkRawClip)
+            : state.fkRawClip.clone();
 
     state.fkClip.name = 'Retargeted_FK';
 
     if (usesUeToAutoRigProPipeline()) {
       log(
-        'UE → Auto-Rig Pro FK: usando el mismo método OriginalRig probado ' +
-        'en UE → CloudRig (WORLD pose → parent lógico → matrix_basis).'
+        'UE → Auto-Rig Pro FK: usando la rama *_ref del propio ARP como ' +
+        'jerarquía anatómica para reconstruir matrix_basis.'
       );
     }
     state.ikOnlyClip = null;
@@ -8805,6 +8807,278 @@ for (const side of ['l', 'r']) {
     AUTO_RIG_PRO_LOGICAL_PARENT[`c_${finger}3.${side}`] =
       `c_${finger}2.${side}`;
   }
+}
+
+
+const AUTO_RIG_PRO_CONTROL_TO_REFERENCE = {
+  'c_root.x': 'root_ref.x',
+  'c_spine_01.x': 'spine_01_ref.x',
+  'c_spine_02.x': 'spine_02_ref.x',
+  'c_neck.x': 'neck_ref.x',
+  'c_head.x': 'head_ref.x',
+  'c_shoulder.l': 'shoulder_ref.l',
+  'c_arm_fk.l': 'arm_ref.l',
+  'c_forearm_fk.l': 'forearm_ref.l',
+  'c_hand_fk.l': 'hand_ref.l',
+  'c_shoulder.r': 'shoulder_ref.r',
+  'c_arm_fk.r': 'arm_ref.r',
+  'c_forearm_fk.r': 'forearm_ref.r',
+  'c_hand_fk.r': 'hand_ref.r',
+  'c_thigh_fk.l': 'thigh_ref.l',
+  'c_leg_fk.l': 'leg_ref.l',
+  'c_foot_fk.l': 'foot_ref.l',
+  'c_toes_fk.l': 'toes_ref.l',
+  'c_thigh_fk.r': 'thigh_ref.r',
+  'c_leg_fk.r': 'leg_ref.r',
+  'c_foot_fk.r': 'foot_ref.r',
+  'c_toes_fk.r': 'toes_ref.r'
+};
+
+for (const side of ['l', 'r']) {
+  for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
+    for (let i = 1; i <= 3; i++) {
+      AUTO_RIG_PRO_CONTROL_TO_REFERENCE[
+        'c_' + finger + i + '.' + side
+      ] = finger + i + '_ref.' + side;
+    }
+  }
+}
+
+function buildUeAutoRigProReferenceAction(rawClip) {
+  const tgt = state.target;
+  if (!rawClip || !tgt.root) return rawClip;
+
+  const sourceTracks = rawClip.tracks.map(track => track.clone());
+  const entries = [];
+  const reverse = new Map();
+
+  for (const [name, bone] of tgt.bones) reverse.set(bone, name);
+
+  for (const pair of validMap()) {
+    if (!String(pair.channels || 'ROT').toUpperCase().includes('ROT')) continue;
+
+    const control = tgt.bones.get(pair.target);
+    if (!control) continue;
+
+    const controlOriginal = originalObjectName(control) || pair.target;
+    const refOriginal = AUTO_RIG_PRO_CONTROL_TO_REFERENCE[controlOriginal];
+    if (!refOriginal) continue;
+
+    const refName = findBoneByOriginalExact(tgt, [refOriginal]);
+    const controlRest = tgt.rest.get(pair.target);
+    const refRest = refName ? tgt.rest.get(refName) : null;
+    if (!refName || !controlRest || !refRest) continue;
+
+    let parent = tgt.bones.get(refName)?.parent || null;
+    let parentRefName = '';
+
+    while (parent) {
+      const parentName = reverse.get(parent);
+      const parentOriginal = parentName
+        ? (originalObjectName(parent) || parentName)
+        : '';
+
+      if (parentName && /_ref(?:\.|$)/i.test(parentOriginal)) {
+        parentRefName = parentName;
+        break;
+      }
+      parent = parent.parent;
+    }
+
+    entries.push({
+      controlName: pair.target,
+      controlRest,
+      refName,
+      refRest,
+      parentRefName,
+      values: [],
+      previous: null
+    });
+  }
+
+  if (entries.length < 12) {
+    log(
+      'UE -> ARP ref solver: referencias insuficientes (' +
+      entries.length +
+      '), usando fallback anterior.'
+    );
+    return buildAutoRigProOriginalRigTransferClip(rawClip);
+  }
+
+  restoreRest(tgt);
+  tgt.mixer?.stopAllAction();
+
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(rawClip).play();
+
+  const refParent = new Map(entries.map(e => [e.refName, e.parentRefName]));
+  const entryByRef = new Map(entries.map(e => [e.refName, e]));
+
+  try {
+    for (const trackTime of Array.from(
+      sourceTracks.find(t => parseTrackTarget(t.name)?.property === 'quaternion')?.times || []
+    )) {
+      restoreRest(tgt);
+      mixer.setTime(Number(trackTime));
+      updateSlotWorld(tgt);
+
+      const desiredRef = new Map();
+
+      for (const entry of entries) {
+        const control = tgt.bones.get(entry.controlName);
+        if (!control) continue;
+
+        const controlWorld = control.getWorldQuaternion(
+          new THREE.Quaternion()
+        ).normalize();
+
+        const worldDelta = controlWorld.clone()
+          .multiply(entry.controlRest.worldQuat.clone().invert())
+          .normalize();
+
+        desiredRef.set(
+          entry.refName,
+          worldDelta
+            .multiply(entry.refRest.worldQuat.clone())
+            .normalize()
+        );
+      }
+
+      const poseCache = new Map();
+
+      const refPose = refName => {
+        if (!refName) return null;
+        if (poseCache.has(refName)) return poseCache.get(refName).clone();
+        if (desiredRef.has(refName)) {
+          const q = desiredRef.get(refName).clone();
+          poseCache.set(refName, q.clone());
+          return q;
+        }
+
+        const rest = tgt.rest.get(refName);
+        if (!rest) return null;
+
+        const bone = tgt.bones.get(refName);
+        let parent = bone?.parent || null;
+        let parentName = '';
+
+        while (parent) {
+          const n = reverse.get(parent);
+          const o = n ? (originalObjectName(parent) || n) : '';
+          if (n && /_ref(?:\.|$)/i.test(o)) {
+            parentName = n;
+            break;
+          }
+          parent = parent.parent;
+        }
+
+        if (!parentName) {
+          poseCache.set(refName, rest.worldQuat.clone());
+          return rest.worldQuat.clone();
+        }
+
+        const parentRest = tgt.rest.get(parentName);
+        const parentPose = refPose(parentName);
+        if (!parentRest || !parentPose) return rest.worldQuat.clone();
+
+        const rel = parentRest.worldQuat.clone()
+          .invert()
+          .multiply(rest.worldQuat)
+          .normalize();
+
+        const q = parentPose.multiply(rel).normalize();
+        poseCache.set(refName, q.clone());
+        return q;
+      };
+
+      for (const entry of entries) {
+        const childPose = desiredRef.get(entry.refName);
+        if (!childPose) continue;
+
+        let basis;
+
+        if (entry.parentRefName) {
+          const parentRest = tgt.rest.get(entry.parentRefName);
+          const parentPose = refPose(entry.parentRefName);
+          if (!parentRest || !parentPose) continue;
+
+          const restRelative = parentRest.worldQuat.clone()
+            .invert()
+            .multiply(entry.refRest.worldQuat)
+            .normalize();
+
+          const poseRelative = parentPose.clone()
+            .invert()
+            .multiply(childPose)
+            .normalize();
+
+          basis = restRelative.clone()
+            .invert()
+            .multiply(poseRelative)
+            .normalize();
+        } else {
+          basis = entry.refRest.worldQuat.clone()
+            .invert()
+            .multiply(childPose)
+            .normalize();
+        }
+
+        const q = entry.controlRest.quaternion.clone()
+          .multiply(basis)
+          .normalize();
+
+        if (entry.previous && entry.previous.dot(q) < 0) {
+          q.x *= -1;
+          q.y *= -1;
+          q.z *= -1;
+          q.w *= -1;
+        }
+
+        entry.values.push(q.x, q.y, q.z, q.w);
+        entry.previous = q.clone();
+      }
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    restoreRest(tgt);
+  }
+
+  const sampleTimes = Array.from(
+    sourceTracks.find(t => parseTrackTarget(t.name)?.property === 'quaternion')?.times || []
+  );
+
+  const replacements = new Map();
+
+  for (const entry of entries) {
+    if (entry.values.length !== sampleTimes.length * 4) continue;
+
+    const name = entry.controlName + '.quaternion';
+    replacements.set(
+      name,
+      new THREE.QuaternionKeyframeTrack(
+        name,
+        sampleTimes,
+        entry.values
+      )
+    );
+  }
+
+  const tracks = sourceTracks.map(
+    track => replacements.get(track.name) || track
+  );
+
+  log(
+    'UE -> Auto-Rig Pro: ' +
+    replacements.size +
+    ' controles reconstruidos usando root_ref / spine_ref / limb_ref.'
+  );
+
+  return new THREE.AnimationClip(
+    'Retargeted_FK',
+    rawClip.duration,
+    tracks
+  );
 }
 
 function buildAutoRigProOriginalRigTransferClip(clip) {
