@@ -3981,7 +3981,7 @@ function drawMappingSkeleton(canvas, slot, side, selectedName) {
     ctx.moveTo(a.x,a.y);
     ctx.lineTo(b.x,b.y);
     ctx.strokeStyle=highlighted ? selectedColor : lineColor;
-    ctx.lineWidth=highlighted ? 3 : 1.35;
+    ctx.lineWidth=highlighted ? 3.5 : 1.75;
     ctx.globalAlpha=highlighted ? 1 : 0.74;
     ctx.stroke();
   }
@@ -4000,14 +4000,14 @@ function drawMappingSkeleton(canvas, slot, side, selectedName) {
     }
 
     ctx.beginPath();
-    ctx.arc(q.x,q.y,highlighted ? 5 : 2.15,0,Math.PI*2);
+    ctx.arc(q.x,q.y,highlighted ? 7 : 4,0,Math.PI*2);
     ctx.fillStyle=highlighted ? selectedColor : nodeColor;
     ctx.globalAlpha=highlighted ? 1 : 0.88;
     ctx.fill();
 
     if(highlighted) {
       ctx.beginPath();
-      ctx.arc(q.x,q.y,8,0,Math.PI*2);
+      ctx.arc(q.x,q.y,11,0,Math.PI*2);
       ctx.strokeStyle='rgba(250,204,21,.32)';
       ctx.lineWidth=4;
       ctx.stroke();
@@ -4137,7 +4137,7 @@ function mappingPreviewBoneAtPoint(side,x,y) {
     }
   }
 
-  if(bestDistance<=18) return bestName;
+  if(bestDistance<=24) return bestName;
 
   // Clicking near a bone line selects the child bone represented by that line.
   for(const segment of hits.segments || []) {
@@ -4153,7 +4153,7 @@ function mappingPreviewBoneAtPoint(side,x,y) {
     }
   }
 
-  return bestDistance<=14 ? bestName : '';
+  return bestDistance<=18 ? bestName : '';
 }
 
 function mappingPreviewPairIndexForBone(side,boneName) {
@@ -4210,7 +4210,7 @@ function refreshMapUi() {
   const targetNames = [...state.target.bones.keys()].sort();
   if (!state.source.root || !state.target.root) {
     host.className = 'bone-map empty';
-    host.textContent = 'Carga ambos FBX.';
+    host.textContent = 'Carga ambos FBX para ver los pares de Mapping aquí.';
     $('mapCount').textContent = '0 / 0 válidos';
     state.mappingPreviewSelectedIndex = null;
     renderMappingSkeletonPreview();
