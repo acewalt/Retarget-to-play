@@ -5430,9 +5430,72 @@ function ensureAutoRigProSkinMatrixOverrides() {
     reverseTarget.set(bone, runtimeName);
   }
 
+  const weightedNames = autoRigProWeightedSkinBoneNames();
+
+  const refCandidates = [];
+  for (const [runtimeName, bone] of tgt.bones) {
+    const original = originalObjectName(bone) || runtimeName;
+    if (!/_ref(?:\.|$)/i.test(original)) continue;
+
+    const rest = tgt.rest.get(runtimeName);
+    if (!rest) continue;
+
+    const restWorld = new THREE.Matrix4().compose(
+      rest.worldPos,
+      rest.worldQuat,
+      rest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    refCandidates.push({
+      runtimeName,
+      original,
+      bone,
+      rest,
+      restWorldInv: restWorld.clone().invert()
+    });
+  }
+
+  const sideOf = name => {
+    const n = String(name || '').toLowerCase();
+    if (/\.l$|_l$/.test(n)) return 'l';
+    if (/\.r$|_r$/.test(n)) return 'r';
+    return '';
+  };
+
+  const nearestReference = (runtimeName, original) => {
+    const drivenRest = tgt.rest.get(runtimeName);
+    if (!drivenRest || !refCandidates.length) return null;
+
+    const side = sideOf(original);
+
+    let candidates = refCandidates.filter(candidate => {
+      const refSide = sideOf(candidate.original);
+      return side ? refSide === side : !refSide;
+    });
+
+    if (!candidates.length) candidates = refCandidates;
+
+    let best = null;
+    let bestDist = Infinity;
+
+    for (const candidate of candidates) {
+      const dist = drivenRest.worldPos.distanceToSquared(
+        candidate.rest.worldPos
+      );
+
+      if (dist < bestDist) {
+        bestDist = dist;
+        best = candidate;
+      }
+    }
+
+    return best;
+  };
+
   const overrides = [];
-  const mappedNames = new Set();
-  const skeletonNames = new Set();
+  const explicitMapped = new Set();
+  const fallbackMapped = new Set();
+  const stillUnmapped = new Set();
 
   tgt.root.traverse(object => {
     if (!object.isSkinnedMesh || !object.skeleton?.bones) return;
@@ -5444,57 +5507,67 @@ function ensureAutoRigProSkinMatrixOverrides() {
       const bone = skeleton.bones[i];
       if (!bone) continue;
 
-      skeletonNames.add(bone.name);
-
       const runtimeName =
         reverseTarget.get(bone) ||
         (tgt.bones.has(bone.name) ? bone.name : '');
 
-      if (!runtimeName) continue;
+      // Only override bones that actually influence vertices.
+      if (!runtimeName || !weightedNames.has(runtimeName)) continue;
 
       const original = originalObjectName(bone) || runtimeName;
-      const refOriginal = autoRigProReferenceForSkinBone(original);
-      if (!refOriginal) continue;
 
-      const refName = findBoneByOriginalExact(tgt, [refOriginal]);
-      const refBone = refName ? tgt.bones.get(refName) : null;
-      const refRest = refName ? tgt.rest.get(refName) : null;
-      const drivenRest = tgt.rest.get(runtimeName);
+      let refOriginal = autoRigProReferenceForSkinBone(original);
+      let refName = refOriginal
+        ? findBoneByOriginalExact(tgt, [refOriginal])
+        : '';
 
-      if (!refBone || !refRest || !drivenRest) continue;
+      let refEntry = refName
+        ? refCandidates.find(candidate => candidate.runtimeName === refName)
+        : null;
 
-      const refRestWorld = new THREE.Matrix4().compose(
-        refRest.worldPos,
-        refRest.worldQuat,
-        refRest.worldScale || new THREE.Vector3(1, 1, 1)
-      );
+      if (refEntry) {
+        explicitMapped.add(original);
+      } else {
+        // Last-resort anatomical fallback: a weighted helper must NEVER be
+        // left on the broken ARP FBX hierarchy while neighbouring weights use
+        // *_ref. Pick the closest reference joint in REST, respecting L/R.
+        refEntry = nearestReference(runtimeName, original);
 
-      const drivenRestWorld = new THREE.Matrix4().compose(
-        drivenRest.worldPos,
-        drivenRest.worldQuat,
-        drivenRest.worldScale || new THREE.Vector3(1, 1, 1)
-      );
+        if (refEntry) {
+          refName = refEntry.runtimeName;
+          refOriginal = refEntry.original;
+          fallbackMapped.add(original + '→' + refOriginal);
+        }
+      }
+
+      if (!refEntry) {
+        stillUnmapped.add(original);
+        continue;
+      }
 
       bindingsByIndex[i] = {
-        refBone,
-        refToDrivenRest: refRestWorld
-          .invert()
-          .multiply(drivenRestWorld)
+        refBone: refEntry.bone,
+        refRestWorldInv: refEntry.restWorldInv
       };
-
-      mappedNames.add(original);
     }
 
     if (!bindingsByIndex.some(Boolean)) return;
 
     const originalUpdate = skeleton.update;
     const offsetMatrix = new THREE.Matrix4();
-    const desiredWorld = new THREE.Matrix4();
+    const refDelta = new THREE.Matrix4();
 
-    // Viewport-only skinning override:
-    // do NOT move ARP's actual bones. Build the final skin matrices directly
-    // from the clean animated *_ref skeleton. This bypasses the exported FBX
-    // helper/stretch/twist hierarchy entirely.
+    // Final boneMatrices are written as PURE reference deltas:
+    //
+    //   skinMatrix = refPoseWorld * inverse(refRestWorld)
+    //
+    // This is equivalent to:
+    //   desiredBoneWorld * inverse(bindBoneWorld)
+    // when desiredBoneWorld = refDelta * bindBoneWorld.
+    //
+    // Therefore every helper/twist/stretch bone assigned to the same segment
+    // receives the exact same deformation delta, regardless of its strange
+    // FBX parent or rest pivot.
     skeleton.update = function () {
       const bones = this.bones;
       const inverses = this.boneInverses;
@@ -5509,19 +5582,18 @@ function ensureAutoRigProSkinMatrixOverrides() {
         const binding = bindingsByIndex[i];
 
         if (binding?.refBone) {
-          desiredWorld.copy(binding.refBone.matrixWorld)
-            .multiply(binding.refToDrivenRest);
+          refDelta.copy(binding.refBone.matrixWorld)
+            .multiply(binding.refRestWorldInv);
 
-          offsetMatrix.copy(desiredWorld)
-            .multiply(inverse);
+          refDelta.toArray(boneMatrices, i * 16);
         } else if (bone) {
           offsetMatrix.copy(bone.matrixWorld)
             .multiply(inverse);
+          offsetMatrix.toArray(boneMatrices, i * 16);
         } else {
           offsetMatrix.identity();
+          offsetMatrix.toArray(boneMatrices, i * 16);
         }
-
-        offsetMatrix.toArray(boneMatrices, i * 16);
       }
 
       if (this.boneTexture) {
@@ -5541,13 +5613,19 @@ function ensureAutoRigProSkinMatrixOverrides() {
   cache.skinOverrideTargetRoot = tgt.root;
 
   log(
-    'Mixamo → ARP matrix-skin preview: ' +
-    overrides.length +
-    ' Skeleton(s) intervenidos · ' +
-    mappedNames.size +
-    '/' +
-    skeletonNames.size +
-    ' bones anatómicos redirigidos a *_ref · jerarquía ARP intacta.'
+    'Mixamo → ARP matrix-skin v2: ' +
+    explicitMapped.size +
+    ' bones por nombre · ' +
+    fallbackMapped.size +
+    ' helpers por referencia REST cercana · ' +
+    stillUnmapped.size +
+    ' weighted bones sin resolver.' +
+    (fallbackMapped.size
+      ? ' Fallback: ' + [...fallbackMapped].slice(0, 16).join(', ')
+      : '') +
+    (stillUnmapped.size
+      ? ' Sin resolver: ' + [...stillUnmapped].slice(0, 16).join(', ')
+      : '')
   );
 
   return overrides.length > 0;
