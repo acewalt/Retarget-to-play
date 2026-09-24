@@ -5711,7 +5711,220 @@ function rigifyPreviewBodyContext() {
   };
 }
 
+const AUTO_RIG_PRO_PREVIEW_BINDINGS = [
+  // The original ARP .blend evaluates these as one anatomical chain through
+  // constraints/helpers. The exported FBX does not preserve that functional
+  // parenting, so reconstruct it explicitly for VIEWPORT ONLY.
+  { driver: 'c_spine_01.x', driven: 'spine_01.x', parent: 'root.x' },
+  { driver: 'c_spine_02.x', driven: 'spine_02.x', parent: 'spine_01.x' },
+
+  // c_neck.x is already parented below spine_02.x in the FBX, so neck.x can
+  // follow it naturally. c_head.x lives in a separate head_scale_fix branch.
+  { driver: 'c_head.x', driven: 'head.x', parent: 'neck.x' },
+
+  { driver: 'c_arm_fk.l', driven: 'arm.l', parent: 'c_shoulder.l' },
+  { driver: 'c_forearm_fk.l', driven: 'forearm.l', parent: 'arm.l' },
+  { driver: 'c_hand_fk.l', driven: 'hand.l', parent: 'forearm.l' },
+
+  { driver: 'c_arm_fk.r', driven: 'arm.r', parent: 'c_shoulder.r' },
+  { driver: 'c_forearm_fk.r', driven: 'forearm.r', parent: 'arm.r' },
+  { driver: 'c_hand_fk.r', driven: 'hand.r', parent: 'forearm.r' },
+
+  { driver: 'c_thigh_fk.l', driven: 'thigh.l', parent: 'c_thigh_b.l' },
+  { driver: 'c_leg_fk.l', driven: 'leg.l', parent: 'thigh.l' },
+  { driver: 'c_foot_fk.l', driven: 'foot.l', parent: 'leg.l' },
+  { driver: 'c_toes_fk.l', driven: 'toes_01.l', parent: 'foot.l' },
+
+  { driver: 'c_thigh_fk.r', driven: 'thigh.r', parent: 'c_thigh_b.r' },
+  { driver: 'c_leg_fk.r', driven: 'leg.r', parent: 'thigh.r' },
+  { driver: 'c_foot_fk.r', driven: 'foot.r', parent: 'leg.r' },
+  { driver: 'c_toes_fk.r', driven: 'toes_01.r', parent: 'foot.r' }
+];
+
+function autoRigProPreviewResolvedBindings() {
+  const tgt = state.target;
+  if (!tgt?.root) return [];
+
+  return AUTO_RIG_PRO_PREVIEW_BINDINGS
+    .map(spec => {
+      const driver = findBoneByOriginalExact(tgt, [spec.driver]);
+      const driven = findBoneByOriginalExact(tgt, [spec.driven]);
+      const parent = findBoneByOriginalExact(tgt, [spec.parent]);
+
+      if (!driver || !driven || !parent) return null;
+
+      return {
+        ...spec,
+        driver,
+        driven,
+        parent
+      };
+    })
+    .filter(Boolean);
+}
+
+function resetAutoRigProPreviewDriven() {
+  const tgt = state.target;
+  if (!tgt?.root) return;
+
+  for (const binding of autoRigProPreviewResolvedBindings()) {
+    const bone = tgt.bones.get(binding.driven);
+    const rest = tgt.rest.get(binding.driven);
+    if (!bone || !rest) continue;
+
+    bone.position.copy(rest.position);
+    bone.quaternion.copy(rest.quaternion);
+    bone.scale.copy(rest.scale);
+  }
+
+  updateSlotWorld(tgt);
+}
+
+function applyAutoRigProPreviewRuntime() {
+  const tgt = state.target;
+
+  if (
+    !usesAutoRigProPipeline() ||
+    !tgt?.root ||
+    !state.targetPreviewClip
+  ) {
+    return;
+  }
+
+  const bindings = autoRigProPreviewResolvedBindings();
+  if (!bindings.length) return;
+
+  // Mixer has already evaluated c_* controls for this frame. Reset only the
+  // deform bones reconstructed by this runtime, then rebuild them parent-first.
+  for (const binding of bindings) {
+    const drivenBone = tgt.bones.get(binding.driven);
+    const drivenRest = tgt.rest.get(binding.driven);
+    if (!drivenBone || !drivenRest) continue;
+
+    drivenBone.position.copy(drivenRest.position);
+    drivenBone.quaternion.copy(drivenRest.quaternion);
+    drivenBone.scale.copy(drivenRest.scale);
+  }
+
+  updateSlotWorld(tgt);
+
+  const driverBasis = new THREE.Quaternion();
+  const controlToDriven = new THREE.Quaternion();
+  const drivenBasis = new THREE.Quaternion();
+
+  const parentRestWorld = new THREE.Matrix4();
+  const drivenRestWorld = new THREE.Matrix4();
+  const restRelative = new THREE.Matrix4();
+  const basisMatrix = new THREE.Matrix4();
+  const desiredWorld = new THREE.Matrix4();
+  const desiredLocal = new THREE.Matrix4();
+  const parentWorldInv = new THREE.Matrix4();
+
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+
+  for (const binding of bindings) {
+    const driverBone = tgt.bones.get(binding.driver);
+    const drivenBone = tgt.bones.get(binding.driven);
+    const logicalParent = tgt.bones.get(binding.parent);
+
+    const driverRest = tgt.rest.get(binding.driver);
+    const drivenRest = tgt.rest.get(binding.driven);
+    const logicalParentRest = tgt.rest.get(binding.parent);
+
+    if (
+      !driverBone ||
+      !drivenBone ||
+      !logicalParent ||
+      !driverRest ||
+      !drivenRest ||
+      !logicalParentRest
+    ) {
+      continue;
+    }
+
+    // state.fkClip stores FBX local rest * Blender matrix_basis.
+    // Recover matrix_basis directly from the animated c_* local quaternion.
+    driverBasis.copy(driverRest.quaternion)
+      .invert()
+      .multiply(driverBone.quaternion)
+      .normalize();
+
+    // Express that same rotation delta in the deform bone's REST axes.
+    controlToDriven.copy(drivenRest.worldQuat)
+      .invert()
+      .multiply(driverRest.worldQuat)
+      .normalize();
+
+    drivenBasis.copy(controlToDriven)
+      .multiply(driverBasis)
+      .multiply(controlToDriven.clone().invert())
+      .normalize();
+
+    parentRestWorld.compose(
+      logicalParentRest.worldPos,
+      logicalParentRest.worldQuat,
+      logicalParentRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    drivenRestWorld.compose(
+      drivenRest.worldPos,
+      drivenRest.worldQuat,
+      drivenRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    restRelative.copy(parentRestWorld)
+      .invert()
+      .multiply(drivenRestWorld);
+
+    basisMatrix.makeRotationFromQuaternion(drivenBasis);
+
+    // Recreate the transform the deform bone would have if it really lived
+    // below its functional ARP parent. This fixes BOTH orientation and pivot
+    // position, which a rotation-only deform bake cannot do.
+    desiredWorld.copy(logicalParent.matrixWorld)
+      .multiply(restRelative)
+      .multiply(basisMatrix);
+
+    if (drivenBone.parent) {
+      parentWorldInv.copy(drivenBone.parent.matrixWorld).invert();
+      desiredLocal.copy(parentWorldInv).multiply(desiredWorld);
+    } else {
+      desiredLocal.copy(desiredWorld);
+    }
+
+    desiredLocal.decompose(position, quaternion, scale);
+
+    drivenBone.position.copy(position);
+    drivenBone.quaternion.copy(quaternion).normalize();
+    drivenBone.scale.copy(scale);
+
+    updateSlotWorld(tgt);
+  }
+}
+
 function applyTargetRigRuntime() {
+  // Auto-Rig Pro has no WaltFBX runtime in walt-fbx-loader. Its deform bones
+  // are interleaved with animator controls, so reconstruct the missing
+  // Blender functional hierarchy locally in app.js.
+  if (usesAutoRigProPipeline()) {
+    if (!state.targetPreviewClip) {
+      resetAutoRigProPreviewDriven();
+      return;
+    }
+
+    const enabled = $('previewDeform')?.checked ?? true;
+
+    if (enabled) {
+      applyAutoRigProPreviewRuntime();
+    } else {
+      resetAutoRigProPreviewDriven();
+    }
+
+    return;
+  }
+
   const runtime = state.target.rigRuntime;
   if (!runtime) return;
 
@@ -5720,22 +5933,6 @@ function applyTargetRigRuntime() {
   if (!state.targetPreviewClip) {
     runtime.enabled = false;
     runtime.resetDriven();
-    return;
-  }
-
-  // Auto-Rig Pro preview is already a DIRECT bake on the embedded deform
-  // skeleton. Running WaltRig FK->DEF again on top of those tracks applies a
-  // second deformation pass and produces the characteristic stretched /
-  // exploded limbs seen in Mixamo -> ARP.
-  //
-  // Do not call resetDriven() here: the current AnimationMixer frame owns the
-  // deform transforms and must remain untouched.
-  if (
-    usesAutoRigProPipeline() &&
-    state.deformPreviewClip &&
-    state.targetPreviewClip
-  ) {
-    runtime.enabled = false;
     return;
   }
 
@@ -5751,7 +5948,6 @@ function applyTargetRigRuntime() {
     runtime.resetDriven();
   }
 }
-
 
 function collectRigifyViewportDefBindings() {
   const tgt = state.target;
@@ -6287,18 +6483,21 @@ function rebuildTargetPreviewClip() {
     return;
   }
 
-  if (usesAutoRigProPipeline() && state.deformPreviewClip) {
-    // ARP's deform bones are interleaved with the control hierarchy.
-    // Replaying Ctrl_* / c_* and deform tracks together reproduces missing
-    // Blender constraints twice. The page preview therefore uses the clean
-    // deform bake only; generated IK controls may be overlaid safely because
-    // they are independent root-level controls in the exported FBX.
+  if (usesAutoRigProPipeline()) {
+    // Preview the SAME portable c_* Action intended for the original ARP rig,
+    // then reconstruct its missing constraint/helper result live on deform
+    // bones. Do not play Retargeted_DEF_Preview in the viewport: that direct
+    // bake cannot preserve ARP's functional pivots and is what stretched the
+    // mesh.
+    const controlPreview = state.fkClip || state.fkRawClip;
+
     state.targetPreviewClip = state.ikOnlyClip
       ? mergeClips(
           'AutoRigPro_Viewport_Preview',
-          [state.deformPreviewClip, state.ikOnlyClip]
+          [controlPreview, state.ikOnlyClip]
         )
-      : state.deformPreviewClip;
+      : controlPreview;
+
     return;
   }
 
