@@ -5073,6 +5073,272 @@ function buildAutoRigProDeformPreviewMap() {
   return pairs;
 }
 
+function buildMixamoToArpReferencePreviewMap() {
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !usesAutoRigProPipeline()
+  ) {
+    return [];
+  }
+
+  const tgt = state.target;
+  const pairs = [];
+
+  // Build the preview against ARP's clean *_ref hierarchy instead of against
+  // c_* controls or the interleaved deform/helper tree.
+  for (const pair of validMap()) {
+    if (!String(pair.channels || 'ROT').toUpperCase().includes('ROT')) {
+      continue;
+    }
+
+    const control = tgt.bones.get(pair.target);
+    if (!control) continue;
+
+    const controlOriginal = originalObjectName(control) || pair.target;
+    const refOriginal =
+      AUTO_RIG_PRO_CONTROL_TO_REFERENCE[controlOriginal] || '';
+
+    if (!refOriginal) continue;
+
+    const refTarget = findBoneByOriginalExact(tgt, [refOriginal]);
+    if (!refTarget) continue;
+
+    pairs.push({
+      ...pair,
+      target: refTarget,
+      targetSpec: refOriginal,
+      profile: 'auto-rig-pro-reference-preview'
+    });
+  }
+
+  // Root motion for the viewport only. The export Action keeps its original
+  // c_pos / c_root_master split.
+  const hips =
+    findSemanticBone(state.source, 'Hips') ||
+    findBoneByOriginalExact(state.source, [
+      'mixamorig1:Hips',
+      'mixamorig:Hips',
+      'Hips'
+    ]);
+
+  const rootRef = findBoneByOriginalExact(tgt, ['root_ref.x']);
+
+  if (hips && rootRef) {
+    pairs.push({
+      source: hips,
+      target: rootRef,
+      sourceSpec: 'Hips',
+      targetSpec: 'root_ref.x',
+      channels: 'LOC',
+      axes: 'XYZ',
+      locSpace: 'world',
+      influence: 1,
+      profile: 'auto-rig-pro-reference-preview'
+    });
+  }
+
+  return pairs;
+}
+
+const AUTO_RIG_PRO_REF_TO_SKIN = {
+  'spine_01_ref.x': ['spine_01.x'],
+  'spine_02_ref.x': ['spine_02.x'],
+  'neck_ref.x': ['neck.x'],
+  'head_ref.x': ['head.x'],
+
+  'shoulder_ref.l': ['shoulder.l'],
+  'arm_ref.l': ['arm_stretch.l', 'arm.l'],
+  'forearm_ref.l': ['forearm_stretch.l', 'forearm.l'],
+  'hand_ref.l': ['hand.l'],
+
+  'shoulder_ref.r': ['shoulder.r'],
+  'arm_ref.r': ['arm_stretch.r', 'arm.r'],
+  'forearm_ref.r': ['forearm_stretch.r', 'forearm.r'],
+  'hand_ref.r': ['hand.r'],
+
+  'thigh_ref.l': ['thigh_stretch.l', 'thigh.l'],
+  'leg_ref.l': ['leg_stretch.l', 'leg.l'],
+  'foot_ref.l': ['foot.l'],
+  'toes_ref.l': ['toes_01.l'],
+
+  'thigh_ref.r': ['thigh_stretch.r', 'thigh.r'],
+  'leg_ref.r': ['leg_stretch.r', 'leg.r'],
+  'foot_ref.r': ['foot.r'],
+  'toes_ref.r': ['toes_01.r']
+};
+
+for (const side of ['l', 'r']) {
+  for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
+    for (let i = 1; i <= 3; i++) {
+      AUTO_RIG_PRO_REF_TO_SKIN[
+        finger + i + '_ref.' + side
+      ] = [finger + i + '.' + side];
+    }
+  }
+}
+
+function autoRigProSkinBoneNameSet() {
+  const names = new Set();
+
+  state.target.root?.traverse?.(object => {
+    if (!object.isSkinnedMesh || !object.skeleton?.bones) return;
+
+    for (const bone of object.skeleton.bones) {
+      if (bone?.name) names.add(bone.name);
+    }
+  });
+
+  return names;
+}
+
+function resolveAutoRigProRefToSkinBindings() {
+  const tgt = state.target;
+  const skinNames = autoRigProSkinBoneNameSet();
+  const bindings = [];
+
+  for (const [refOriginal, candidates] of Object.entries(
+    AUTO_RIG_PRO_REF_TO_SKIN
+  )) {
+    const ref = findBoneByOriginalExact(tgt, [refOriginal]);
+    if (!ref) continue;
+
+    // Prefer bones that are ACTUALLY referenced by a SkinnedMesh skeleton.
+    // This is what distinguishes arm_stretch/thigh_stretch from control/helper
+    // bones with similar anatomical names.
+    let driven = candidates
+      .map(name => findBoneByOriginalExact(tgt, [name]))
+      .find(runtimeName => runtimeName && skinNames.has(runtimeName));
+
+    // Some FBX exporters clone bone objects/names in the Skeleton array. If
+    // exact runtime-name membership is unavailable, keep the anatomical
+    // candidate as a safe fallback.
+    if (!driven) {
+      driven = candidates
+        .map(name => findBoneByOriginalExact(tgt, [name]))
+        .find(Boolean);
+    }
+
+    if (!driven) continue;
+
+    bindings.push({
+      ref,
+      refOriginal,
+      driven,
+      drivenOriginal:
+        originalObjectName(tgt.bones.get(driven)) || driven
+    });
+  }
+
+  return bindings.sort((a, b) =>
+    boneDepth(tgt.bones.get(a.driven)) -
+    boneDepth(tgt.bones.get(b.driven))
+  );
+}
+
+function resetAutoRigProReferenceSkinPreview() {
+  const tgt = state.target;
+  if (!tgt?.root) return;
+
+  for (const binding of resolveAutoRigProRefToSkinBindings()) {
+    const bone = tgt.bones.get(binding.driven);
+    const rest = tgt.rest.get(binding.driven);
+    if (!bone || !rest) continue;
+
+    bone.position.copy(rest.position);
+    bone.quaternion.copy(rest.quaternion);
+    bone.scale.copy(rest.scale);
+  }
+
+  updateSlotWorld(tgt);
+}
+
+function applyAutoRigProReferenceSkinPreviewRuntime() {
+  const tgt = state.target;
+
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !state.deformPreviewClip ||
+    !state.targetPreviewClip ||
+    !tgt?.root
+  ) {
+    return false;
+  }
+
+  const bindings = resolveAutoRigProRefToSkinBindings();
+  if (!bindings.length) return false;
+
+  // Reset only the actual skinning bones we own.
+  for (const binding of bindings) {
+    const bone = tgt.bones.get(binding.driven);
+    const rest = tgt.rest.get(binding.driven);
+    if (!bone || !rest) continue;
+
+    bone.position.copy(rest.position);
+    bone.quaternion.copy(rest.quaternion);
+    bone.scale.copy(rest.scale);
+  }
+
+  updateSlotWorld(tgt);
+
+  const refRestWorld = new THREE.Matrix4();
+  const drivenRestWorld = new THREE.Matrix4();
+  const refToDrivenRest = new THREE.Matrix4();
+  const desiredWorld = new THREE.Matrix4();
+  const parentInv = new THREE.Matrix4();
+  const desiredLocal = new THREE.Matrix4();
+
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+
+  for (const binding of bindings) {
+    const refBone = tgt.bones.get(binding.ref);
+    const drivenBone = tgt.bones.get(binding.driven);
+    const refRest = tgt.rest.get(binding.ref);
+    const drivenRest = tgt.rest.get(binding.driven);
+
+    if (!refBone || !drivenBone || !refRest || !drivenRest) continue;
+
+    refRestWorld.compose(
+      refRest.worldPos,
+      refRest.worldQuat,
+      refRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    drivenRestWorld.compose(
+      drivenRest.worldPos,
+      drivenRest.worldQuat,
+      drivenRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    // Preserve the exact rest offset between the clean reference bone and
+    // the bone that really skins the mesh.
+    refToDrivenRest.copy(refRestWorld)
+      .invert()
+      .multiply(drivenRestWorld);
+
+    desiredWorld.copy(refBone.matrixWorld)
+      .multiply(refToDrivenRest);
+
+    if (drivenBone.parent) {
+      parentInv.copy(drivenBone.parent.matrixWorld).invert();
+      desiredLocal.copy(parentInv).multiply(desiredWorld);
+    } else {
+      desiredLocal.copy(desiredWorld);
+    }
+
+    desiredLocal.decompose(position, quaternion, scale);
+
+    drivenBone.position.copy(position);
+    drivenBone.quaternion.copy(quaternion).normalize();
+    drivenBone.scale.copy(scale);
+
+    updateSlotWorld(tgt);
+  }
+
+  return true;
+}
+
 function buildCurrentEmbeddedDeformPreviewMap() {
   if (usesMixamoControlRigPipeline()) {
     return buildMixamoControlRigDeformPreviewMap();
@@ -6152,12 +6418,15 @@ function applyTargetRigRuntime() {
     const enabled = $('previewDeform')?.checked ?? true;
 
     if (enabled) {
-      // Mixamo -> ARP preview is solved straight from the Source pose so the
-      // viewport cannot inherit broken/missing ARP FBX constraint carriers.
-      if (!applyMixamoToArpSourcePreviewRuntime()) {
-        applyAutoRigProPreviewRuntime();
+      // Mixamo -> ARP uses the clean *_ref skeleton as the preview oracle and
+      // copies that WORLD pose onto the bones actually referenced by the mesh.
+      if (!applyAutoRigProReferenceSkinPreviewRuntime()) {
+        if (!applyMixamoToArpSourcePreviewRuntime()) {
+          applyAutoRigProPreviewRuntime();
+        }
       }
     } else {
+      resetAutoRigProReferenceSkinPreview();
       resetMixamoToArpSourcePreview();
       resetAutoRigProPreviewDriven();
     }
@@ -6724,11 +6993,16 @@ function rebuildTargetPreviewClip() {
   }
 
   if (usesAutoRigProPipeline()) {
-    // Preview the SAME portable c_* Action intended for the original ARP rig,
-    // then reconstruct its missing constraint/helper result live on deform
-    // bones. Do not play Retargeted_DEF_Preview in the viewport: that direct
-    // bake cannot preserve ARP's functional pivots and is what stretched the
-    // mesh.
+    if (
+      state.activePresetId === 'mixamo_to_arp' &&
+      state.deformPreviewClip
+    ) {
+      // The *_ref branch is a clean anatomical hierarchy. Animate it, then
+      // copy its evaluated WORLD pose to the actual bones used by the mesh.
+      state.targetPreviewClip = state.deformPreviewClip;
+      return;
+    }
+
     const controlPreview = state.fkClip || state.fkRawClip;
 
     state.targetPreviewClip = state.ikOnlyClip
@@ -6871,19 +7145,19 @@ function applyRetarget() {
     state.deformPreviewClip = null;
 
     if (usesAutoRigProPipeline()) {
-      const deformMap = buildAutoRigProDeformPreviewMap();
+      const isMixamoToArp = state.activePresetId === 'mixamo_to_arp';
+      const deformMap = isMixamoToArp
+        ? buildMixamoToArpReferencePreviewMap()
+        : buildAutoRigProDeformPreviewMap();
 
       if (!deformMap.length) {
         throw new Error(
-          'Auto-Rig Pro detectado, pero no encontré su esqueleto deform embebido.'
+          isMixamoToArp
+            ? 'Mixamo → Auto-Rig Pro: no pude construir el preview *_ref.'
+            : 'Auto-Rig Pro detectado, pero no encontré su esqueleto deform embebido.'
         );
       }
 
-      // IMPORTANT:
-      // Bake the animator controls and the deform preview independently.
-      // ARP interleaves c_* controls and deform/helper bones in one hierarchy;
-      // combining both maps in one pass changes the parent frame used to encode
-      // the control Action. Keeping the bakes separate preserves both outputs.
       state.fkRawClip = bakeRetarget(
         map,
         'Retargeted_AutoRigPro_RAW'
@@ -6891,7 +7165,9 @@ function applyRetarget() {
 
       state.deformPreviewClip = bakeRetarget(
         deformMap,
-        'Retargeted_DEF_Preview'
+        isMixamoToArp
+          ? 'Retargeted_ARP_Reference_Preview'
+          : 'Retargeted_DEF_Preview'
       );
 
       if (!state.fkRawClip?.tracks?.length) {
@@ -6901,8 +7177,11 @@ function applyRetarget() {
       }
 
       log(
-        `Auto-Rig Pro preview híbrido (carrier+deform): ${deformMap.length} mappings · ` +
-        `${state.deformPreviewClip?.tracks?.length || 0} tracks deform.`
+        isMixamoToArp
+          ? `Mixamo → ARP preview *_ref: ${deformMap.length} mappings · ` +
+            `${state.deformPreviewClip?.tracks?.length || 0} tracks de referencia.`
+          : `Auto-Rig Pro preview híbrido (carrier+deform): ${deformMap.length} mappings · ` +
+            `${state.deformPreviewClip?.tracks?.length || 0} tracks deform.`
       );
     } else if (usesMixamoControlRigPipeline()) {
       const deformMap = buildMixamoControlRigDeformPreviewMap();
