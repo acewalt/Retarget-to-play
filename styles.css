@@ -1824,3 +1824,81 @@ h2,p{margin:0}
     width:auto;
   }
 }
+
+
+/* Mapping workspace wide layout: hide workflow rail and stack Source/Target previews */
+@media(min-width:901px){
+  /* Mapping does not need the step/progress rail. Reclaim that width while
+     keeping the settings/export rail available on the right. */
+  .workspace-shell.mappings-focus,
+  .workspace-shell:has(.main-workspace[data-view="mappings"]){
+    grid-template-columns:minmax(0,1fr) 330px;
+  }
+
+  .workspace-shell.mappings-focus > .workflow-sidebar,
+  .workspace-shell:has(.main-workspace[data-view="mappings"]) > .workflow-sidebar{
+    display:none!important;
+  }
+
+  .workspace-shell.mappings-focus > .main-workspace,
+  .workspace-shell:has(.main-workspace[data-view="mappings"]) > .main-workspace{
+    grid-column:1;
+    width:100%;
+    max-width:none;
+  }
+
+  .workspace-shell.mappings-focus > .settings-panel,
+  .workspace-shell:has(.main-workspace[data-view="mappings"]) > .settings-panel{
+    grid-column:2;
+  }
+
+  /* Left strip follows the requested composition: search at top, then
+     Source canvas and Target canvas stacked vertically. */
+  .main-workspace[data-view="mappings"] .mapping-expandable.mapping-workbench{
+    grid-template-columns:clamp(270px,22vw,340px) minmax(0,1fr);
+  }
+
+  .main-workspace[data-view="mappings"] .mapping-preview-column{
+    display:grid;
+    grid-template-rows:auto minmax(0,1fr);
+  }
+
+  .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-skeleton-preview{
+    display:grid;
+    grid-template-rows:auto minmax(0,1fr);
+    min-height:0;
+  }
+
+  .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-grid{
+    display:grid;
+    grid-template-columns:1fr;
+    grid-template-rows:minmax(0,1fr) minmax(0,1fr);
+    min-height:0;
+    height:100%;
+  }
+
+  .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-pane{
+    min-height:0;
+    grid-template-rows:32px minmax(0,1fr);
+  }
+
+  .main-workspace[data-view="mappings"] .mapping-preview-column .mapping-preview-pane canvas{
+    width:min(100%, calc((100dvh - 292px) / 2));
+    max-width:100%;
+    height:auto;
+    aspect-ratio:1 / 1;
+    justify-self:center;
+    align-self:center;
+  }
+}
+
+@media(min-width:901px) and (max-width:1350px){
+  .workspace-shell.mappings-focus,
+  .workspace-shell:has(.main-workspace[data-view="mappings"]){
+    grid-template-columns:minmax(0,1fr) 300px;
+  }
+
+  .main-workspace[data-view="mappings"] .mapping-expandable.mapping-workbench{
+    grid-template-columns:clamp(250px,22vw,310px) minmax(0,1fr);
+  }
+}
