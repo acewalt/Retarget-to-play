@@ -12954,16 +12954,24 @@ function animate(now) {
   state.lastFrame = now;
   const duration = state.source.activeClip?.duration || state.targetPreviewClip?.duration || 0;
 
+  let poseUpdatedBySeek = false;
+
   if (state.playing && duration > 0) {
     let t = state.playTime + dt;
     if (t > duration) t %= duration;
     seek(t);
+    poseUpdatedBySeek = true;
   }
 
-  applyTargetRigRuntime();
-  updateGhostOverlayPose();
-  updateUeArpHelperBridgeOverlay();
-  updateRigOverlays();
+  // seek() already evaluates both mixers + the target runtime + overlays.
+  // Do not repeat the expensive ARP skin solve a second time in the same RAF.
+  if (!poseUpdatedBySeek) {
+    applyTargetRigRuntime();
+    updateGhostOverlayPose();
+    updateUeArpHelperBridgeOverlay();
+    updateRigOverlays();
+  }
+
   syncRestPoseGizmoThickness();
   updateRestPoseJointMarkers();
 
