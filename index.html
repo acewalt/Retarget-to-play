@@ -15,7 +15,7 @@
       document.documentElement.dataset.theme = saved || preferred;
     })();
   </script>
-  <link rel="stylesheet" href="./styles.css?v=20260923-mapping-fit-click4" />
+  <link rel="stylesheet" href="./styles.css?v=20260923-mapping-compact-top5" />
   <script type="importmap">
   {
     "imports": {
@@ -227,16 +227,6 @@
         </section>
 
         <section id="mappingCard" class="mapping-card collapsed" hidden>
-          <header class="section-head mapping-head">
-            <div><span class="eyebrow">SKELETON MATCHING</span><h2>Bone Mapping</h2></div>
-            <div class="mapping-summary">
-              <div class="progress-shell"><div id="mapProgressFill" class="progress-fill"></div></div>
-              <strong id="mapPercent">0%</strong>
-              <span id="compatibilityBadge" class="compatibility-badge pending">Pendiente</span>
-              <button id="toggleMapping" class="collapse-button" type="button"><span id="mappingToggleIcon">⌄</span><span id="mappingToggleLabel">Expandir</span></button>
-            </div>
-          </header>
-
           <div class="mapping-expandable mapping-workbench">
             <aside class="mapping-preview-column">
               <div class="mapping-preview-search">
@@ -274,6 +264,21 @@
 
             <section class="mapping-list-column">
               <div class="mapping-toolbar mapping-toolbar-actions">
+                <div class="mapping-inline-title">
+                  <span class="eyebrow">SKELETON MATCHING</span>
+                  <h2>Bone Mapping</h2>
+                </div>
+
+                <div class="mapping-summary mapping-inline-summary">
+                  <div class="progress-shell"><div id="mapProgressFill" class="progress-fill"></div></div>
+                  <strong id="mapPercent">0%</strong>
+                  <span id="compatibilityBadge" class="compatibility-badge pending">Pendiente</span>
+                  <button id="toggleMapping" class="collapse-button" type="button" hidden>
+                    <span id="mappingToggleIcon">⌄</span>
+                    <span id="mappingToggleLabel">Expandir</span>
+                  </button>
+                </div>
+
                 <button id="autoMatch" class="soft-primary" type="button">✦ Auto-preset</button>
                 <button id="loadPreset" type="button">Cargar preset</button>
                 <button id="addPair" type="button">+ Par</button>
