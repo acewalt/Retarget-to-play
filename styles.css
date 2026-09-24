@@ -1403,3 +1403,174 @@ h2,p{margin:0}
       );
   }
 }
+
+
+/* Mapping split workbench: stacked square previews + mapping list */
+.main-workspace[data-view="mappings"] .mapping-card{
+  display:flex;
+  flex-direction:column;
+}
+.main-workspace[data-view="mappings"] .mapping-expandable.mapping-workbench{
+  display:grid;
+  grid-template-columns:minmax(300px,360px) minmax(0,1fr);
+  flex:1;
+  min-height:0;
+  overflow:hidden;
+}
+.mapping-preview-column{
+  min-width:0;
+  min-height:0;
+  display:flex;
+  flex-direction:column;
+  border-right:1px solid var(--border);
+  background:var(--surface);
+}
+.mapping-preview-search{
+  padding:10px 10px 8px;
+  border-bottom:1px solid var(--border);
+}
+.mapping-preview-search .search-field{
+  width:100%;
+  min-height:38px;
+}
+.mapping-preview-column .mapping-skeleton-preview{
+  margin:0;
+  border:0;
+  border-radius:0;
+  background:transparent;
+  overflow:auto;
+}
+.mapping-preview-column .mapping-preview-head{
+  min-height:50px;
+  padding:9px 10px;
+}
+.mapping-preview-column .mapping-preview-head>span{
+  max-width:52%;
+}
+.mapping-preview-column .mapping-preview-grid{
+  display:grid;
+  grid-template-columns:1fr;
+  align-items:start;
+}
+.mapping-preview-column .mapping-preview-pane{
+  grid-template-rows:32px auto;
+  border-top:1px solid var(--border);
+}
+.mapping-preview-column .mapping-preview-pane:first-child{
+  border-top:0;
+}
+.mapping-preview-column .mapping-preview-pane + .mapping-preview-pane{
+  border-left:0;
+  border-top:1px solid var(--border);
+}
+.mapping-preview-column .mapping-preview-pane canvas{
+  width:100%;
+  height:auto;
+  aspect-ratio:1 / 1;
+}
+.mapping-list-column{
+  min-width:0;
+  min-height:0;
+  display:grid;
+  grid-template-rows:auto auto minmax(0,1fr) auto;
+  background:var(--surface);
+  overflow:hidden;
+}
+.mapping-toolbar.mapping-toolbar-actions{
+  display:flex;
+  justify-content:flex-end;
+  align-items:center;
+  gap:8px;
+  padding:10px 14px;
+  min-height:58px;
+  border-bottom:1px solid var(--border);
+}
+.mapping-toolbar.mapping-toolbar-actions button{
+  flex:0 0 auto;
+}
+.mapping-list-column .mapping-table-head{
+  position:sticky;
+  top:0;
+  z-index:2;
+  border-top:0;
+}
+.mapping-list-column .mapping-content{
+  min-height:0;
+  padding:0 10px;
+  overflow:hidden;
+}
+.main-workspace[data-view="mappings"] .mapping-list-column .bone-map{
+  height:100%;
+  min-height:0;
+  max-height:none;
+  overflow:auto;
+}
+.mapping-list-column .mapping-footer{
+  border-top:1px solid var(--border);
+}
+@media(max-width:1180px){
+  .main-workspace[data-view="mappings"] .mapping-expandable.mapping-workbench{
+    grid-template-columns:minmax(260px,320px) minmax(0,1fr);
+  }
+  .mapping-toolbar.mapping-toolbar-actions{
+    flex-wrap:wrap;
+  }
+}
+@media(max-width:900px){
+  .main-workspace[data-view="mappings"] .mapping-expandable.mapping-workbench{
+    display:block;
+    overflow:visible;
+  }
+  .mapping-preview-column{
+    border-right:0;
+    border-bottom:1px solid var(--border);
+  }
+  .mapping-preview-column .mapping-skeleton-preview{
+    overflow:visible;
+  }
+  .mapping-preview-column .mapping-preview-grid{
+    grid-template-columns:1fr 1fr;
+  }
+  .mapping-preview-column .mapping-preview-pane + .mapping-preview-pane{
+    border-top:0;
+    border-left:1px solid var(--border);
+  }
+  .mapping-list-column{
+    display:block;
+    overflow:visible;
+  }
+  .mapping-toolbar.mapping-toolbar-actions{
+    justify-content:flex-start;
+  }
+  .mapping-list-column .mapping-content{
+    overflow:visible;
+  }
+  .main-workspace[data-view="mappings"] .mapping-list-column .bone-map{
+    height:auto;
+    min-height:220px;
+    overflow:visible;
+  }
+}
+@media(max-width:760px){
+  .mapping-preview-column .mapping-preview-grid{
+    grid-template-columns:1fr;
+  }
+  .mapping-preview-column .mapping-preview-pane + .mapping-preview-pane{
+    border-left:0;
+    border-top:1px solid var(--border);
+  }
+  .mapping-toolbar.mapping-toolbar-actions{
+    display:grid;
+    grid-template-columns:1fr 1fr;
+    gap:7px;
+    padding:9px 10px;
+  }
+  .mapping-toolbar.mapping-toolbar-actions button{
+    width:100%;
+  }
+}
+@media(max-width:430px){
+  .mapping-toolbar.mapping-toolbar-actions{
+    grid-template-columns:1fr;
+  }
+}
