@@ -5104,6 +5104,23 @@ function bakeRetarget(map, clipName, { rootMotion = true } = {}) {
           .multiply(mappedDelta)
           .multiply(tgtRestRel)
           .normalize();
+      } else if (usesUeToAutoRigProPipeline()) {
+        // UE and Auto-Rig Pro do NOT share the same bone rest axes.
+        // Mapping a world delta directly (qPose * inverse(qRest)) is only valid
+        // when both rigs use equivalent rest frames. It is the main reason the
+        // previous FK had a sideways head, twisted fingers and displaced legs.
+        //
+        // Align the source REST frame to the target REST frame first:
+        //
+        //     C = TargetRest * inverse(SourceRest)
+        //     TargetPoseWorld = C * SourcePoseWorld
+        //
+        // This preserves the actual UE world orientation while expressing it
+        // in the corresponding Auto-Rig Pro rest basis.
+        qDesired.copy(tr.worldQuat)
+          .multiply(sr.worldQuat.clone().invert())
+          .multiply(qSrc)
+          .normalize();
       } else {
         qDelta.copy(qSrc)
           .multiply(sr.worldQuat.clone().invert())
@@ -6208,8 +6225,8 @@ function applyRetarget() {
 
     if (usesUeToAutoRigProPipeline()) {
       log(
-        'UE → Auto-Rig Pro FK: Action recodificada contra la jerarquía ' +
-        'funcional del rig original (root/spine/shoulder/arm/hand/legs/fingers).'
+        'UE → Auto-Rig Pro FK: rest-basis correction activa + Action ' +
+        'recodificada contra la jerarquía funcional del rig original.'
       );
     }
     state.ikOnlyClip = null;
