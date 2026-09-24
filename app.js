@@ -11746,8 +11746,10 @@ function buildMixamoAutoRigProCleanCopyBackClip(rawControlClip) {
       const parsed = parseTrackTarget(track.name);
       if (!parsed) return true;
 
-      if (entryByControl.has(parsed.nodeName) &&
-          ['position', 'quaternion', 'scale'].includes(parsed.property)) {
+      if (
+        entryByControl.has(parsed.nodeName) &&
+        parsed.property === 'quaternion'
+      ) {
         return false;
       }
 
@@ -11832,9 +11834,11 @@ function buildMixamoAutoRigProCleanCopyBackClip(rawControlClip) {
           q.w *= -1;
         }
 
-        entry.p.push(p.x, p.y, p.z);
+        // IMPORTANT for the ORIGINAL Blender ARP rig:
+        // controls keep their own rest/local pivots. Only matrix_basis rotation
+        // is portable. Rewriting control positions/scales here moves the
+        // constraint pivots and makes the Action diverge from the preview.
         entry.q.push(q.x, q.y, q.z, q.w);
-        entry.s.push(s.x, s.y, s.z);
         entry.previousQ = q.clone();
       }
     }
@@ -11868,16 +11872,6 @@ function buildMixamoAutoRigProCleanCopyBackClip(rawControlClip) {
   }
 
   for (const entry of entries) {
-    if (entry.p.length === times.length * 3) {
-      tracks.push(
-        new THREE.VectorKeyframeTrack(
-          entry.controlName + '.position',
-          times,
-          entry.p
-        )
-      );
-    }
-
     if (entry.q.length === times.length * 4) {
       tracks.push(
         new THREE.QuaternionKeyframeTrack(
@@ -11887,23 +11881,13 @@ function buildMixamoAutoRigProCleanCopyBackClip(rawControlClip) {
         )
       );
     }
-
-    if (entry.s.length === times.length * 3) {
-      tracks.push(
-        new THREE.VectorKeyframeTrack(
-          entry.controlName + '.scale',
-          times,
-          entry.s
-        )
-      );
-    }
   }
 
   log(
     'Mixamo → ARP clean split: root_master neutral · root_ref→c_root lower · ' +
     'spine_01_ref→c_spine_01 upper · ' +
     entries.length +
-    ' controles reconstruidos CloudRig-style.'
+    ' controles reconstruidos CloudRig-style · ROT only para preservar pivots ARP.'
   );
 
   return new THREE.AnimationClip(
