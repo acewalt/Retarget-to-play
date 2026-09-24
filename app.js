@@ -502,7 +502,9 @@ const state = {
   arpSkinPreviewCache: {
     targetRoot: null,
     weightedNames: null,
-    bindings: null
+    bindings: null,
+    skinOverrides: [],
+    skinOverrideTargetRoot: null
   },
   ghost: {
     enabled: false,
@@ -3247,6 +3249,7 @@ function clearSlot(slot, view) {
   disposeUeArpHelperBridge();
 
   if (slot.kind === 'target') {
+    restoreAutoRigProSkinMatrixOverrides();
     state.arpSkinPreviewCache.targetRoot = null;
     state.arpSkinPreviewCache.weightedNames = null;
     state.arpSkinPreviewCache.bindings = null;
@@ -5385,6 +5388,171 @@ function logAutoRigProSkinPreviewCoverage(bindings) {
 }
 
 
+function restoreAutoRigProSkinMatrixOverrides() {
+  const cache = state.arpSkinPreviewCache;
+
+  for (const entry of cache.skinOverrides || []) {
+    if (
+      entry?.skeleton &&
+      typeof entry.originalUpdate === 'function'
+    ) {
+      entry.skeleton.update = entry.originalUpdate;
+    }
+  }
+
+  cache.skinOverrides = [];
+  cache.skinOverrideTargetRoot = null;
+}
+
+function ensureAutoRigProSkinMatrixOverrides() {
+  const tgt = state.target;
+  const cache = state.arpSkinPreviewCache;
+
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !tgt?.root
+  ) {
+    restoreAutoRigProSkinMatrixOverrides();
+    return false;
+  }
+
+  if (
+    cache.skinOverrideTargetRoot === tgt.root &&
+    cache.skinOverrides?.length
+  ) {
+    return true;
+  }
+
+  restoreAutoRigProSkinMatrixOverrides();
+
+  const reverseTarget = new Map();
+  for (const [runtimeName, bone] of tgt.bones) {
+    reverseTarget.set(bone, runtimeName);
+  }
+
+  const overrides = [];
+  const mappedNames = new Set();
+  const skeletonNames = new Set();
+
+  tgt.root.traverse(object => {
+    if (!object.isSkinnedMesh || !object.skeleton?.bones) return;
+
+    const skeleton = object.skeleton;
+    const bindingsByIndex = new Array(skeleton.bones.length).fill(null);
+
+    for (let i = 0; i < skeleton.bones.length; i++) {
+      const bone = skeleton.bones[i];
+      if (!bone) continue;
+
+      skeletonNames.add(bone.name);
+
+      const runtimeName =
+        reverseTarget.get(bone) ||
+        (tgt.bones.has(bone.name) ? bone.name : '');
+
+      if (!runtimeName) continue;
+
+      const original = originalObjectName(bone) || runtimeName;
+      const refOriginal = autoRigProReferenceForSkinBone(original);
+      if (!refOriginal) continue;
+
+      const refName = findBoneByOriginalExact(tgt, [refOriginal]);
+      const refBone = refName ? tgt.bones.get(refName) : null;
+      const refRest = refName ? tgt.rest.get(refName) : null;
+      const drivenRest = tgt.rest.get(runtimeName);
+
+      if (!refBone || !refRest || !drivenRest) continue;
+
+      const refRestWorld = new THREE.Matrix4().compose(
+        refRest.worldPos,
+        refRest.worldQuat,
+        refRest.worldScale || new THREE.Vector3(1, 1, 1)
+      );
+
+      const drivenRestWorld = new THREE.Matrix4().compose(
+        drivenRest.worldPos,
+        drivenRest.worldQuat,
+        drivenRest.worldScale || new THREE.Vector3(1, 1, 1)
+      );
+
+      bindingsByIndex[i] = {
+        refBone,
+        refToDrivenRest: refRestWorld
+          .invert()
+          .multiply(drivenRestWorld)
+      };
+
+      mappedNames.add(original);
+    }
+
+    if (!bindingsByIndex.some(Boolean)) return;
+
+    const originalUpdate = skeleton.update;
+    const offsetMatrix = new THREE.Matrix4();
+    const desiredWorld = new THREE.Matrix4();
+
+    // Viewport-only skinning override:
+    // do NOT move ARP's actual bones. Build the final skin matrices directly
+    // from the clean animated *_ref skeleton. This bypasses the exported FBX
+    // helper/stretch/twist hierarchy entirely.
+    skeleton.update = function () {
+      const bones = this.bones;
+      const inverses = this.boneInverses;
+      const boneMatrices = this.boneMatrices;
+
+      for (let i = 0, il = bones.length; i < il; i++) {
+        const bone = bones[i];
+        const inverse = inverses[i];
+
+        if (!inverse) continue;
+
+        const binding = bindingsByIndex[i];
+
+        if (binding?.refBone) {
+          desiredWorld.copy(binding.refBone.matrixWorld)
+            .multiply(binding.refToDrivenRest);
+
+          offsetMatrix.copy(desiredWorld)
+            .multiply(inverse);
+        } else if (bone) {
+          offsetMatrix.copy(bone.matrixWorld)
+            .multiply(inverse);
+        } else {
+          offsetMatrix.identity();
+        }
+
+        offsetMatrix.toArray(boneMatrices, i * 16);
+      }
+
+      if (this.boneTexture) {
+        this.boneTexture.needsUpdate = true;
+      }
+    };
+
+    overrides.push({
+      mesh: object,
+      skeleton,
+      originalUpdate,
+      bindingsByIndex
+    });
+  });
+
+  cache.skinOverrides = overrides;
+  cache.skinOverrideTargetRoot = tgt.root;
+
+  log(
+    'Mixamo → ARP matrix-skin preview: ' +
+    overrides.length +
+    ' Skeleton(s) intervenidos · ' +
+    mappedNames.size +
+    '/' +
+    skeletonNames.size +
+    ' bones anatómicos redirigidos a *_ref · jerarquía ARP intacta.'
+  );
+
+  return overrides.length > 0;
+}
+
 function resetAutoRigProReferenceSkinPreview() {
   const tgt = state.target;
   if (!tgt?.root) return;
@@ -6573,30 +6741,39 @@ function applyTargetRigRuntime() {
   // are interleaved with animator controls, so reconstruct the missing
   // Blender functional hierarchy locally in app.js.
   if (usesAutoRigProPipeline()) {
+    const enabled = $('previewDeform')?.checked ?? true;
+
+    if (state.activePresetId === 'mixamo_to_arp') {
+      if (enabled && state.targetPreviewClip) {
+        // The target mixer animates only the clean *_ref hierarchy.
+        // The renderer then receives final skin matrices directly from it.
+        ensureAutoRigProSkinMatrixOverrides();
+      } else {
+        restoreAutoRigProSkinMatrixOverrides();
+      }
+
+      return;
+    }
+
+    restoreAutoRigProSkinMatrixOverrides();
+
     if (!state.targetPreviewClip) {
-      resetMixamoToArpSourcePreview();
       resetAutoRigProPreviewDriven();
       return;
     }
 
-    const enabled = $('previewDeform')?.checked ?? true;
-
     if (enabled) {
-      // Mixamo -> ARP uses the clean *_ref skeleton as the preview oracle and
-      // copies that WORLD pose onto the bones actually referenced by the mesh.
-      if (!applyAutoRigProReferenceSkinPreviewRuntime()) {
-        if (!applyMixamoToArpSourcePreviewRuntime()) {
-          applyAutoRigProPreviewRuntime();
-        }
-      }
+      applyAutoRigProPreviewRuntime();
     } else {
-      resetAutoRigProReferenceSkinPreview();
-      resetMixamoToArpSourcePreview();
       resetAutoRigProPreviewDriven();
     }
 
     return;
   }
+
+  // Preset/target changed away from ARP: never leave a Skeleton.update patch
+  // attached to a previous Target.
+  restoreAutoRigProSkinMatrixOverrides();
 
   const runtime = state.target.rigRuntime;
   if (!runtime) return;
