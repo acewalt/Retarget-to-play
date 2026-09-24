@@ -5711,6 +5711,240 @@ function rigifyPreviewBodyContext() {
   };
 }
 
+const MIXAMO_TO_ARP_SOURCE_PREVIEW_BINDINGS = [
+  // Torso. Mixamo Spine1 is intentionally collapsed between Spine and Spine2,
+  // matching the existing Mixamo -> ARP preset.
+  { source: 'Spine', sourceParent: 'Hips', target: 'spine_01.x', targetParent: 'root.x' },
+  { source: 'Spine2', sourceParent: 'Spine', target: 'spine_02.x', targetParent: 'spine_01.x' },
+  { source: 'Neck', sourceParent: 'Spine2', target: 'neck.x', targetParent: 'spine_02.x' },
+  { source: 'Head', sourceParent: 'Neck', target: 'head.x', targetParent: 'neck.x' },
+
+  // Shoulders + arms.
+  { source: 'LeftShoulder', sourceParent: 'Spine2', target: 'c_shoulder.l', targetParent: 'spine_02.x' },
+  { source: 'LeftArm', sourceParent: 'LeftShoulder', target: 'arm.l', targetParent: 'c_shoulder.l' },
+  { source: 'LeftForeArm', sourceParent: 'LeftArm', target: 'forearm.l', targetParent: 'arm.l' },
+  { source: 'LeftHand', sourceParent: 'LeftForeArm', target: 'hand.l', targetParent: 'forearm.l' },
+
+  { source: 'RightShoulder', sourceParent: 'Spine2', target: 'c_shoulder.r', targetParent: 'spine_02.x' },
+  { source: 'RightArm', sourceParent: 'RightShoulder', target: 'arm.r', targetParent: 'c_shoulder.r' },
+  { source: 'RightForeArm', sourceParent: 'RightArm', target: 'forearm.r', targetParent: 'arm.r' },
+  { source: 'RightHand', sourceParent: 'RightForeArm', target: 'hand.r', targetParent: 'forearm.r' },
+
+  // Legs. c_thigh_b is ARP's real FBX carrier below root.x; use it only as
+  // the current parent frame while the Source supplies the anatomical bend.
+  { source: 'LeftUpLeg', sourceParent: 'Hips', target: 'thigh.l', targetParent: 'c_thigh_b.l' },
+  { source: 'LeftLeg', sourceParent: 'LeftUpLeg', target: 'leg.l', targetParent: 'thigh.l' },
+  { source: 'LeftFoot', sourceParent: 'LeftLeg', target: 'foot.l', targetParent: 'leg.l' },
+  { source: 'LeftToeBase', sourceParent: 'LeftFoot', target: 'toes_01.l', targetParent: 'foot.l' },
+
+  { source: 'RightUpLeg', sourceParent: 'Hips', target: 'thigh.r', targetParent: 'c_thigh_b.r' },
+  { source: 'RightLeg', sourceParent: 'RightUpLeg', target: 'leg.r', targetParent: 'thigh.r' },
+  { source: 'RightFoot', sourceParent: 'RightLeg', target: 'foot.r', targetParent: 'leg.r' },
+  { source: 'RightToeBase', sourceParent: 'RightFoot', target: 'toes_01.r', targetParent: 'foot.r' }
+];
+
+function resolveMixamoToArpSourcePreviewBindings() {
+  const src = state.source;
+  const tgt = state.target;
+
+  return MIXAMO_TO_ARP_SOURCE_PREVIEW_BINDINGS
+    .map(spec => {
+      const source =
+        findSemanticBone(src, spec.source) ||
+        findBoneByOriginalExact(src, [spec.source]);
+
+      const sourceParent =
+        findSemanticBone(src, spec.sourceParent) ||
+        findBoneByOriginalExact(src, [spec.sourceParent]);
+
+      const target = findBoneByOriginalExact(tgt, [spec.target]);
+      const targetParent = findBoneByOriginalExact(tgt, [spec.targetParent]);
+
+      if (!source || !sourceParent || !target || !targetParent) return null;
+
+      return {
+        ...spec,
+        source,
+        sourceParent,
+        target,
+        targetParent
+      };
+    })
+    .filter(Boolean);
+}
+
+function resetMixamoToArpSourcePreview() {
+  const tgt = state.target;
+  if (!tgt?.root) return;
+
+  for (const binding of resolveMixamoToArpSourcePreviewBindings()) {
+    const bone = tgt.bones.get(binding.target);
+    const rest = tgt.rest.get(binding.target);
+    if (!bone || !rest) continue;
+
+    bone.position.copy(rest.position);
+    bone.quaternion.copy(rest.quaternion);
+    bone.scale.copy(rest.scale);
+  }
+
+  updateSlotWorld(tgt);
+}
+
+function applyMixamoToArpSourcePreviewRuntime() {
+  const src = state.source;
+  const tgt = state.target;
+
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !src?.root ||
+    !tgt?.root ||
+    !src.activeClip ||
+    !state.targetPreviewClip
+  ) {
+    return false;
+  }
+
+  const bindings = resolveMixamoToArpSourcePreviewBindings();
+  if (!bindings.length) return false;
+
+  // Source mixer has already been evaluated by seek(). Rebuild the visible
+  // ARP body directly from the Mixamo anatomical pose. The exported c_* Action
+  // is intentionally NOT involved in this viewport solve.
+  for (const binding of bindings) {
+    const driven = tgt.bones.get(binding.target);
+    const rest = tgt.rest.get(binding.target);
+    if (!driven || !rest) continue;
+
+    driven.position.copy(rest.position);
+    driven.quaternion.copy(rest.quaternion);
+    driven.scale.copy(rest.scale);
+  }
+
+  updateSlotWorld(tgt);
+
+  const sourceParentPoseQ = new THREE.Quaternion();
+  const sourcePoseQ = new THREE.Quaternion();
+  const sourceRestRelativeQ = new THREE.Quaternion();
+  const sourcePoseRelativeQ = new THREE.Quaternion();
+  const sourceBasisQ = new THREE.Quaternion();
+
+  const targetRestRelativeQ = new THREE.Quaternion();
+  const axisMapQ = new THREE.Quaternion();
+  const targetBasisQ = new THREE.Quaternion();
+
+  const targetParentRestWorld = new THREE.Matrix4();
+  const targetRestWorld = new THREE.Matrix4();
+  const targetRestRelative = new THREE.Matrix4();
+  const basisMatrix = new THREE.Matrix4();
+  const desiredWorld = new THREE.Matrix4();
+  const actualParentInv = new THREE.Matrix4();
+  const desiredLocal = new THREE.Matrix4();
+
+  const position = new THREE.Vector3();
+  const quaternion = new THREE.Quaternion();
+  const scale = new THREE.Vector3();
+
+  for (const binding of bindings) {
+    const sourceBone = src.bones.get(binding.source);
+    const sourceParentBone = src.bones.get(binding.sourceParent);
+    const targetBone = tgt.bones.get(binding.target);
+    const targetParentBone = tgt.bones.get(binding.targetParent);
+
+    const sourceRest = src.rest.get(binding.source);
+    const sourceParentRest = src.rest.get(binding.sourceParent);
+    const targetRest = tgt.rest.get(binding.target);
+    const targetParentRest = tgt.rest.get(binding.targetParent);
+
+    if (
+      !sourceBone ||
+      !sourceParentBone ||
+      !targetBone ||
+      !targetParentBone ||
+      !sourceRest ||
+      !sourceParentRest ||
+      !targetRest ||
+      !targetParentRest
+    ) {
+      continue;
+    }
+
+    sourceParentBone.getWorldQuaternion(sourceParentPoseQ).normalize();
+    sourceBone.getWorldQuaternion(sourcePoseQ).normalize();
+
+    sourceRestRelativeQ.copy(sourceParentRest.worldQuat)
+      .invert()
+      .multiply(sourceRest.worldQuat)
+      .normalize();
+
+    sourcePoseRelativeQ.copy(sourceParentPoseQ)
+      .invert()
+      .multiply(sourcePoseQ)
+      .normalize();
+
+    sourceBasisQ.copy(sourceRestRelativeQ)
+      .invert()
+      .multiply(sourcePoseRelativeQ)
+      .normalize();
+
+    targetRestRelativeQ.copy(targetParentRest.worldQuat)
+      .invert()
+      .multiply(targetRest.worldQuat)
+      .normalize();
+
+    // Convert the Mixamo child-local rotation delta into the ARP deform
+    // bone's child-local axes.
+    axisMapQ.copy(targetRestRelativeQ)
+      .invert()
+      .multiply(sourceRestRelativeQ)
+      .normalize();
+
+    targetBasisQ.copy(axisMapQ)
+      .multiply(sourceBasisQ)
+      .multiply(axisMapQ.clone().invert())
+      .normalize();
+
+    targetParentRestWorld.compose(
+      targetParentRest.worldPos,
+      targetParentRest.worldQuat,
+      targetParentRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    targetRestWorld.compose(
+      targetRest.worldPos,
+      targetRest.worldQuat,
+      targetRest.worldScale || new THREE.Vector3(1, 1, 1)
+    );
+
+    targetRestRelative.copy(targetParentRestWorld)
+      .invert()
+      .multiply(targetRestWorld);
+
+    basisMatrix.makeRotationFromQuaternion(targetBasisQ);
+
+    // Parent-first functional chain using ARP's own rest lengths/pivots.
+    desiredWorld.copy(targetParentBone.matrixWorld)
+      .multiply(targetRestRelative)
+      .multiply(basisMatrix);
+
+    if (targetBone.parent) {
+      actualParentInv.copy(targetBone.parent.matrixWorld).invert();
+      desiredLocal.copy(actualParentInv).multiply(desiredWorld);
+    } else {
+      desiredLocal.copy(desiredWorld);
+    }
+
+    desiredLocal.decompose(position, quaternion, scale);
+
+    targetBone.position.copy(position);
+    targetBone.quaternion.copy(quaternion).normalize();
+    targetBone.scale.copy(scale);
+
+    updateSlotWorld(tgt);
+  }
+
+  return true;
+}
+
 const AUTO_RIG_PRO_PREVIEW_BINDINGS = [
   // The original ARP .blend evaluates these as one anatomical chain through
   // constraints/helpers. The exported FBX does not preserve that functional
@@ -5910,6 +6144,7 @@ function applyTargetRigRuntime() {
   // Blender functional hierarchy locally in app.js.
   if (usesAutoRigProPipeline()) {
     if (!state.targetPreviewClip) {
+      resetMixamoToArpSourcePreview();
       resetAutoRigProPreviewDriven();
       return;
     }
@@ -5917,8 +6152,13 @@ function applyTargetRigRuntime() {
     const enabled = $('previewDeform')?.checked ?? true;
 
     if (enabled) {
-      applyAutoRigProPreviewRuntime();
+      // Mixamo -> ARP preview is solved straight from the Source pose so the
+      // viewport cannot inherit broken/missing ARP FBX constraint carriers.
+      if (!applyMixamoToArpSourcePreviewRuntime()) {
+        applyAutoRigProPreviewRuntime();
+      }
     } else {
+      resetMixamoToArpSourcePreview();
       resetAutoRigProPreviewDriven();
     }
 
