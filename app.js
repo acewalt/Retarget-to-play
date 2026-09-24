@@ -6210,8 +6210,8 @@ function applyRetarget() {
 
     if (usesUeToAutoRigProPipeline()) {
       log(
-        'UE → Auto-Rig Pro FK: c_root y c_spine_01 resueltos como ramas separadas de c_root_master; ' +
-        'basis LOCAL UE → ejes *_ref → matrix_basis c_*.'
+        'UE → Auto-Rig Pro FK: c_spine_01 compensa el carry oculto de root-bend con midpoint LOCAL; ' +
+        'UE → ejes *_ref → matrix_basis c_*.'
       );
     }
     state.ikOnlyClip = null;
@@ -8947,15 +8947,18 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
       sourceParentName = sourceRootName;
     }
 
-    // Critical ARP split:
-    // c_root.x and c_spine_01.x are separate branches below c_root_master.x
-    // in the supplied rig. c_spine_01.x must therefore carry the complete
-    // UE orientation from root -> pelvis -> spine_01..spine_03. Treating
-    // pelvis as its mapped parent removes the pelvis compensation and is what
-    // produced the permanent forward-folded torso seen in the Blender tests.
-    if (item.controlOriginal === 'c_spine_01.x' && sourceRootName) {
-      sourceParentName = sourceRootName;
-    }
+    // ARP root/spine split:
+    // c_root.x and c_spine_01.x are sibling animator controls, but the
+    // ORIGINAL .blend rig still distributes part of the root bend into the
+    // torso through ARP constraints/helpers that are not present in FBX.
+    //
+    // The two measured extremes are:
+    //   pelvis -> spine_03  : under-corrects (torso folds forward)
+    //   root   -> spine_03  : over-corrects (torso reclines backward)
+    //
+    // Keep pelvis as the normal parent here and solve c_spine_01 with a
+    // calibrated midpoint between those two LOCAL bases during sampling.
+    const isArpLowerSpine = item.controlOriginal === 'c_spine_01.x';
 
     // Fallback only for a control outside the known anatomical table.
     if (!sourceParentName) {
@@ -9011,6 +9014,9 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
       sourceParentRest,
       sourceRestRelative,
       sourceRestRelativeInv: sourceRestRelative.clone().invert(),
+      isArpLowerSpine,
+      sourceRootName,
+      sourceRootRest: sourceRootName ? src.rest.get(sourceRootName) : null,
       refName,
       refOriginal,
       refRest,
@@ -9086,6 +9092,41 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
           .multiply(sourcePoseRelative)
           .normalize();
 
+        if (
+          entry.isArpLowerSpine &&
+          entry.sourceRootName &&
+          entry.sourceRootRest
+        ) {
+          const sourceRoot = src.bones.get(entry.sourceRootName);
+
+          if (sourceRoot) {
+            const rootWorld = sourceRoot
+              .getWorldQuaternion(new THREE.Quaternion())
+              .normalize();
+
+            const fullPoseRelative = rootWorld.clone()
+              .invert()
+              .multiply(childWorld)
+              .normalize();
+
+            const fullRestRelative = entry.sourceRootRest.worldQuat.clone()
+              .invert()
+              .multiply(entry.sourceRest.worldQuat)
+              .normalize();
+
+            const fullBasis = fullRestRelative.clone()
+              .invert()
+              .multiply(fullPoseRelative)
+              .normalize();
+
+            // ARP's hidden root-bend carry sits between the two FBX-visible
+            // extremes. 0.5 is not a generic retarget fudge: it represents
+            // the missing original-rig carry that the imported FBX cannot
+            // express. Slerp keeps the correction rotationally stable.
+            sourceBasis.slerp(fullBasis, 0.5).normalize();
+          }
+        }
+
         controlBasis.copy(entry.sourceToReference)
           .multiply(sourceBasis)
           .multiply(entry.sourceToReferenceInv)
@@ -9145,11 +9186,11 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
   }
 
   log(
-    'UE -> Auto-Rig Pro local-basis solver v6: ' +
+    'UE -> Auto-Rig Pro local-basis solver v7: ' +
     replacements.size +
     '/' +
     entries.length +
-    ' controles. UE local basis + ARP split root/spine -> *_ref axes -> c_* matrix_basis.'
+    ' controles. UE local basis + ARP root-bend midpoint -> *_ref axes -> c_* matrix_basis.'
   );
 
   return new THREE.AnimationClip(
