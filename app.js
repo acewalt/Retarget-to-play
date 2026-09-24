@@ -7942,8 +7942,8 @@ function applyRetarget() {
       state.activePresetId === 'mixamo_to_arp'
     ) {
       log(
-        'Mixamo → Auto-Rig Pro FK export: *_ref preview correcto → ' +
-        'matrix_basis de controles c_* para el rig Blender original.'
+        'Mixamo → ARP FK semantic split: Hips LOC→c_pos · Hips ROT→c_root_master · ' +
+        'c_root neutral · Spine→c_spine_01 · *_ref→matrix_basis c_*.'
       );
     }
     state.ikOnlyClip = null;
@@ -10624,6 +10624,7 @@ for (const side of ['l', 'r']) {
 
 
 const AUTO_RIG_PRO_CONTROL_TO_REFERENCE = {
+  'c_root_master.x': 'root_ref.x',
   'c_root.x': 'root_ref.x',
   'c_spine_01.x': 'spine_01_ref.x',
   'c_spine_02.x': 'spine_02_ref.x',
@@ -10654,6 +10655,52 @@ for (const side of ['l', 'r']) {
         'c_' + finger + i + '.' + side
       ] = finger + i + '_ref.' + side;
     }
+  }
+}
+
+
+const MIXAMO_ARP_REFERENCE_PARENT = {
+  'c_root_master.x': '',
+
+  // c_root.x is intentionally absent: Mixamo Hips rotates the common parent
+  // c_root_master, while c_root remains neutral as the lower-body branch.
+  'c_spine_01.x': 'c_root_master.x',
+  'c_spine_02.x': 'c_spine_01.x',
+
+  'c_neck.x': 'c_spine_02.x',
+  'c_head.x': 'c_neck.x',
+
+  'c_shoulder.l': 'c_spine_02.x',
+  'c_arm_fk.l': 'c_shoulder.l',
+  'c_forearm_fk.l': 'c_arm_fk.l',
+  'c_hand_fk.l': 'c_forearm_fk.l',
+
+  'c_shoulder.r': 'c_spine_02.x',
+  'c_arm_fk.r': 'c_shoulder.r',
+  'c_forearm_fk.r': 'c_arm_fk.r',
+  'c_hand_fk.r': 'c_forearm_fk.r',
+
+  // The reference skeleton branches thighs directly from root_ref. c_root.x
+  // stays neutral, so root_master/root_ref is the correct animated parent frame.
+  'c_thigh_fk.l': 'c_root_master.x',
+  'c_leg_fk.l': 'c_thigh_fk.l',
+  'c_foot_fk.l': 'c_leg_fk.l',
+  'c_toes_fk.l': 'c_foot_fk.l',
+
+  'c_thigh_fk.r': 'c_root_master.x',
+  'c_leg_fk.r': 'c_thigh_fk.r',
+  'c_foot_fk.r': 'c_leg_fk.r',
+  'c_toes_fk.r': 'c_foot_fk.r'
+};
+
+for (const side of ['l', 'r']) {
+  for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
+    MIXAMO_ARP_REFERENCE_PARENT['c_' + finger + '1.' + side] =
+      'c_hand_fk.' + side;
+    MIXAMO_ARP_REFERENCE_PARENT['c_' + finger + '2.' + side] =
+      'c_' + finger + '1.' + side;
+    MIXAMO_ARP_REFERENCE_PARENT['c_' + finger + '3.' + side] =
+      'c_' + finger + '2.' + side;
   }
 }
 
@@ -11595,7 +11642,11 @@ function buildMixamoAutoRigProReferenceCopyBackClip(
     if (!controlTrack || !controlRest || !refRest) continue;
 
     const logicalParentControlOriginal =
-      AUTO_RIG_PRO_LOGICAL_PARENT[controlOriginal] || '';
+      (
+        state.activePresetId === 'mixamo_to_arp'
+          ? MIXAMO_ARP_REFERENCE_PARENT[controlOriginal]
+          : AUTO_RIG_PRO_LOGICAL_PARENT[controlOriginal]
+      ) || '';
 
     const logicalParentRefOriginal = logicalParentControlOriginal
       ? AUTO_RIG_PRO_CONTROL_TO_REFERENCE[logicalParentControlOriginal] || ''
@@ -12884,30 +12935,32 @@ async function exportTargetFbx() {
         usesAutoRigProPipeline() &&
         state.activePresetId === 'mixamo_to_arp'
       ) {
-        const candidates = buildMixamoArpCopyBackCandidates();
+        const selectedRuntimeClip = state.exportClip || state.fkClip;
+        const controlRuntime = buildOriginalRigControlOnlyClip(
+          withTargetNeutralBaseline(selectedRuntimeClip)
+        );
 
-        if (candidates.length !== 3) {
+        if (!controlRuntime?.tracks?.length) {
           throw new Error(
-            'Mixamo → Auto-Rig Pro: no pude construir las 3 Actions diagnósticas.'
+            'Mixamo → Auto-Rig Pro: no pude construir Retargeted_OriginalRig_FK.'
           );
         }
 
-        for (const candidate of candidates) {
-          logMixamoArpExportSpineDiagnostic(candidate.clip);
-        }
+        logMixamoArpExportSpineDiagnostic(controlRuntime);
 
-        exactActions = candidates.map(candidate => ({
-          clip: candidate.clip,
-          actionName: candidate.name,
-          includeControlPositions: true
-        }));
-
-        currentActionName = 'ARP_CloudRigStyle';
-
-        log(
-          'Mixamo → ARP A/B/C: exportando ARP_CloudRigStyle, ' +
-          'ARP_ReferenceAxes y ARP_ControlAxes en el mismo FBX.'
+        const originalRigClip = createOriginalNameExportClip(
+          controlRuntime,
+          state.target
         );
+
+        originalRigClip.name = 'Retargeted_OriginalRig_FK';
+
+        exactActions = [{
+          clip: originalRigClip,
+          actionName: 'Retargeted_OriginalRig_FK',
+          includeControlPositions: true
+        }];
+        currentActionName = 'Retargeted_OriginalRig_FK';
       } else {
         exactActions = [
           {
@@ -12973,9 +13026,9 @@ async function exportTargetFbx() {
         state.activePresetId === 'mixamo_to_arp'
       ) {
         log(
-          `Mixamo → Auto-Rig Pro EXPORT A/B/C: [${clipNames}] · ` +
-          `${report.curveNodes} CurveNodes · ${report.curves} Curves. ` +
-          'Prueba las tres Actions sobre el MISMO ARP original sin cambiar nada más.'
+          `Mixamo → Auto-Rig Pro EXPORT FK semántico: [${clipNames}] · ` +
+          `${report.curveNodes} CurveNodes · ${report.curves} Curves · ` +
+          'c_pos global + root_master global ROT + spine superior separado.'
         );
       } else {
         log(
