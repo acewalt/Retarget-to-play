@@ -11963,145 +11963,157 @@ function buildMixamoAutoRigProCleanCopyBackClip(rawControlClip) {
 
 function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
   const tgt = state.target;
+  const src = state.source;
 
   if (
     state.activePresetId !== 'mixamo_to_arp' ||
     !rawControlClip ||
-    !tgt.root
+    !tgt.root ||
+    !src.root
   ) {
     return rawControlClip?.clone?.() || rawControlClip;
   }
 
-  // IMPORTANT: Copy the proven Mixamo -> Rigify root-motion strategy.
+  // Stop post-editing c_pos arrays by hand. The working Mixamo -> Rigify path
+  // solves root motion at RETARGET time, in WORLD space, against the actual
+  // target hierarchy. Do the same for ARP, but ONLY for the exported Action.
   //
-  // Rigify works because Hips is split as:
-  //   Hips ROT -> pelvis/FK control
-  //   Hips LOC XY -> global root
-  //   Hips LOC Z  -> torso/body-height control
+  // Preview/Transfer remain untouched.
   //
-  // ARP has the same functional split, but with TWO body branches:
-  //   c_pos        = global trajectory
-  //   c_root.x     = lower body / legs
-  //   c_spine_01.x = upper body / torso
+  // ARP functional split:
+  //   Hips horizontal world motion -> c_pos (global trajectory)
+  //   Hips vertical world motion   -> c_root.x (lower body)
+  //   Hips vertical world motion   -> c_spine_01.x (upper body)
   //
-  // Keep the already-good ARP rotation copy-back EXACTLY as it was and only
-  // redistribute the Hips translation here:
-  //   c_pos XY        <- Hips XY
-  //   c_pos Z         <- REST (never lifts whole rig)
-  //   c_root.x Z      <- Hips Z delta
-  //   c_spine_01.x Z  <- Hips Z delta
-  //
-  // This deliberately uses Z as the vertical channel because that is the
-  // same convention used by the known-good Mixamo -> Rigify preset and by
-  // the original Blender ARP action copy-back. Do NOT infer Y-up from the
-  // Three.js viewport here: this clip is an FBX/Blender Action carrier.
-
-  const base = buildMixamoAutoRigProCleanCopyBackClip(rawControlClip);
+  // bakeRetarget understands HORIZONTAL/VERTICAL in Three's normalized Y-up
+  // world space, then converts the result back into each control's real local
+  // FBX space. This is the critical difference from the previous failed
+  // versions, which edited local XYZ channels after the bake.
 
   const cPosName = findBoneByOriginalExact(tgt, ['c_pos']);
   const cRootName = findBoneByOriginalExact(tgt, ['c_root.x']);
   const cSpine01Name = findBoneByOriginalExact(tgt, ['c_spine_01.x']);
 
-  const cPosRest = cPosName ? tgt.rest.get(cPosName) : null;
-  const cRootRest = cRootName ? tgt.rest.get(cRootName) : null;
-  const cSpine01Rest = cSpine01Name ? tgt.rest.get(cSpine01Name) : null;
+  const hipsName =
+    findSemanticBone(src, 'Hips') ||
+    findBoneByOriginalExact(src, [
+      'mixamorig1:Hips',
+      'mixamorig:Hips',
+      'Hips'
+    ]);
 
-  if (
-    !cPosName || !cRootName || !cSpine01Name ||
-    !cPosRest || !cRootRest || !cSpine01Rest
-  ) {
-    log('Mixamo → ARP EXPORT: faltan c_pos/c_root/c_spine_01; uso copy-back base.');
-    return base;
+  if (!cPosName || !cRootName || !cSpine01Name || !hipsName) {
+    log(
+      'Mixamo → ARP EXPORT v15: faltan Hips/c_pos/c_root/c_spine_01; ' +
+      'uso copy-back base.'
+    );
+    return buildMixamoAutoRigProCleanCopyBackClip(rawControlClip);
   }
 
-  const rawPosTrack = rawControlClip.tracks.find(track => {
-    const parsed = parseTrackTarget(track.name);
-    return (
-      parsed?.nodeName === cPosName &&
-      parsed.property === 'position'
-    );
-  });
+  // Keep the proven rotation copy-back exactly as Transfer currently uses it.
+  const rotationBase = buildMixamoAutoRigProCleanCopyBackClip(
+    rawControlClip
+  );
 
-  if (!rawPosTrack?.times?.length || rawPosTrack.values.length < 3) {
-    log('Mixamo → ARP EXPORT: c_pos no tiene LOC; uso copy-back base.');
-    return base;
-  }
+  // Export-only root-motion bake. These synthetic rows are NOT written into
+  // state.boneMap and therefore cannot affect Mapping, Transfer or preview.
+  const rootMotionMap = [
+    {
+      source: hipsName,
+      sourceSpec: 'Hips',
+      target: cPosName,
+      targetSpec: 'c_pos',
+      channels: 'LOC',
+      axes: 'HORIZONTAL',
+      influence: 1,
+      profile: 'mixamo-arp-export-root'
+    },
+    {
+      source: hipsName,
+      sourceSpec: 'Hips',
+      target: cRootName,
+      targetSpec: 'c_root.x',
+      channels: 'LOC',
+      axes: 'VERTICAL',
+      influence: 1,
+      profile: 'mixamo-arp-export-lower'
+    },
+    {
+      source: hipsName,
+      sourceSpec: 'Hips',
+      target: cSpine01Name,
+      targetSpec: 'c_spine_01.x',
+      channels: 'LOC',
+      axes: 'VERTICAL',
+      influence: 1,
+      profile: 'mixamo-arp-export-upper'
+    }
+  ];
 
-  const times = Array.from(rawPosTrack.times);
-  const globalValues = [];
-  const lowerValues = [];
-  const upperValues = [];
+  const locationClip = bakeRetarget(
+    rootMotionMap,
+    'Retargeted_ARP_ExportRootMotion',
+    { rootMotion: true }
+  );
 
-  for (let i = 0; i < times.length; i++) {
-    const k = i * 3;
+  const replacePositionNames = new Set([
+    cPosName,
+    cRootName,
+    cSpine01Name
+  ]);
 
-    const x = Number(rawPosTrack.values[k]) || 0;
-    const y = Number(rawPosTrack.values[k + 1]) || 0;
-    const z = Number(rawPosTrack.values[k + 2]) || 0;
-
-    const dz = z - cPosRest.position.z;
-
-    // Same split as Mixamo -> Rigify:
-    // root gets planar trajectory, body branches get vertical pelvis motion.
-    globalValues.push(
-      x,
-      y,
-      cPosRest.position.z
-    );
-
-    lowerValues.push(
-      cRootRest.position.x,
-      cRootRest.position.y,
-      cRootRest.position.z + dz
-    );
-
-    upperValues.push(
-      cSpine01Rest.position.x,
-      cSpine01Rest.position.y,
-      cSpine01Rest.position.z + dz
-    );
-  }
-
-  const tracks = base.tracks
+  const tracks = rotationBase.tracks
     .filter(track => {
       const parsed = parseTrackTarget(track.name);
-      if (parsed?.property !== 'position') return true;
-
       return !(
-        parsed.nodeName === cPosName ||
-        parsed.nodeName === cRootName ||
-        parsed.nodeName === cSpine01Name
+        parsed?.property === 'position' &&
+        replacePositionNames.has(parsed.nodeName)
       );
     })
     .map(track => track.clone());
 
-  tracks.push(
-    new THREE.VectorKeyframeTrack(
-      cPosName + '.position',
-      times,
-      globalValues
-    ),
-    new THREE.VectorKeyframeTrack(
-      cRootName + '.position',
-      times,
-      lowerValues
-    ),
-    new THREE.VectorKeyframeTrack(
-      cSpine01Name + '.position',
-      times,
-      upperValues
-    )
-  );
+  for (const track of locationClip.tracks || []) {
+    const parsed = parseTrackTarget(track.name);
+    if (
+      parsed?.property === 'position' &&
+      replacePositionNames.has(parsed.nodeName)
+    ) {
+      tracks.push(track.clone());
+    }
+  }
+
+  const summary = [...replacePositionNames].map(name => {
+    const track = tracks.find(candidate => {
+      const parsed = parseTrackTarget(candidate.name);
+      return parsed?.nodeName === name && parsed.property === 'position';
+    });
+
+    if (!track) return (originalObjectName(tgt.bones.get(name)) || name) + '=SIN_LOC';
+
+    let minY = Infinity, maxY = -Infinity;
+    for (let i = 1; i < track.values.length; i += 3) {
+      minY = Math.min(minY, track.values[i]);
+      maxY = Math.max(maxY, track.values[i]);
+    }
+
+    return (
+      (originalObjectName(tgt.bones.get(name)) || name) +
+      '=YΔ' +
+      (Number.isFinite(minY) && Number.isFinite(maxY)
+        ? (maxY - minY).toFixed(4)
+        : 'n/a')
+    );
+  }).join(' · ');
 
   log(
-    'Mixamo → ARP EXPORT v14 · estrategia Rigify: ' +
-    'c_pos=Hips XY + Z REST · c_root/c_spine_01=Hips Z · ' +
-    'rotaciones ARP copy-back sin tocar.'
+    'Mixamo → ARP EXPORT v15 WORLD root split: ' +
+    'Hips horizontal→c_pos · Hips vertical→c_root+c_spine_01 · ' +
+    summary
   );
 
   return new THREE.AnimationClip(
     'Retargeted_FK',
-    base.duration,
+    rotationBase.duration,
     tracks
   );
 }
