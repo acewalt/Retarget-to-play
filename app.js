@@ -10582,9 +10582,8 @@ const AUTO_RIG_PRO_LOGICAL_PARENT = {
   // these controls behave like the anatomical reference skeleton.
   'c_root.x': 'c_root_master.x',
 
-  // ARP main anatomical spine starts at c_root_master.x.
-  // c_root.x is the separate lower-body controller, not root_ref.x.
-  'c_spine_01.x': 'c_root_master.x',
+  // Original-rig / anatomical carry used by the existing Mixamo->ARP path.
+  'c_spine_01.x': 'c_root.x',
   'c_spine_02.x': 'c_spine_01.x',
 
   'c_neck.x': 'c_spine_02.x',
@@ -10600,12 +10599,12 @@ const AUTO_RIG_PRO_LOGICAL_PARENT = {
   'c_forearm_fk.r': 'c_arm_fk.r',
   'c_hand_fk.r': 'c_forearm_fk.r',
 
-  'c_thigh_fk.l': 'c_root_master.x',
+  'c_thigh_fk.l': 'c_root.x',
   'c_leg_fk.l': 'c_thigh_fk.l',
   'c_foot_fk.l': 'c_leg_fk.l',
   'c_toes_fk.l': 'c_foot_fk.l',
 
-  'c_thigh_fk.r': 'c_root_master.x',
+  'c_thigh_fk.r': 'c_root.x',
   'c_leg_fk.r': 'c_thigh_fk.r',
   'c_foot_fk.r': 'c_leg_fk.r',
   'c_toes_fk.r': 'c_foot_fk.r'
@@ -10624,7 +10623,7 @@ for (const side of ['l', 'r']) {
 
 
 const AUTO_RIG_PRO_CONTROL_TO_REFERENCE = {
-  'c_root_master.x': 'root_ref.x',
+  'c_root.x': 'root_ref.x',
   'c_spine_01.x': 'spine_01_ref.x',
   'c_spine_02.x': 'spine_02_ref.x',
   'c_neck.x': 'neck_ref.x',
@@ -12408,7 +12407,6 @@ function logMixamoArpExportSpineDiagnostic(clip) {
   }
 
   const names = [
-    'c_root_master.x',
     'c_root.x',
     'c_spine_01.x',
     'c_spine_02.x'
