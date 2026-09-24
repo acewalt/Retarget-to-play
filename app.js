@@ -5140,100 +5140,196 @@ function buildMixamoToArpReferencePreviewMap() {
   return pairs;
 }
 
-const AUTO_RIG_PRO_REF_TO_SKIN = {
-  'spine_01_ref.x': ['spine_01.x'],
-  'spine_02_ref.x': ['spine_02.x'],
-  'neck_ref.x': ['neck.x'],
-  'head_ref.x': ['head.x'],
+function autoRigProWeightedSkinBoneNames() {
+  const weighted = new Set();
+  const tgt = state.target;
+  if (!tgt?.root) return weighted;
 
-  'shoulder_ref.l': ['shoulder.l'],
-  'arm_ref.l': ['arm_stretch.l', 'arm.l'],
-  'forearm_ref.l': ['forearm_stretch.l', 'forearm.l'],
-  'hand_ref.l': ['hand.l'],
-
-  'shoulder_ref.r': ['shoulder.r'],
-  'arm_ref.r': ['arm_stretch.r', 'arm.r'],
-  'forearm_ref.r': ['forearm_stretch.r', 'forearm.r'],
-  'hand_ref.r': ['hand.r'],
-
-  'thigh_ref.l': ['thigh_stretch.l', 'thigh.l'],
-  'leg_ref.l': ['leg_stretch.l', 'leg.l'],
-  'foot_ref.l': ['foot.l'],
-  'toes_ref.l': ['toes_01.l'],
-
-  'thigh_ref.r': ['thigh_stretch.r', 'thigh.r'],
-  'leg_ref.r': ['leg_stretch.r', 'leg.r'],
-  'foot_ref.r': ['foot.r'],
-  'toes_ref.r': ['toes_01.r']
-};
-
-for (const side of ['l', 'r']) {
-  for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
-    for (let i = 1; i <= 3; i++) {
-      AUTO_RIG_PRO_REF_TO_SKIN[
-        finger + i + '_ref.' + side
-      ] = [finger + i + '.' + side];
-    }
-  }
-}
-
-function autoRigProSkinBoneNameSet() {
-  const names = new Set();
-
-  state.target.root?.traverse?.(object => {
+  tgt.root.traverse(object => {
     if (!object.isSkinnedMesh || !object.skeleton?.bones) return;
 
-    for (const bone of object.skeleton.bones) {
-      if (bone?.name) names.add(bone.name);
+    const skinIndex = object.geometry?.getAttribute?.('skinIndex');
+    const skinWeight = object.geometry?.getAttribute?.('skinWeight');
+    const bones = object.skeleton.bones;
+
+    // If weight attributes are unavailable, all skeleton bones are potential
+    // deformers. Normally FBX SkinnedMesh provides both attributes.
+    if (!skinIndex || !skinWeight) {
+      for (const bone of bones) {
+        if (bone?.name) weighted.add(bone.name);
+      }
+      return;
+    }
+
+    const count = Math.min(skinIndex.count, skinWeight.count);
+
+    for (let vertex = 0; vertex < count; vertex++) {
+      for (let slot = 0; slot < 4; slot++) {
+        const weight =
+          slot === 0 ? skinWeight.getX(vertex) :
+          slot === 1 ? skinWeight.getY(vertex) :
+          slot === 2 ? skinWeight.getZ(vertex) :
+          skinWeight.getW(vertex);
+
+        if (!(weight > 1e-5)) continue;
+
+        const index = Math.round(
+          slot === 0 ? skinIndex.getX(vertex) :
+          slot === 1 ? skinIndex.getY(vertex) :
+          slot === 2 ? skinIndex.getZ(vertex) :
+          skinIndex.getW(vertex)
+        );
+
+        const bone = bones[index];
+        if (bone?.name) weighted.add(bone.name);
+      }
     }
   });
 
-  return names;
+  return weighted;
+}
+
+function autoRigProReferenceForSkinBone(original) {
+  const name = String(original || '').toLowerCase();
+
+  // Exclude animator controls and obvious non-deform helpers.
+  if (
+    /^c_/.test(name) ||
+    /(pole|line|target|cursor|bank|heel|snap|nostr|ik\.|_ik|pre_pole)/.test(name)
+  ) {
+    return '';
+  }
+
+  if (/^(root\.x|root_bend\.x)$/.test(name)) return 'root_ref.x';
+
+  if (/spine_01/.test(name)) return 'spine_01_ref.x';
+  if (/spine_02/.test(name)) return 'spine_02_ref.x';
+
+  if (/^neck(?:_|\.|$)|neck_twist/.test(name)) return 'neck_ref.x';
+  if (/^head(?:_|\.|$)|head_scale/.test(name)) return 'head_ref.x';
+
+  const side = /\.l$|_l$/.test(name)
+    ? 'l'
+    : /\.r$|_r$/.test(name)
+      ? 'r'
+      : '';
+
+  if (side) {
+    if (/shoulder/.test(name)) return 'shoulder_ref.' + side;
+
+    // All stretch/twist/deform variants of one anatomical segment receive
+    // the SAME reference delta. This keeps vertices influenced by multiple
+    // helper bones coherent instead of tearing the mesh.
+    if (
+      /(^|_)(arm)(?:_|\.|$)/.test(name) &&
+      !/forearm/.test(name)
+    ) {
+      return 'arm_ref.' + side;
+    }
+
+    if (/forearm/.test(name)) return 'forearm_ref.' + side;
+
+    if (
+      /(^|_)(hand)(?:_|\.|$)/.test(name) &&
+      !/(thumb|index|middle|ring|pinky)/.test(name)
+    ) {
+      return 'hand_ref.' + side;
+    }
+
+    if (/thigh/.test(name)) return 'thigh_ref.' + side;
+
+    if (
+      /(^|_)(leg)(?:_|\.|$)/.test(name) &&
+      !/(pole|line)/.test(name)
+    ) {
+      return 'leg_ref.' + side;
+    }
+
+    if (/^foot(?:_|\.|$)|foot_fk|foot_stretch/.test(name)) {
+      return 'foot_ref.' + side;
+    }
+
+    if (/toe/.test(name)) return 'toes_ref.' + side;
+
+    for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
+      for (let i = 1; i <= 3; i++) {
+        const re = new RegExp(finger + i + '(?:_|\\.|$)');
+        if (re.test(name)) return finger + i + '_ref.' + side;
+      }
+    }
+  }
+
+  return '';
 }
 
 function resolveAutoRigProRefToSkinBindings() {
   const tgt = state.target;
-  const skinNames = autoRigProSkinBoneNameSet();
+  const weightedNames = autoRigProWeightedSkinBoneNames();
   const bindings = [];
+  const seen = new Set();
 
-  for (const [refOriginal, candidates] of Object.entries(
-    AUTO_RIG_PRO_REF_TO_SKIN
-  )) {
+  for (const runtimeName of weightedNames) {
+    const bone = tgt.bones.get(runtimeName);
+    if (!bone) continue;
+
+    const original = originalObjectName(bone) || runtimeName;
+    const refOriginal = autoRigProReferenceForSkinBone(original);
+    if (!refOriginal) continue;
+
     const ref = findBoneByOriginalExact(tgt, [refOriginal]);
     if (!ref) continue;
 
-    // Prefer bones that are ACTUALLY referenced by a SkinnedMesh skeleton.
-    // This is what distinguishes arm_stretch/thigh_stretch from control/helper
-    // bones with similar anatomical names.
-    let driven = candidates
-      .map(name => findBoneByOriginalExact(tgt, [name]))
-      .find(runtimeName => runtimeName && skinNames.has(runtimeName));
-
-    // Some FBX exporters clone bone objects/names in the Skeleton array. If
-    // exact runtime-name membership is unavailable, keep the anatomical
-    // candidate as a safe fallback.
-    if (!driven) {
-      driven = candidates
-        .map(name => findBoneByOriginalExact(tgt, [name]))
-        .find(Boolean);
-    }
-
-    if (!driven) continue;
+    const key = ref + '::' + runtimeName;
+    if (seen.has(key)) continue;
+    seen.add(key);
 
     bindings.push({
       ref,
       refOriginal,
-      driven,
-      drivenOriginal:
-        originalObjectName(tgt.bones.get(driven)) || driven
+      driven: runtimeName,
+      drivenOriginal: original
     });
   }
 
-  return bindings.sort((a, b) =>
+  bindings.sort((a, b) =>
     boneDepth(tgt.bones.get(a.driven)) -
     boneDepth(tgt.bones.get(b.driven))
   );
+
+  return bindings;
 }
+
+function logAutoRigProSkinPreviewCoverage(bindings) {
+  const weightedNames = autoRigProWeightedSkinBoneNames();
+  const mapped = new Set(bindings.map(binding => binding.driven));
+
+  const importantUnmapped = [];
+
+  for (const runtimeName of weightedNames) {
+    if (mapped.has(runtimeName)) continue;
+
+    const bone = state.target.bones.get(runtimeName);
+    const original = originalObjectName(bone) || runtimeName;
+
+    if (
+      /(spine|neck|head|shoulder|arm|forearm|hand|thigh|leg|foot|toe|twist|stretch)/i.test(original)
+    ) {
+      importantUnmapped.push(original);
+    }
+  }
+
+  log(
+    'Mixamo → ARP skin preview: ' +
+    bindings.length +
+    '/' +
+    weightedNames.size +
+    ' bones con peso reciben pose *_ref.' +
+    (importantUnmapped.length
+      ? ' Sin mapa anatómico: ' + importantUnmapped.slice(0, 18).join(', ')
+      : '')
+  );
+}
+
 
 function resetAutoRigProReferenceSkinPreview() {
   const tgt = state.target;
@@ -7183,6 +7279,12 @@ function applyRetarget() {
           : `Auto-Rig Pro preview híbrido (carrier+deform): ${deformMap.length} mappings · ` +
             `${state.deformPreviewClip?.tracks?.length || 0} tracks deform.`
       );
+
+      if (isMixamoToArp) {
+        logAutoRigProSkinPreviewCoverage(
+          resolveAutoRigProRefToSkinBindings()
+        );
+      }
     } else if (usesMixamoControlRigPipeline()) {
       const deformMap = buildMixamoControlRigDeformPreviewMap();
 
