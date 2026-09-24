@@ -10582,11 +10582,9 @@ const AUTO_RIG_PRO_LOGICAL_PARENT = {
   // these controls behave like the anatomical reference skeleton.
   'c_root.x': 'c_root_master.x',
 
-  // Original-rig / anatomical carry, not raw FBX parenting.
-  // root_ref.x -> spine_01_ref.x, so c_spine_01.x must be encoded relative
-  // to c_root.x exactly like CloudRig encodes controls against their logical
-  // parent rather than their static FBX helper parent.
-  'c_spine_01.x': 'c_root.x',
+  // ARP main anatomical spine starts at c_root_master.x.
+  // c_root.x is the separate lower-body controller, not root_ref.x.
+  'c_spine_01.x': 'c_root_master.x',
   'c_spine_02.x': 'c_spine_01.x',
 
   'c_neck.x': 'c_spine_02.x',
@@ -10602,12 +10600,12 @@ const AUTO_RIG_PRO_LOGICAL_PARENT = {
   'c_forearm_fk.r': 'c_arm_fk.r',
   'c_hand_fk.r': 'c_forearm_fk.r',
 
-  'c_thigh_fk.l': 'c_root.x',
+  'c_thigh_fk.l': 'c_root_master.x',
   'c_leg_fk.l': 'c_thigh_fk.l',
   'c_foot_fk.l': 'c_leg_fk.l',
   'c_toes_fk.l': 'c_foot_fk.l',
 
-  'c_thigh_fk.r': 'c_root.x',
+  'c_thigh_fk.r': 'c_root_master.x',
   'c_leg_fk.r': 'c_thigh_fk.r',
   'c_foot_fk.r': 'c_leg_fk.r',
   'c_toes_fk.r': 'c_foot_fk.r'
@@ -10626,7 +10624,7 @@ for (const side of ['l', 'r']) {
 
 
 const AUTO_RIG_PRO_CONTROL_TO_REFERENCE = {
-  'c_root.x': 'root_ref.x',
+  'c_root_master.x': 'root_ref.x',
   'c_spine_01.x': 'spine_01_ref.x',
   'c_spine_02.x': 'spine_02_ref.x',
   'c_neck.x': 'neck_ref.x',
@@ -12409,35 +12407,41 @@ function logMixamoArpExportSpineDiagnostic(clip) {
     return;
   }
 
-  const spineRuntime = findBoneByOriginalExact(
-    state.target,
-    ['c_spine_01.x']
-  );
+  const names = [
+    'c_root_master.x',
+    'c_root.x',
+    'c_spine_01.x',
+    'c_spine_02.x'
+  ];
 
-  const spineTrack = clip.tracks.find(track => {
-    const parsed = parseTrackTarget(track.name);
-    return (
-      parsed?.nodeName === spineRuntime &&
-      parsed?.property === 'quaternion'
-    );
-  });
+  const parts = [];
 
-  if (!spineTrack) {
-    log(
-      'Mixamo → ARP EXPORT diagnóstico: ERROR · c_spine_01.x no tiene curva quaternion.'
+  for (const originalName of names) {
+    const runtimeName = findBoneByOriginalExact(
+      state.target,
+      [originalName]
     );
-    return;
+
+    const track = clip.tracks.find(candidate => {
+      const parsed = parseTrackTarget(candidate.name);
+      return (
+        parsed?.nodeName === runtimeName &&
+        parsed?.property === 'quaternion'
+      );
+    });
+
+    parts.push(
+      originalName +
+      '=' +
+      (track
+        ? quaternionTrackMotionDegrees(track).toFixed(2) + '°/' +
+          track.times.length + 'k'
+        : 'SIN_CURVA')
+    );
   }
 
-  const degrees = quaternionTrackMotionDegrees(spineTrack);
-
   log(
-    'Mixamo → ARP EXPORT diagnóstico: c_spine_01.x sí está animado · ' +
-    'movimiento angular máximo=' +
-    degrees.toFixed(2) +
-    '° · keys=' +
-    spineTrack.times.length +
-    '.'
+    'Mixamo → ARP EXPORT torso: ' + parts.join(' · ')
   );
 }
 
