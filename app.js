@@ -6210,8 +6210,8 @@ function applyRetarget() {
 
     if (usesUeToAutoRigProPipeline()) {
       log(
-        'UE → Auto-Rig Pro FK: usando la rama *_ref del propio ARP como ' +
-        'jerarquía anatómica para reconstruir matrix_basis.'
+        'UE → Auto-Rig Pro FK: Source WORLD → jerarquía *_ref → ' +
+        'conversión de ejes local *_ref/c_* → matrix_basis.'
       );
     }
     state.ikOnlyClip = null;
@@ -8845,52 +8845,89 @@ for (const side of ['l', 'r']) {
 }
 
 function buildUeAutoRigProReferenceAction(rawClip) {
+  const src = state.source;
   const tgt = state.target;
-  if (!rawClip || !tgt.root) return rawClip;
+  const sourceClip = src.activeClip;
+
+  if (!rawClip || !sourceClip || !src.root || !tgt.root) {
+    return rawClip?.clone?.() || rawClip;
+  }
 
   const sourceTracks = rawClip.tracks.map(track => track.clone());
-  const entries = [];
-  const reverse = new Map();
+  const reverseTarget = new Map();
 
-  for (const [name, bone] of tgt.bones) reverse.set(bone, name);
+  for (const [name, bone] of tgt.bones) {
+    reverseTarget.set(bone, name);
+  }
+
+  const refParentCache = new Map();
+
+  const resolveRefParent = refName => {
+    if (!refName) return '';
+    if (refParentCache.has(refName)) return refParentCache.get(refName);
+
+    let parent = tgt.bones.get(refName)?.parent || null;
+
+    while (parent) {
+      const runtimeName = reverseTarget.get(parent);
+      const original = runtimeName
+        ? (originalObjectName(parent) || runtimeName)
+        : '';
+
+      if (runtimeName && String(original).includes('_ref')) {
+        refParentCache.set(refName, runtimeName);
+        return runtimeName;
+      }
+
+      parent = parent.parent;
+    }
+
+    refParentCache.set(refName, '');
+    return '';
+  };
+
+  const entries = [];
 
   for (const pair of validMap()) {
-    if (!String(pair.channels || 'ROT').toUpperCase().includes('ROT')) continue;
+    if (!String(pair.channels || 'ROT').toUpperCase().includes('ROT')) {
+      continue;
+    }
 
+    const sourceBone = src.bones.get(pair.source);
+    const sourceRest = src.rest.get(pair.source);
     const control = tgt.bones.get(pair.target);
-    if (!control) continue;
+    const controlRest = tgt.rest.get(pair.target);
+
+    if (!sourceBone || !sourceRest || !control || !controlRest) continue;
 
     const controlOriginal = originalObjectName(control) || pair.target;
     const refOriginal = AUTO_RIG_PRO_CONTROL_TO_REFERENCE[controlOriginal];
     if (!refOriginal) continue;
 
     const refName = findBoneByOriginalExact(tgt, [refOriginal]);
-    const controlRest = tgt.rest.get(pair.target);
     const refRest = refName ? tgt.rest.get(refName) : null;
-    if (!refName || !controlRest || !refRest) continue;
+    if (!refName || !refRest) continue;
 
-    let parent = tgt.bones.get(refName)?.parent || null;
-    let parentRefName = '';
+    const parentRefName = resolveRefParent(refName);
 
-    while (parent) {
-      const parentName = reverse.get(parent);
-      const parentOriginal = parentName
-        ? (originalObjectName(parent) || parentName)
-        : '';
-
-      if (parentName && /_ref(?:\.|$)/i.test(parentOriginal)) {
-        parentRefName = parentName;
-        break;
-      }
-      parent = parent.parent;
-    }
+    // Frame conversion from anatomical *_ref local axes to animator c_* axes.
+    const refToControl = controlRest.worldQuat.clone()
+      .invert()
+      .multiply(refRest.worldQuat)
+      .normalize();
 
     entries.push({
+      sourceName: pair.source,
+      sourceRest,
       controlName: pair.target,
+      controlOriginal,
       controlRest,
       refName,
+      refOriginal,
       refRest,
       parentRefName,
+      refToControl,
+      refToControlInv: refToControl.clone().invert(),
       values: [],
       previous: null
     });
@@ -8898,45 +8935,53 @@ function buildUeAutoRigProReferenceAction(rawClip) {
 
   if (entries.length < 12) {
     log(
-      'UE -> ARP ref solver: referencias insuficientes (' +
+      'UE -> ARP *_ref solver: referencias insuficientes (' +
       entries.length +
       '), usando fallback anterior.'
     );
     return buildAutoRigProOriginalRigTransferClip(rawClip);
   }
 
-  restoreRest(tgt);
-  tgt.mixer?.stopAllAction();
+  const fps = Math.max(
+    1,
+    Math.min(120, Number($('fps').value) || 30)
+  );
+  const frameCount = Math.max(
+    2,
+    Math.ceil(sourceClip.duration * fps) + 1
+  );
+  const times = Array.from(
+    { length: frameCount },
+    (_, i) => Math.min(sourceClip.duration, i / fps)
+  );
 
-  const mixer = new THREE.AnimationMixer(tgt.root);
-  const action = mixer.clipAction(rawClip).play();
-
-  const refParent = new Map(entries.map(e => [e.refName, e.parentRefName]));
-  const entryByRef = new Map(entries.map(e => [e.refName, e]));
+  if (!src.mixer) {
+    src.mixer = new THREE.AnimationMixer(src.root);
+    src.action = src.mixer.clipAction(sourceClip).play();
+  }
 
   try {
-    for (const trackTime of Array.from(
-      sourceTracks.find(t => parseTrackTarget(t.name)?.property === 'quaternion')?.times || []
-    )) {
-      restoreRest(tgt);
-      mixer.setTime(Number(trackTime));
-      updateSlotWorld(tgt);
+    for (const time of times) {
+      restoreRest(src);
+      src.mixer.setTime(Number(time));
+      updateSlotWorld(src);
 
-      const desiredRef = new Map();
+      const desiredRefWorld = new Map();
 
       for (const entry of entries) {
-        const control = tgt.bones.get(entry.controlName);
-        if (!control) continue;
+        const sourceBone = src.bones.get(entry.sourceName);
+        if (!sourceBone) continue;
 
-        const controlWorld = control.getWorldQuaternion(
-          new THREE.Quaternion()
-        ).normalize();
-
-        const worldDelta = controlWorld.clone()
-          .multiply(entry.controlRest.worldQuat.clone().invert())
+        const sourcePoseWorld = sourceBone
+          .getWorldQuaternion(new THREE.Quaternion())
           .normalize();
 
-        desiredRef.set(
+        // Same WORLD-delta convention used by the working UE -> CloudRig bake.
+        const worldDelta = sourcePoseWorld.clone()
+          .multiply(entry.sourceRest.worldQuat.clone().invert())
+          .normalize();
+
+        desiredRefWorld.set(
           entry.refName,
           worldDelta
             .multiply(entry.refRest.worldQuat.clone())
@@ -8948,58 +8993,60 @@ function buildUeAutoRigProReferenceAction(rawClip) {
 
       const refPose = refName => {
         if (!refName) return null;
-        if (poseCache.has(refName)) return poseCache.get(refName).clone();
-        if (desiredRef.has(refName)) {
-          const q = desiredRef.get(refName).clone();
-          poseCache.set(refName, q.clone());
-          return q;
+
+        if (poseCache.has(refName)) {
+          return poseCache.get(refName).clone();
+        }
+
+        const direct = desiredRefWorld.get(refName);
+        if (direct) {
+          poseCache.set(refName, direct.clone());
+          return direct.clone();
         }
 
         const rest = tgt.rest.get(refName);
         if (!rest) return null;
 
-        const bone = tgt.bones.get(refName);
-        let parent = bone?.parent || null;
-        let parentName = '';
-
-        while (parent) {
-          const n = reverse.get(parent);
-          const o = n ? (originalObjectName(parent) || n) : '';
-          if (n && /_ref(?:\.|$)/i.test(o)) {
-            parentName = n;
-            break;
-          }
-          parent = parent.parent;
-        }
+        const parentName = resolveRefParent(refName);
 
         if (!parentName) {
-          poseCache.set(refName, rest.worldQuat.clone());
-          return rest.worldQuat.clone();
+          const pose = rest.worldQuat.clone();
+          poseCache.set(refName, pose.clone());
+          return pose;
         }
 
         const parentRest = tgt.rest.get(parentName);
         const parentPose = refPose(parentName);
-        if (!parentRest || !parentPose) return rest.worldQuat.clone();
 
-        const rel = parentRest.worldQuat.clone()
+        if (!parentRest || !parentPose) {
+          const pose = rest.worldQuat.clone();
+          poseCache.set(refName, pose.clone());
+          return pose;
+        }
+
+        const restRelative = parentRest.worldQuat.clone()
           .invert()
           .multiply(rest.worldQuat)
           .normalize();
 
-        const q = parentPose.multiply(rel).normalize();
-        poseCache.set(refName, q.clone());
-        return q;
+        const pose = parentPose
+          .multiply(restRelative)
+          .normalize();
+
+        poseCache.set(refName, pose.clone());
+        return pose;
       };
 
       for (const entry of entries) {
-        const childPose = desiredRef.get(entry.refName);
+        const childPose = desiredRefWorld.get(entry.refName);
         if (!childPose) continue;
 
-        let basis;
+        let refBasis;
 
         if (entry.parentRefName) {
           const parentRest = tgt.rest.get(entry.parentRefName);
           const parentPose = refPose(entry.parentRefName);
+
           if (!parentRest || !parentPose) continue;
 
           const restRelative = parentRest.worldQuat.clone()
@@ -9012,66 +9059,82 @@ function buildUeAutoRigProReferenceAction(rawClip) {
             .multiply(childPose)
             .normalize();
 
-          basis = restRelative.clone()
+          refBasis = restRelative.clone()
             .invert()
             .multiply(poseRelative)
             .normalize();
         } else {
-          basis = entry.refRest.worldQuat.clone()
+          refBasis = entry.refRest.worldQuat.clone()
             .invert()
             .multiply(childPose)
             .normalize();
         }
 
-        const q = entry.controlRest.quaternion.clone()
-          .multiply(basis)
+        // *_ref bones and c_* controls use different local bone axes.
+        // Convert the anatomical delta into the actual control frame.
+        const controlBasis = entry.refToControl.clone()
+          .multiply(refBasis)
+          .multiply(entry.refToControlInv)
           .normalize();
 
-        if (entry.previous && entry.previous.dot(q) < 0) {
-          q.x *= -1;
-          q.y *= -1;
-          q.z *= -1;
-          q.w *= -1;
+        const exportLocal = entry.controlRest.quaternion.clone()
+          .multiply(controlBasis)
+          .normalize();
+
+        if (entry.previous && entry.previous.dot(exportLocal) < 0) {
+          exportLocal.x *= -1;
+          exportLocal.y *= -1;
+          exportLocal.z *= -1;
+          exportLocal.w *= -1;
         }
 
-        entry.values.push(q.x, q.y, q.z, q.w);
-        entry.previous = q.clone();
+        entry.values.push(
+          exportLocal.x,
+          exportLocal.y,
+          exportLocal.z,
+          exportLocal.w
+        );
+
+        entry.previous = exportLocal.clone();
       }
     }
   } finally {
-    action.stop();
-    mixer.stopAllAction();
-    restoreRest(tgt);
+    restoreRest(src);
   }
-
-  const sampleTimes = Array.from(
-    sourceTracks.find(t => parseTrackTarget(t.name)?.property === 'quaternion')?.times || []
-  );
 
   const replacements = new Map();
 
   for (const entry of entries) {
-    if (entry.values.length !== sampleTimes.length * 4) continue;
+    if (entry.values.length !== times.length * 4) continue;
 
-    const name = entry.controlName + '.quaternion';
+    const trackName = entry.controlName + '.quaternion';
+
     replacements.set(
-      name,
+      trackName,
       new THREE.QuaternionKeyframeTrack(
-        name,
-        sampleTimes,
+        trackName,
+        times,
         entry.values
       )
     );
   }
 
   const tracks = sourceTracks.map(
-    track => replacements.get(track.name) || track
+    track => replacements.get(track.name) || track.clone()
   );
 
+  const existing = new Set(tracks.map(track => track.name));
+
+  for (const [trackName, track] of replacements) {
+    if (!existing.has(trackName)) tracks.push(track);
+  }
+
   log(
-    'UE -> Auto-Rig Pro: ' +
+    'UE -> Auto-Rig Pro *_ref solver v2: ' +
     replacements.size +
-    ' controles reconstruidos usando root_ref / spine_ref / limb_ref.'
+    '/' +
+    entries.length +
+    ' controles. Source WORLD -> *_ref -> cambio de ejes -> c_*.'
   );
 
   return new THREE.AnimationClip(
