@@ -11965,157 +11965,42 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
   const tgt = state.target;
   const src = state.source;
 
-  if (
-    state.activePresetId !== 'mixamo_to_arp' ||
-    !rawControlClip ||
-    !tgt.root ||
-    !src.root
-  ) {
+  if (state.activePresetId !== 'mixamo_to_arp' || !rawControlClip || !tgt.root || !src.root) {
     return rawControlClip?.clone?.() || rawControlClip;
   }
-
-  // Stop post-editing c_pos arrays by hand. The working Mixamo -> Rigify path
-  // solves root motion at RETARGET time, in WORLD space, against the actual
-  // target hierarchy. Do the same for ARP, but ONLY for the exported Action.
-  //
-  // Preview/Transfer remain untouched.
-  //
-  // ARP functional split:
-  //   Hips horizontal world motion -> c_pos (global trajectory)
-  //   Hips vertical world motion   -> c_root.x (lower body)
-  //   Hips vertical world motion   -> c_spine_01.x (upper body)
-  //
-  // bakeRetarget understands HORIZONTAL/VERTICAL in Three's normalized Y-up
-  // world space, then converts the result back into each control's real local
-  // FBX space. This is the critical difference from the previous failed
-  // versions, which edited local XYZ channels after the bake.
 
   const cPosName = findBoneByOriginalExact(tgt, ['c_pos']);
   const cRootName = findBoneByOriginalExact(tgt, ['c_root.x']);
   const cSpine01Name = findBoneByOriginalExact(tgt, ['c_spine_01.x']);
-
-  const hipsName =
-    findSemanticBone(src, 'Hips') ||
-    findBoneByOriginalExact(src, [
-      'mixamorig1:Hips',
-      'mixamorig:Hips',
-      'Hips'
-    ]);
+  const hipsName = findSemanticBone(src, 'Hips') || findBoneByOriginalExact(src, ['mixamorig1:Hips','mixamorig:Hips','Hips']);
 
   if (!cPosName || !cRootName || !cSpine01Name || !hipsName) {
-    log(
-      'Mixamo → ARP EXPORT v15: faltan Hips/c_pos/c_root/c_spine_01; ' +
-      'uso copy-back base.'
-    );
     return buildMixamoAutoRigProCleanCopyBackClip(rawControlClip);
   }
 
-  // Keep the proven rotation copy-back exactly as Transfer currently uses it.
-  const rotationBase = buildMixamoAutoRigProCleanCopyBackClip(
-    rawControlClip
-  );
+  const rotationBase = buildMixamoAutoRigProCleanCopyBackClip(rawControlClip);
 
-  // Export-only root-motion bake. These synthetic rows are NOT written into
-  // state.boneMap and therefore cannot affect Mapping, Transfer or preview.
   const rootMotionMap = [
-    {
-      source: hipsName,
-      sourceSpec: 'Hips',
-      target: cPosName,
-      targetSpec: 'c_pos',
-      channels: 'LOC',
-      axes: 'HORIZONTAL',
-      influence: 1,
-      profile: 'mixamo-arp-export-root'
-    },
-    {
-      source: hipsName,
-      sourceSpec: 'Hips',
-      target: cRootName,
-      targetSpec: 'c_root.x',
-      channels: 'LOC',
-      axes: 'VERTICAL',
-      influence: 1,
-      profile: 'mixamo-arp-export-lower'
-    },
-    {
-      source: hipsName,
-      sourceSpec: 'Hips',
-      target: cSpine01Name,
-      targetSpec: 'c_spine_01.x',
-      channels: 'LOC',
-      axes: 'VERTICAL',
-      influence: 1,
-      profile: 'mixamo-arp-export-upper'
-    }
+    { source: hipsName, sourceSpec: 'Hips', target: cPosName, targetSpec: 'c_pos', channels: 'LOC', axes: 'HORIZONTAL', influence: 1, profile: 'mixamo-arp-export-root' },
+    { source: hipsName, sourceSpec: 'Hips', target: cRootName, targetSpec: 'c_root.x', channels: 'LOC', axes: 'VERTICAL', influence: 1, profile: 'mixamo-arp-export-lower' },
+    { source: hipsName, sourceSpec: 'Hips', target: cSpine01Name, targetSpec: 'c_spine_01.x', channels: 'LOC', axes: 'VERTICAL', influence: 1, profile: 'mixamo-arp-export-upper' }
   ];
 
-  const locationClip = bakeRetarget(
-    rootMotionMap,
-    'Retargeted_ARP_ExportRootMotion',
-    { rootMotion: true }
-  );
+  const locationClip = bakeRetarget(rootMotionMap, 'Retargeted_ARP_ExportRootMotion', { rootMotion: true });
+  const replacePositionNames = new Set([cPosName, cRootName, cSpine01Name]);
 
-  const replacePositionNames = new Set([
-    cPosName,
-    cRootName,
-    cSpine01Name
-  ]);
-
-  const tracks = rotationBase.tracks
-    .filter(track => {
-      const parsed = parseTrackTarget(track.name);
-      return !(
-        parsed?.property === 'position' &&
-        replacePositionNames.has(parsed.nodeName)
-      );
-    })
-    .map(track => track.clone());
+  const tracks = rotationBase.tracks.filter(track => {
+    const parsed = parseTrackTarget(track.name);
+    return !(parsed?.property === 'position' && replacePositionNames.has(parsed.nodeName));
+  }).map(track => track.clone());
 
   for (const track of locationClip.tracks || []) {
     const parsed = parseTrackTarget(track.name);
-    if (
-      parsed?.property === 'position' &&
-      replacePositionNames.has(parsed.nodeName)
-    ) {
-      tracks.push(track.clone());
-    }
+    if (parsed?.property === 'position' && replacePositionNames.has(parsed.nodeName)) tracks.push(track.clone());
   }
 
-  const summary = [...replacePositionNames].map(name => {
-    const track = tracks.find(candidate => {
-      const parsed = parseTrackTarget(candidate.name);
-      return parsed?.nodeName === name && parsed.property === 'position';
-    });
-
-    if (!track) return (originalObjectName(tgt.bones.get(name)) || name) + '=SIN_LOC';
-
-    let minY = Infinity, maxY = -Infinity;
-    for (let i = 1; i < track.values.length; i += 3) {
-      minY = Math.min(minY, track.values[i]);
-      maxY = Math.max(maxY, track.values[i]);
-    }
-
-    return (
-      (originalObjectName(tgt.bones.get(name)) || name) +
-      '=YΔ' +
-      (Number.isFinite(minY) && Number.isFinite(maxY)
-        ? (maxY - minY).toFixed(4)
-        : 'n/a')
-    );
-  }).join(' · ');
-
-  log(
-    'Mixamo → ARP EXPORT v15 WORLD root split: ' +
-    'Hips horizontal→c_pos · Hips vertical→c_root+c_spine_01 · ' +
-    summary
-  );
-
-  return new THREE.AnimationClip(
-    'Retargeted_FK',
-    rotationBase.duration,
-    tracks
-  );
+  log('Mixamo → ARP EXPORT v15: root motion horneado en WORLD; Hips horizontal→c_pos, vertical→c_root+c_spine_01.');
+  return new THREE.AnimationClip('Retargeted_FK', rotationBase.duration, tracks);
 }
 function buildMixamoAutoRigProReferenceCopyBackClip(
   rawControlClip,
