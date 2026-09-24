@@ -9235,6 +9235,41 @@ const AUTO_RIG_PRO_IK_CHAINS = [
   }
 ];
 
+const AUTO_RIG_PRO_REFERENCE_IK_CHAINS = [
+  {
+    kind: 'ARM', side: 'L',
+    a: 'arm_ref.l',
+    b: 'forearm_ref.l',
+    c: 'hand_ref.l',
+    ik: 'c_hand_ik.l',
+    pole: 'c_arms_pole.l'
+  },
+  {
+    kind: 'ARM', side: 'R',
+    a: 'arm_ref.r',
+    b: 'forearm_ref.r',
+    c: 'hand_ref.r',
+    ik: 'c_hand_ik.r',
+    pole: 'c_arms_pole.r'
+  },
+  {
+    kind: 'LEG', side: 'L',
+    a: 'thigh_ref.l',
+    b: 'leg_ref.l',
+    c: 'foot_ref.l',
+    ik: 'c_foot_ik.l',
+    pole: 'c_leg_pole.l'
+  },
+  {
+    kind: 'LEG', side: 'R',
+    a: 'thigh_ref.r',
+    b: 'leg_ref.r',
+    c: 'foot_ref.r',
+    ik: 'c_foot_ik.r',
+    pole: 'c_leg_pole.r'
+  }
+];
+
 function resolveDirectControlIkChains(tgt, definitions) {
   return definitions.map(def => {
     const resolved = { ...def };
@@ -9569,6 +9604,50 @@ function bakeAutoRigProIkFromFk() {
     state.deformPreviewClip || state.fkRawClip || state.fkClip,
     { preserveRestPoleDistance: true }
   );
+}
+
+function bakeAutoRigProIkFromReferencePreview() {
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !state.deformPreviewClip
+  ) {
+    return bakeAutoRigProIkFromFk();
+  }
+
+  return bakeDirectControlRigIkFromFk(
+    AUTO_RIG_PRO_REFERENCE_IK_CHAINS,
+    'Auto-Rig Pro · Reference Preview',
+    state.deformPreviewClip,
+    { preserveRestPoleDistance: true }
+  );
+}
+
+function buildMixamoToArpUniversalOriginalRigClip() {
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !usesAutoRigProPipeline() ||
+    !state.fkClip
+  ) {
+    return state.exportClip || state.fkClip;
+  }
+
+  // The page preview is already proven correct on *_ref. Bake IK controls
+  // directly from that same anatomical pose. Export FK + IK + poles together:
+  // whichever IK/FK blend the original ARP .blend currently uses, both sides
+  // describe the same motion.
+  const ik = bakeAutoRigProIkFromReferencePreview();
+
+  const merged = mergeClips(
+    'Retargeted_OriginalRig_FK_IK',
+    [state.fkClip, ik]
+  );
+
+  log(
+    'Mixamo → ARP export universal: FK + IK + POLE desde preview *_ref. ' +
+    'La Action ya no depende de que el rig original esté previamente en FK.'
+  );
+
+  return merged;
 }
 
 
@@ -12207,6 +12286,22 @@ function buildOriginalRigActionFbxPackage(rotationMode = 'xyz') {
 
   if (usesUeToAutoRigProPipeline()) {
     originalRigAction = buildUeAutoRigProCopyBackAction();
+  } else if (
+    usesAutoRigProPipeline() &&
+    state.activePresetId === 'mixamo_to_arp'
+  ) {
+    const universal = buildMixamoToArpUniversalOriginalRigClip();
+    const controlClip = buildOriginalRigControlOnlyClip(
+      withTargetNeutralBaseline(universal)
+    );
+
+    if (controlClip?.tracks?.length) {
+      originalRigAction = createOriginalNameExportClip(
+        controlClip,
+        state.target
+      );
+      originalRigAction.name = 'Retargeted_OriginalRig_FK_IK';
+    }
   } else {
     const exportWithNeutralBase = withTargetNeutralBaseline(state.exportClip);
     const controlClip = buildOriginalRigControlOnlyClip(exportWithNeutralBase);
@@ -12354,15 +12449,42 @@ async function exportTargetFbx() {
           );
         }
 
-        // UE -> ARP special export:
-        // ONE Action only. No neutral baseline. No DEF preview. No helper curves.
-        // This FBX is deliberately an Action carrier for Blender.
         exactActions = [{
           clip: copyBack,
           actionName: 'Retargeted_OriginalRig_FK',
           includeControlPositions: true
         }];
         currentActionName = 'Retargeted_OriginalRig_FK';
+      } else if (
+        usesAutoRigProPipeline() &&
+        state.activePresetId === 'mixamo_to_arp'
+      ) {
+        const universalRuntime = buildMixamoToArpUniversalOriginalRigClip();
+        const universalControl = buildOriginalRigControlOnlyClip(
+          withTargetNeutralBaseline(universalRuntime)
+        );
+
+        if (!universalControl?.tracks?.length) {
+          throw new Error(
+            'Mixamo → Auto-Rig Pro: no pude construir la Action FK+IK universal.'
+          );
+        }
+
+        const universal = createOriginalNameExportClip(
+          universalControl,
+          state.target
+        );
+
+        universal.name = 'Retargeted_OriginalRig_FK_IK';
+
+        // ONE action only. No DEF preview. The FBX is an Action carrier for
+        // the original ARP .blend and includes both kinematic solutions.
+        exactActions = [{
+          clip: universal,
+          actionName: 'Retargeted_OriginalRig_FK_IK',
+          includeControlPositions: true
+        }];
+        currentActionName = 'Retargeted_OriginalRig_FK_IK';
       } else {
         exactActions = [
           {
@@ -12422,6 +12544,15 @@ async function exportTargetFbx() {
           `UE → Auto-Rig Pro EXPORT copy-back: [${clipNames}] · ` +
           `${report.curveNodes} CurveNodes · ${report.curves} Curves. ` +
           'FBX contiene UNA sola Action de controles c_* para copiar al rig ARP original.'
+        );
+      } else if (
+        usesAutoRigProPipeline() &&
+        state.activePresetId === 'mixamo_to_arp'
+      ) {
+        log(
+          `Mixamo → Auto-Rig Pro EXPORT universal: [${clipNames}] · ` +
+          `${report.curveNodes} CurveNodes · ${report.curves} Curves · ` +
+          'FK + IK + POLE en una sola Action para el rig ARP original.'
         );
       } else {
         log(
