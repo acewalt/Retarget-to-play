@@ -11963,215 +11963,41 @@ function buildMixamoAutoRigProCleanCopyBackClip(rawControlClip) {
 
 function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
   const tgt = state.target;
-  const refClip = state.deformPreviewClip;
 
   if (
     state.activePresetId !== 'mixamo_to_arp' ||
     !rawControlClip ||
-    !refClip ||
     !tgt.root
   ) {
     return rawControlClip?.clone?.() || rawControlClip;
   }
 
-  // Mixamo -> Auto-Rig Pro copy-back for the ORIGINAL Blender rig.
+  // IMPORTANT: Copy the proven Mixamo -> Rigify root-motion strategy.
   //
-  // The important ARP split, confirmed by the original hierarchy, is:
+  // Rigify works because Hips is split as:
+  //   Hips ROT -> pelvis/FK control
+  //   Hips LOC XY -> global root
+  //   Hips LOC Z  -> torso/body-height control
   //
-  //   c_pos
-  //     └─ c_traj
-  //         └─ c_root_master.x   <- common rotational carrier
-  //             ├─ c_root.x      <- LOWER body branch
-  //             └─ c_spine_01.x  <- UPPER body branch
+  // ARP has the same functional split, but with TWO body branches:
+  //   c_pos        = global trajectory
+  //   c_root.x     = lower body / legs
+  //   c_spine_01.x = upper body / torso
   //
-  // Therefore Mixamo Hips must NOT be baked independently into c_root.x and
-  // c_spine_01.x. Doing that duplicates the pelvis rotation and only happens
-  // to look plausible inside the constraint-less FBX carrier.
+  // Keep the already-good ARP rotation copy-back EXACTLY as it was and only
+  // redistribute the Hips translation here:
+  //   c_pos XY        <- Hips XY
+  //   c_pos Z         <- REST (never lifts whole rig)
+  //   c_root.x Z      <- Hips Z delta
+  //   c_spine_01.x Z  <- Hips Z delta
   //
-  // Correct original-rig Action:
-  //   Hips LOC -> c_pos
-  //   Hips ROT/root_ref -> c_root_master.x
-  //   c_root.x -> neutral branch frame
-  //   Spine relative to Hips -> c_spine_01.x
-  //   remaining controls -> clean anatomical relative transforms
-  //
-  // The FBX stores rest-local transforms, while Blender Actions store
-  // matrix_basis. For every control below we solve a logical clean local pose,
-  // compute matrix_basis = inverse(logicalRest) * logicalPose, then transport
-  // that basis through the real imported FBX rest-local transform.
+  // This deliberately uses Z as the vertical channel because that is the
+  // same convention used by the known-good Mixamo -> Rigify preset and by
+  // the original Blender ARP action copy-back. Do NOT infer Y-up from the
+  // Three.js viewport here: this clip is an FBX/Blender Action carrier.
 
-  const specs = [
-    // [control, reference, logical parent]
-    ['c_root_master.x', 'root_ref.x', null],
-    ['c_root.x', null, 'c_root_master.x'],
-    ['c_spine_01.x', 'spine_01_ref.x', 'c_root_master.x'],
-    ['c_spine_02.x', 'spine_02_ref.x', 'c_spine_01.x'],
+  const base = buildMixamoAutoRigProCleanCopyBackClip(rawControlClip);
 
-    ['c_neck.x', 'neck_ref.x', 'c_spine_02.x'],
-    ['c_head.x', 'head_ref.x', 'c_neck.x'],
-
-    ['c_shoulder.l', 'shoulder_ref.l', 'c_spine_02.x'],
-    // In the exported/original ARP hierarchy arm FK is a sibling of shoulder
-    // below spine_02.x. Shoulder motion must not be multiplied twice.
-    ['c_arm_fk.l', 'arm_ref.l', 'c_spine_02.x'],
-    ['c_forearm_fk.l', 'forearm_ref.l', 'c_arm_fk.l'],
-    ['c_hand_fk.l', 'hand_ref.l', 'c_forearm_fk.l'],
-
-    ['c_shoulder.r', 'shoulder_ref.r', 'c_spine_02.x'],
-    ['c_arm_fk.r', 'arm_ref.r', 'c_spine_02.x'],
-    ['c_forearm_fk.r', 'forearm_ref.r', 'c_arm_fk.r'],
-    ['c_hand_fk.r', 'hand_ref.r', 'c_forearm_fk.r'],
-
-    ['c_thigh_fk.l', 'thigh_ref.l', 'c_root.x'],
-    ['c_leg_fk.l', 'leg_ref.l', 'c_thigh_fk.l'],
-    ['c_foot_fk.l', 'foot_ref.l', 'c_leg_fk.l'],
-    ['c_toes_fk.l', 'toes_ref.l', 'c_foot_fk.l'],
-
-    ['c_thigh_fk.r', 'thigh_ref.r', 'c_root.x'],
-    ['c_leg_fk.r', 'leg_ref.r', 'c_thigh_fk.r'],
-    ['c_foot_fk.r', 'foot_ref.r', 'c_leg_fk.r'],
-    ['c_toes_fk.r', 'toes_ref.r', 'c_foot_fk.r']
-  ];
-
-  for (const side of ['l', 'r']) {
-    for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
-      for (let i = 1; i <= 3; i++) {
-        const control = 'c_' + finger + i + '.' + side;
-        const ref = finger + i + '_ref.' + side;
-        const parent =
-          i === 1
-            ? 'c_hand_fk.' + side
-            : 'c_' + finger + (i - 1) + '.' + side;
-        specs.push([control, ref, parent]);
-      }
-    }
-  }
-
-  restoreRest(tgt);
-  updateSlotWorld(tgt);
-
-  const entries = [];
-
-  for (const [controlOriginal, refOriginal, parentControlOriginal] of specs) {
-    const controlName = findBoneByOriginalExact(tgt, [controlOriginal]);
-    if (!controlName) continue;
-
-    const control = tgt.bones.get(controlName);
-    const controlRest = tgt.rest.get(controlName);
-    if (!control || !controlRest) continue;
-
-    const refName = refOriginal
-      ? findBoneByOriginalExact(tgt, [refOriginal])
-      : null;
-    const ref = refName ? tgt.bones.get(refName) : null;
-    const refRest = refName ? tgt.rest.get(refName) : null;
-
-    // Neutral virtual controls (currently c_root.x) intentionally have no ref.
-    if (refOriginal && (!refName || !ref || !refRest)) continue;
-
-    const parentControlName = parentControlOriginal
-      ? findBoneByOriginalExact(tgt, [parentControlOriginal])
-      : null;
-
-    const parentControl = parentControlName
-      ? tgt.bones.get(parentControlName)
-      : null;
-
-    const controlRestWorld = new THREE.Matrix4().compose(
-      controlRest.worldPos,
-      controlRest.worldQuat,
-      controlRest.worldScale || new THREE.Vector3(1, 1, 1)
-    );
-
-    const parentRest = parentControlName
-      ? tgt.rest.get(parentControlName)
-      : null;
-
-    const parentRestWorld = parentRest
-      ? new THREE.Matrix4().compose(
-          parentRest.worldPos,
-          parentRest.worldQuat,
-          parentRest.worldScale || new THREE.Vector3(1, 1, 1)
-        )
-      : null;
-
-    const logicalRestLocal = parentRestWorld
-      ? parentRestWorld.clone().invert().multiply(controlRestWorld)
-      : controlRestWorld.clone();
-
-    const logicalRestPosition = new THREE.Vector3();
-    const logicalRestQuaternion = new THREE.Quaternion();
-    const logicalRestScale = new THREE.Vector3();
-
-    logicalRestLocal.decompose(
-      logicalRestPosition,
-      logicalRestQuaternion,
-      logicalRestScale
-    );
-    logicalRestQuaternion.normalize();
-
-    const refRestWorld = refRest
-      ? new THREE.Matrix4().compose(
-          refRest.worldPos,
-          refRest.worldQuat,
-          refRest.worldScale || new THREE.Vector3(1, 1, 1)
-        )
-      : null;
-
-    entries.push({
-      controlOriginal,
-      controlName,
-      control,
-      controlRest,
-      refOriginal,
-      refName,
-      ref,
-      refRestWorldInv: refRestWorld
-        ? refRestWorld.clone().invert()
-        : null,
-      controlRestWorld,
-      parentControlOriginal,
-      parentControlName,
-      parentControl,
-      logicalRestLocal,
-      logicalRestQuaternion,
-      logicalRestQuaternionInv: logicalRestQuaternion.clone().invert(),
-      q: [],
-      previousQ: null,
-      desiredWorld: new THREE.Matrix4()
-    });
-  }
-
-  if (!entries.length) {
-    return buildMixamoAutoRigProReferenceCopyBackClip(rawControlClip);
-  }
-
-  const entryByControl = new Map(
-    entries.map(entry => [entry.controlName, entry])
-  );
-
-  const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
-  const frameCount = Math.max(
-    2,
-    Math.ceil(refClip.duration * fps) + 1
-  );
-  const times = Array.from(
-    { length: frameCount },
-    (_, i) => Math.min(refClip.duration, i / fps)
-  );
-
-  const controlledNames = new Set(entries.map(entry => entry.controlName));
-
-  // Original ARP separates trajectory/global motion from the two anatomical
-  // branches. c_pos is the global/trajectory carrier. Letting Mixamo Hips'
-  // vertical bob live there moves the ENTIRE rig away from the floor in
-  // Blender. Keep only ground-plane travel on c_pos and move the vertical
-  // Hips delta into BOTH branch roots:
-  //
-  //   c_root.x     -> lower body / legs
-  //   c_spine_01.x -> upper body / torso
-  //
-  // This preserves the source pelvis height without lifting the global root.
   const cPosName = findBoneByOriginalExact(tgt, ['c_pos']);
   const cRootName = findBoneByOriginalExact(tgt, ['c_root.x']);
   const cSpine01Name = findBoneByOriginalExact(tgt, ['c_spine_01.x']);
@@ -12180,335 +12006,102 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
   const cRootRest = cRootName ? tgt.rest.get(cRootName) : null;
   const cSpine01Rest = cSpine01Name ? tgt.rest.get(cSpine01Name) : null;
 
-  const cPosTrack = rawControlClip.tracks.find(track => {
+  if (
+    !cPosName || !cRootName || !cSpine01Name ||
+    !cPosRest || !cRootRest || !cSpine01Rest
+  ) {
+    log('Mixamo → ARP EXPORT: faltan c_pos/c_root/c_spine_01; uso copy-back base.');
+    return base;
+  }
+
+  const rawPosTrack = rawControlClip.tracks.find(track => {
     const parsed = parseTrackTarget(track.name);
     return (
       parsed?.nodeName === cPosName &&
-      parsed?.property === 'position'
+      parsed.property === 'position'
     );
   });
 
-  // FBX declares its local up axis explicitly. Blender/ARP FBX is normally
-  // Z-up (=2), while other targets may be Y-up. Position tracks are still in
-  // the raw FBX local basis, so use this axis instead of the Y-up viewport.
-  const declaredUpAxis = Number(tgt.metadata?.upAxis);
-  const upAxis = [0, 1, 2].includes(declaredUpAxis)
-    ? declaredUpAxis
-    : 2;
+  if (!rawPosTrack?.times?.length || rawPosTrack.values.length < 3) {
+    log('Mixamo → ARP EXPORT: c_pos no tiene LOC; uso copy-back base.');
+    return base;
+  }
 
-  const sampleVectorTrack = (track, time, out) => {
-    if (!track?.times?.length || !track?.values?.length) return null;
+  const times = Array.from(rawPosTrack.times);
+  const globalValues = [];
+  const lowerValues = [];
+  const upperValues = [];
 
-    const ts = track.times;
-    const vs = track.values;
-    const n = ts.length;
+  for (let i = 0; i < times.length; i++) {
+    const k = i * 3;
 
-    if (time <= ts[0]) {
-      out.set(vs[0], vs[1], vs[2]);
-      return out;
-    }
+    const x = Number(rawPosTrack.values[k]) || 0;
+    const y = Number(rawPosTrack.values[k + 1]) || 0;
+    const z = Number(rawPosTrack.values[k + 2]) || 0;
 
-    if (time >= ts[n - 1]) {
-      const j = (n - 1) * 3;
-      out.set(vs[j], vs[j + 1], vs[j + 2]);
-      return out;
-    }
+    const dz = z - cPosRest.position.z;
 
-    let lo = 0;
-    let hi = n - 1;
-    while (hi - lo > 1) {
-      const mid = (lo + hi) >> 1;
-      if (ts[mid] <= time) lo = mid;
-      else hi = mid;
-    }
-
-    const t0 = Number(ts[lo]);
-    const t1 = Number(ts[hi]);
-    const alpha = t1 > t0
-      ? THREE.MathUtils.clamp((time - t0) / (t1 - t0), 0, 1)
-      : 0;
-
-    const a = lo * 3;
-    const b = hi * 3;
-
-    out.set(
-      THREE.MathUtils.lerp(vs[a], vs[b], alpha),
-      THREE.MathUtils.lerp(vs[a + 1], vs[b + 1], alpha),
-      THREE.MathUtils.lerp(vs[a + 2], vs[b + 2], alpha)
+    // Same split as Mixamo -> Rigify:
+    // root gets planar trajectory, body branches get vertical pelvis motion.
+    globalValues.push(
+      x,
+      y,
+      cPosRest.position.z
     );
 
-    return out;
-  };
+    lowerValues.push(
+      cRootRest.position.x,
+      cRootRest.position.y,
+      cRootRest.position.z + dz
+    );
 
-  const redistributedRootMotion = {
-    cPos: [],
-    lower: [],
-    upper: []
-  };
+    upperValues.push(
+      cSpine01Rest.position.x,
+      cSpine01Rest.position.y,
+      cSpine01Rest.position.z + dz
+    );
+  }
 
-  const baseTracks = rawControlClip.tracks
+  const tracks = base.tracks
     .filter(track => {
       const parsed = parseTrackTarget(track.name);
-      if (!parsed) return true;
+      if (parsed?.property !== 'position') return true;
 
-      // Rotations for every solved ARP control are rebuilt below.
-      if (
-        controlledNames.has(parsed.nodeName) &&
-        parsed.property === 'quaternion'
-      ) {
-        return false;
-      }
-
-      // These three position channels are rebuilt below. c_pos keeps only
-      // ground-plane travel; the vertical component is redistributed to the
-      // lower/upper ARP branch roots.
-      if (
-        parsed.property === 'position' &&
-        (
-          parsed.nodeName === cPosName ||
-          parsed.nodeName === cRootName ||
-          parsed.nodeName === cSpine01Name
-        )
-      ) {
-        return false;
-      }
-
-      return true;
+      return !(
+        parsed.nodeName === cPosName ||
+        parsed.nodeName === cRootName ||
+        parsed.nodeName === cSpine01Name
+      );
     })
     .map(track => track.clone());
 
-  const mixer = new THREE.AnimationMixer(tgt.root);
-  const action = mixer.clipAction(refClip).play();
-
-  const refDelta = new THREE.Matrix4();
-  const parentWorldInv = new THREE.Matrix4();
-  const logicalPoseLocal = new THREE.Matrix4();
-
-  const logicalPosePosition = new THREE.Vector3();
-  const logicalPoseQuaternion = new THREE.Quaternion();
-  const logicalPoseScale = new THREE.Vector3();
-
-  const basisDelta = new THREE.Quaternion();
-  const exportLocal = new THREE.Quaternion();
-
-  try {
-    for (const time of times) {
-      restoreRest(tgt);
-      mixer.setTime(Number(time));
-      updateSlotWorld(tgt);
-
-      // Rebuild ARP global/root translation from the raw Mixamo Hips LOC.
-      // Crucially, the declared FBX up-axis is removed from c_pos so the
-      // global control stays on its floor plane. The SAME vertical delta is
-      // applied to both body branch roots, preserving pelvis bob/crouch while
-      // Source feet keep their intended world trajectory.
-      if (
-        cPosTrack &&
-        cPosRest &&
-        cRootRest &&
-        cSpine01Rest
-      ) {
-        const sampled = sampleVectorTrack(
-          cPosTrack,
-          Number(time),
-          new THREE.Vector3()
-        );
-
-        if (sampled) {
-          const restArray = [
-            cPosRest.position.x,
-            cPosRest.position.y,
-            cPosRest.position.z
-          ];
-
-          const rawArray = [sampled.x, sampled.y, sampled.z];
-          const verticalDelta = rawArray[upAxis] - restArray[upAxis];
-
-          // Global trajectory: X/Y ground plane only (or equivalent for the
-          // declared axis). Never let this control create vertical floating.
-          const globalArray = [...rawArray];
-          globalArray[upAxis] = restArray[upAxis];
-
-          redistributedRootMotion.cPos.push(
-            globalArray[0],
-            globalArray[1],
-            globalArray[2]
-          );
-
-          const lowerArray = [
-            cRootRest.position.x,
-            cRootRest.position.y,
-            cRootRest.position.z
-          ];
-          const upperArray = [
-            cSpine01Rest.position.x,
-            cSpine01Rest.position.y,
-            cSpine01Rest.position.z
-          ];
-
-          lowerArray[upAxis] += verticalDelta;
-          upperArray[upAxis] += verticalDelta;
-
-          redistributedRootMotion.lower.push(
-            lowerArray[0],
-            lowerArray[1],
-            lowerArray[2]
-          );
-          redistributedRootMotion.upper.push(
-            upperArray[0],
-            upperArray[1],
-            upperArray[2]
-          );
-        }
-      }
-
-      // Parent-first order is already guaranteed by specs. Build the desired
-      // clean WORLD hierarchy without mutating the actual FBX controls.
-      for (const entry of entries) {
-        let parentWorld = null;
-
-        if (entry.parentControlName) {
-          const parentEntry = entryByControl.get(entry.parentControlName);
-          parentWorld = parentEntry?.desiredWorld || entry.parentControl?.matrixWorld || null;
-        }
-
-        if (entry.ref && entry.refRestWorldInv) {
-          refDelta.copy(entry.ref.matrixWorld)
-            .multiply(entry.refRestWorldInv);
-
-          // For root_master this transfers root_ref/Hips as the common global
-          // rotation. For children the desired anatomical ref pose is used.
-          entry.desiredWorld.copy(refDelta)
-            .multiply(entry.controlRestWorld);
-        } else if (parentWorld) {
-          // c_root.x is the neutral lower-body branch frame. It follows the
-          // animated root_master but contributes no second Hips rotation.
-          entry.desiredWorld.copy(parentWorld)
-            .multiply(entry.logicalRestLocal);
-        } else {
-          entry.desiredWorld.copy(entry.controlRestWorld);
-        }
-      }
-
-      for (const entry of entries) {
-        let parentWorld = null;
-
-        if (entry.parentControlName) {
-          const parentEntry = entryByControl.get(entry.parentControlName);
-          parentWorld = parentEntry?.desiredWorld || entry.parentControl?.matrixWorld || null;
-        }
-
-        if (parentWorld) {
-          parentWorldInv.copy(parentWorld).invert();
-          logicalPoseLocal.copy(parentWorldInv).multiply(entry.desiredWorld);
-        } else {
-          logicalPoseLocal.copy(entry.desiredWorld);
-        }
-
-        logicalPoseLocal.decompose(
-          logicalPosePosition,
-          logicalPoseQuaternion,
-          logicalPoseScale
-        );
-        logicalPoseQuaternion.normalize();
-
-        // Blender pose matrix_basis in the logical clean hierarchy.
-        basisDelta.copy(entry.logicalRestQuaternionInv)
-          .multiply(logicalPoseQuaternion)
-          .normalize();
-
-        // FBX carrier local = imported REST local * matrix_basis.
-        // Blender's FBX importer recovers the same pose-channel basis when the
-        // resulting Action is copied to the ORIGINAL Auto-Rig Pro armature.
-        exportLocal.copy(entry.controlRest.quaternion)
-          .multiply(basisDelta)
-          .normalize();
-
-        if (entry.previousQ && entry.previousQ.dot(exportLocal) < 0) {
-          exportLocal.x *= -1;
-          exportLocal.y *= -1;
-          exportLocal.z *= -1;
-          exportLocal.w *= -1;
-        }
-
-        entry.q.push(
-          exportLocal.x,
-          exportLocal.y,
-          exportLocal.z,
-          exportLocal.w
-        );
-        entry.previousQ = exportLocal.clone();
-      }
-    }
-  } finally {
-    action.stop();
-    mixer.stopAllAction();
-    restoreRest(tgt);
-  }
-
-  const tracks = [...baseTracks];
-
-  if (
-    cPosName &&
-    redistributedRootMotion.cPos.length === times.length * 3
-  ) {
-    tracks.push(
-      new THREE.VectorKeyframeTrack(
-        cPosName + '.position',
-        times,
-        redistributedRootMotion.cPos
-      )
-    );
-  }
-
-  if (
-    cRootName &&
-    redistributedRootMotion.lower.length === times.length * 3
-  ) {
-    tracks.push(
-      new THREE.VectorKeyframeTrack(
-        cRootName + '.position',
-        times,
-        redistributedRootMotion.lower
-      )
-    );
-  }
-
-  if (
-    cSpine01Name &&
-    redistributedRootMotion.upper.length === times.length * 3
-  ) {
-    tracks.push(
-      new THREE.VectorKeyframeTrack(
-        cSpine01Name + '.position',
-        times,
-        redistributedRootMotion.upper
-      )
-    );
-  }
-
-  for (const entry of entries) {
-    if (entry.q.length === times.length * 4) {
-      tracks.push(
-        new THREE.QuaternionKeyframeTrack(
-          entry.controlName + '.quaternion',
-          times,
-          entry.q
-        )
-      );
-    }
-  }
+  tracks.push(
+    new THREE.VectorKeyframeTrack(
+      cPosName + '.position',
+      times,
+      globalValues
+    ),
+    new THREE.VectorKeyframeTrack(
+      cRootName + '.position',
+      times,
+      lowerValues
+    ),
+    new THREE.VectorKeyframeTrack(
+      cSpine01Name + '.position',
+      times,
+      upperValues
+    )
+  );
 
   log(
-    'Mixamo → ARP EXPORT ONLY v12: rotaciones intactas · c_pos sólo trayectoria de suelo · ' +
-    'altura Hips redistribuida a c_root + c_spine_01 · ' +
-    entries.length +
-    ' controles recodificados como matrix_basis para el rig original.'
+    'Mixamo → ARP EXPORT v14 · estrategia Rigify: ' +
+    'c_pos=Hips XY + Z REST · c_root/c_spine_01=Hips Z · ' +
+    'rotaciones ARP copy-back sin tocar.'
   );
 
   return new THREE.AnimationClip(
     'Retargeted_FK',
-    refClip.duration,
+    base.duration,
     tracks
   );
 }
