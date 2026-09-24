@@ -6211,7 +6211,7 @@ function applyRetarget() {
     if (usesUeToAutoRigProPipeline()) {
       log(
         'UE → Auto-Rig Pro FK: basis LOCAL del Source respecto a su parent anatómico → ' +
-        'ejes c_* de ARP → matrix_basis (sin reconstrucción WORLD *_ref).'
+        'ejes anatómicos *_ref de ARP → matrix_basis c_* (sin pose WORLD *_ref).'
       );
     }
     state.ikOnlyClip = null;
@@ -8963,13 +8963,37 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
           .normalize()
       : item.sourceRest.worldQuat.clone().normalize();
 
-    // Coordinate transform from UE bone-local axes to this ARP c_* control's
-    // rotation-channel axes. Unlike the failed *_ref WORLD reconstruction,
-    // this conversion is applied to a LOCAL basis delta exactly once.
-    const sourceToControl = item.controlRest.worldQuat.clone()
-      .invert()
-      .multiply(item.sourceRest.worldQuat)
-      .normalize();
+    // ARP's *_ref branch is the anatomical coordinate frame. Use it ONLY to
+    // convert the already-computed SOURCE-LOCAL delta into ARP anatomical
+    // axes. Do not reconstruct a *_ref WORLD pose here: that was the previous
+    // double-parent / double-axis failure visible as the permanent forward
+    // torso bend.
+    const refOriginal =
+      AUTO_RIG_PRO_CONTROL_TO_REFERENCE[item.controlOriginal] || '';
+
+    const refName = refOriginal
+      ? findBoneByOriginalExact(tgt, [refOriginal])
+      : '';
+
+    const refRest = refName ? tgt.rest.get(refName) : null;
+
+    // sourceBasis lives in the UE child bone's local axes. Convert that delta
+    // into the corresponding ARP anatomical (*_ref) bone axes:
+    //
+    //   D_ref = C * D_source * inverse(C)
+    //   C     = inverse(Q_ref_rest_world) * Q_source_rest_world
+    //
+    // The c_* matrix_basis then consumes this anatomical delta directly.
+    // We intentionally do NOT apply another ref->control conjugation.
+    const sourceToReference = refRest
+      ? refRest.worldQuat.clone()
+          .invert()
+          .multiply(item.sourceRest.worldQuat)
+          .normalize()
+      : item.controlRest.worldQuat.clone()
+          .invert()
+          .multiply(item.sourceRest.worldQuat)
+          .normalize();
 
     entries.push({
       ...item,
@@ -8977,8 +9001,11 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
       sourceParentRest,
       sourceRestRelative,
       sourceRestRelativeInv: sourceRestRelative.clone().invert(),
-      sourceToControl,
-      sourceToControlInv: sourceToControl.clone().invert(),
+      refName,
+      refOriginal,
+      refRest,
+      sourceToReference,
+      sourceToReferenceInv: sourceToReference.clone().invert(),
       values: [],
       previous: null
     });
@@ -9049,9 +9076,9 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
           .multiply(sourcePoseRelative)
           .normalize();
 
-        controlBasis.copy(entry.sourceToControl)
+        controlBasis.copy(entry.sourceToReference)
           .multiply(sourceBasis)
-          .multiply(entry.sourceToControlInv)
+          .multiply(entry.sourceToReferenceInv)
           .normalize();
 
         exportLocal.copy(entry.controlRest.quaternion)
@@ -9108,11 +9135,11 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
   }
 
   log(
-    'UE -> Auto-Rig Pro local-basis solver v4: ' +
+    'UE -> Auto-Rig Pro local-basis solver v5: ' +
     replacements.size +
     '/' +
     entries.length +
-    ' controles. UE mapped-parent local basis -> c_* axes -> matrix_basis.'
+    ' controles. UE mapped-parent local basis -> *_ref anatomical axes -> c_* matrix_basis.'
   );
 
   return new THREE.AnimationClip(
