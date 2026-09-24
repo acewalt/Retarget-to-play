@@ -13872,7 +13872,22 @@ async function exportTargetFbx() {
         usesAutoRigProPipeline() &&
         state.activePresetId === 'mixamo_to_arp'
       ) {
-        const selectedRuntimeClip = state.exportClip || state.fkClip;
+        // IMPORTANT: the main Export button must use the SAME original-rig
+        // copy-back solver as "Exportar FBX Action para rig original".
+        // Previously this branch bypassed buildMixamoAutoRigProOriginalRigExportClip(),
+        // which is why the user saw literally no change after the export-only
+        // root-motion fixes.
+        const isFkExport =
+          !state.ikOnlyClip ||
+          state.exportClip === state.fkClip ||
+          state.exportClip?.name === 'Retargeted_FK';
+
+        const selectedRuntimeClip = isFkExport
+          ? buildMixamoAutoRigProOriginalRigExportClip(
+              state.fkRawClip || state.fkClip
+            )
+          : (state.exportClip || state.fkClip);
+
         const controlRuntime = buildOriginalRigControlOnlyClip(
           withTargetNeutralBaseline(selectedRuntimeClip)
         );
@@ -13890,14 +13905,16 @@ async function exportTargetFbx() {
           state.target
         );
 
-        originalRigClip.name = 'Retargeted_OriginalRig_FK';
+        originalRigClip.name = isFkExport
+          ? 'Retargeted_OriginalRig_FK'
+          : (selectedRuntimeClip.name || 'Retargeted_OriginalRig');
 
         exactActions = [{
           clip: originalRigClip,
-          actionName: 'Retargeted_OriginalRig_FK',
+          actionName: originalRigClip.name,
           includeControlPositions: true
         }];
-        currentActionName = 'Retargeted_OriginalRig_FK';
+        currentActionName = originalRigClip.name;
       } else {
         exactActions = [
           {
