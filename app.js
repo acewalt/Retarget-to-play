@@ -6211,7 +6211,7 @@ function applyRetarget() {
     if (usesUeToAutoRigProPipeline()) {
       log(
         'UE → Auto-Rig Pro FK: Source WORLD → jerarquía *_ref → ' +
-        'conversión de ejes local *_ref/c_* → matrix_basis.'
+        'matrix_basis directo de referencia (sin doble cambio de ejes).'
       );
     }
     state.ikOnlyClip = null;
@@ -8910,12 +8910,6 @@ function buildUeAutoRigProReferenceAction(rawClip) {
 
     const parentRefName = resolveRefParent(refName);
 
-    // Frame conversion from anatomical *_ref local axes to animator c_* axes.
-    const refToControl = controlRest.worldQuat.clone()
-      .invert()
-      .multiply(refRest.worldQuat)
-      .normalize();
-
     entries.push({
       sourceName: pair.source,
       sourceRest,
@@ -8926,8 +8920,6 @@ function buildUeAutoRigProReferenceAction(rawClip) {
       refOriginal,
       refRest,
       parentRefName,
-      refToControl,
-      refToControlInv: refToControl.clone().invert(),
       values: [],
       previous: null
     });
@@ -8955,15 +8947,16 @@ function buildUeAutoRigProReferenceAction(rawClip) {
     (_, i) => Math.min(sourceClip.duration, i / fps)
   );
 
-  if (!src.mixer) {
-    src.mixer = new THREE.AnimationMixer(src.root);
-    src.action = src.mixer.clipAction(sourceClip).play();
-  }
+  // Use an isolated mixer. The viewport Source mixer may already contain
+  // playback state, so using it here can contaminate the sampled WORLD pose.
+  restoreRest(src);
+  const sourceMixer = new THREE.AnimationMixer(src.root);
+  const sourceAction = sourceMixer.clipAction(sourceClip).play();
 
   try {
     for (const time of times) {
       restoreRest(src);
-      src.mixer.setTime(Number(time));
+      sourceMixer.setTime(Number(time));
       updateSlotWorld(src);
 
       const desiredRefWorld = new Map();
@@ -9070,15 +9063,13 @@ function buildUeAutoRigProReferenceAction(rawClip) {
             .normalize();
         }
 
-        // *_ref bones and c_* controls use different local bone axes.
-        // Convert the anatomical delta into the actual control frame.
-        const controlBasis = entry.refToControl.clone()
-          .multiply(refBasis)
-          .multiply(entry.refToControlInv)
-          .normalize();
-
+        // Auto-Rig Pro's c_* animator controls are authored from the *_ref
+        // anatomical bones. The reference-local delta is the matrix_basis
+        // delta we need. Do NOT conjugate it through the raw FBX control
+        // world orientation: that applies the axis conversion twice and was
+        // the source of the torso/head facing the wrong direction.
         const exportLocal = entry.controlRest.quaternion.clone()
-          .multiply(controlBasis)
+          .multiply(refBasis)
           .normalize();
 
         if (entry.previous && entry.previous.dot(exportLocal) < 0) {
@@ -9099,6 +9090,8 @@ function buildUeAutoRigProReferenceAction(rawClip) {
       }
     }
   } finally {
+    sourceAction.stop();
+    sourceMixer.stopAllAction();
     restoreRest(src);
   }
 
@@ -9130,11 +9123,11 @@ function buildUeAutoRigProReferenceAction(rawClip) {
   }
 
   log(
-    'UE -> Auto-Rig Pro *_ref solver v2: ' +
+    'UE -> Auto-Rig Pro *_ref solver v3: ' +
     replacements.size +
     '/' +
     entries.length +
-    ' controles. Source WORLD -> *_ref -> cambio de ejes -> c_*.'
+    ' controles. Source WORLD -> *_ref local basis -> c_* (sin doble conversión de ejes).'
   );
 
   return new THREE.AnimationClip(
