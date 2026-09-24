@@ -4740,6 +4740,144 @@ function buildMixamoControlRigDeformPreviewMap() {
   );
 }
 
+function buildUeToArpSpineSourceRemap() {
+  const remap = new Map();
+
+  if (!usesUeToAutoRigProPipeline()) return remap;
+
+  const src = state.source;
+  const tgt = state.target;
+  if (!src?.root || !tgt?.root) return remap;
+
+  const srcPelvisName =
+    findBoneByOriginalExact(src, ['pelvis']) ||
+    findSemanticBone(src, 'pelvis');
+
+  const srcNeckName =
+    findBoneByOriginalExact(src, ['neck_02', 'neck_01']) ||
+    findSemanticBone(src, 'neck');
+
+  const tgtRootRefName =
+    findBoneByOriginalExact(tgt, ['root_ref.x']);
+
+  const tgtNeckRefName =
+    findBoneByOriginalExact(tgt, ['neck_ref.x']);
+
+  if (!srcPelvisName || !srcNeckName || !tgtRootRefName || !tgtNeckRefName) {
+    return remap;
+  }
+
+  const srcPelvisRest = src.rest.get(srcPelvisName);
+  const srcNeckRest = src.rest.get(srcNeckName);
+  const tgtRootRefRest = tgt.rest.get(tgtRootRefName);
+  const tgtNeckRefRest = tgt.rest.get(tgtNeckRefName);
+
+  if (!srcPelvisRest || !srcNeckRest || !tgtRootRefRest || !tgtNeckRefRest) {
+    return remap;
+  }
+
+  const normalizedAlong = (point, start, end) => {
+    const axis = end.clone().sub(start);
+    const lenSq = axis.lengthSq();
+    if (lenSq < 1e-10) return 0;
+    return THREE.MathUtils.clamp(
+      point.clone().sub(start).dot(axis) / lenSq,
+      0,
+      1
+    );
+  };
+
+  const sourceCandidates = [
+    'spine_01',
+    'spine_02',
+    'spine_03',
+    'spine_04',
+    'spine_05'
+  ]
+    .map(original => {
+      const runtime =
+        findBoneByOriginalExact(src, [original]) ||
+        findSemanticBone(src, original);
+
+      const rest = runtime ? src.rest.get(runtime) : null;
+      if (!runtime || !rest) return null;
+
+      return {
+        original,
+        runtime,
+        t: normalizedAlong(
+          rest.worldPos,
+          srcPelvisRest.worldPos,
+          srcNeckRest.worldPos
+        )
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.t - b.t);
+
+  const targetRefs = [
+    ['c_spine_01.x', 'spine_01_ref.x'],
+    ['c_spine_02.x', 'spine_02_ref.x']
+  ]
+    .map(([control, refOriginal]) => {
+      const runtime = findBoneByOriginalExact(tgt, [refOriginal]);
+      const rest = runtime ? tgt.rest.get(runtime) : null;
+      if (!runtime || !rest) return null;
+
+      return {
+        control,
+        refOriginal,
+        t: normalizedAlong(
+          rest.worldPos,
+          tgtRootRefRest.worldPos,
+          tgtNeckRefRest.worldPos
+        )
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => a.t - b.t);
+
+  if (sourceCandidates.length < 2 || targetRefs.length < 2) {
+    return remap;
+  }
+
+  // Pick an ordered pair of UE spine bones that best matches the actual ARP
+  // reference-bone heights. This avoids assuming CloudRig's spine_03/spine_05
+  // landmarks are also correct for this Auto-Rig Pro rig.
+  let best = null;
+
+  for (let i = 0; i < sourceCandidates.length - 1; i++) {
+    for (let j = i + 1; j < sourceCandidates.length; j++) {
+      const a = sourceCandidates[i];
+      const b = sourceCandidates[j];
+      const error =
+        Math.abs(a.t - targetRefs[0].t) +
+        Math.abs(b.t - targetRefs[1].t);
+
+      if (!best || error < best.error) {
+        best = { a, b, error };
+      }
+    }
+  }
+
+  if (!best) return remap;
+
+  remap.set(targetRefs[0].control, best.a.runtime);
+  remap.set(targetRefs[1].control, best.b.runtime);
+
+  remap.meta = {
+    lower: best.a.original,
+    upper: best.b.original,
+    lowerT: best.a.t,
+    upperT: best.b.t,
+    targetLowerT: targetRefs[0].t,
+    targetUpperT: targetRefs[1].t,
+    error: best.error
+  };
+
+  return remap;
+}
+
 function buildAutoRigProDeformPreviewMap() {
   if (!usesAutoRigProPipeline()) return [];
 
@@ -4754,6 +4892,9 @@ function buildAutoRigProDeformPreviewMap() {
     const previewOriginal = ARP_CONTROL_TO_DEFORM[targetOriginal];
     if (!previewOriginal) continue;
 
+    const ueSpineRemap = buildUeToArpSpineSourceRemap();
+    const remappedSource = ueSpineRemap.get(targetOriginal) || pair.source;
+
     const previewTarget =
       findBoneByOriginalExact(tgt, [previewOriginal]) ||
       findSemanticBone(tgt, previewOriginal);
@@ -4762,6 +4903,7 @@ function buildAutoRigProDeformPreviewMap() {
 
     pairs.push({
       ...pair,
+      source: remappedSource,
       target: previewTarget,
       targetSpec: previewOriginal,
       profile: 'auto-rig-pro-preview'
@@ -6210,8 +6352,8 @@ function applyRetarget() {
 
     if (usesUeToAutoRigProPipeline()) {
       log(
-        'UE → Auto-Rig Pro FK: c_spine_01 compensa el carry oculto de root-bend con midpoint LOCAL; ' +
-        'UE → ejes *_ref → matrix_basis c_*.'
+        'UE → Auto-Rig Pro FK: spine_01/spine_02 Source elegidos por altura REST de *_ref; ' +
+        'basis LOCAL UE → ejes *_ref → matrix_basis c_*.'
       );
     }
     state.ikOnlyClip = null;
@@ -8884,24 +9026,37 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
 
   const pairByControlOriginal = new Map();
   const entries = [];
+  const ueSpineRemap = buildUeToArpSpineSourceRemap();
+
+  if (ueSpineRemap.meta) {
+    log(
+      'UE -> ARP spine landmarks: ' +
+      ueSpineRemap.meta.lower + ' -> c_spine_01.x, ' +
+      ueSpineRemap.meta.upper + ' -> c_spine_02.x ' +
+      '(REST height match).'
+    );
+  }
 
   for (const pair of validMap()) {
     if (!String(pair.channels || 'ROT').toUpperCase().includes('ROT')) {
       continue;
     }
 
-    const sourceBone = src.bones.get(pair.source);
-    const sourceRest = src.rest.get(pair.source);
     const control = tgt.bones.get(pair.target);
     const controlRest = tgt.rest.get(pair.target);
 
-    if (!sourceBone || !sourceRest || !control || !controlRest) continue;
+    if (!control || !controlRest) continue;
 
     const controlOriginal = originalObjectName(control) || pair.target;
+    const sourceName = ueSpineRemap.get(controlOriginal) || pair.source;
+    const sourceBone = src.bones.get(sourceName);
+    const sourceRest = src.rest.get(sourceName);
+
+    if (!sourceBone || !sourceRest) continue;
 
     pairByControlOriginal.set(controlOriginal, {
       pair,
-      sourceName: pair.source,
+      sourceName,
       sourceBone,
       sourceRest,
       controlName: pair.target,
@@ -8946,19 +9101,6 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
     if (item.controlOriginal === 'c_root.x' && sourceRootName) {
       sourceParentName = sourceRootName;
     }
-
-    // ARP root/spine split:
-    // c_root.x and c_spine_01.x are sibling animator controls, but the
-    // ORIGINAL .blend rig still distributes part of the root bend into the
-    // torso through ARP constraints/helpers that are not present in FBX.
-    //
-    // The two measured extremes are:
-    //   pelvis -> spine_03  : under-corrects (torso folds forward)
-    //   root   -> spine_03  : over-corrects (torso reclines backward)
-    //
-    // Keep pelvis as the normal parent here and solve c_spine_01 with a
-    // calibrated midpoint between those two LOCAL bases during sampling.
-    const isArpLowerSpine = item.controlOriginal === 'c_spine_01.x';
 
     // Fallback only for a control outside the known anatomical table.
     if (!sourceParentName) {
@@ -9014,9 +9156,6 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
       sourceParentRest,
       sourceRestRelative,
       sourceRestRelativeInv: sourceRestRelative.clone().invert(),
-      isArpLowerSpine,
-      sourceRootName,
-      sourceRootRest: sourceRootName ? src.rest.get(sourceRootName) : null,
       refName,
       refOriginal,
       refRest,
@@ -9092,41 +9231,6 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
           .multiply(sourcePoseRelative)
           .normalize();
 
-        if (
-          entry.isArpLowerSpine &&
-          entry.sourceRootName &&
-          entry.sourceRootRest
-        ) {
-          const sourceRoot = src.bones.get(entry.sourceRootName);
-
-          if (sourceRoot) {
-            const rootWorld = sourceRoot
-              .getWorldQuaternion(new THREE.Quaternion())
-              .normalize();
-
-            const fullPoseRelative = rootWorld.clone()
-              .invert()
-              .multiply(childWorld)
-              .normalize();
-
-            const fullRestRelative = entry.sourceRootRest.worldQuat.clone()
-              .invert()
-              .multiply(entry.sourceRest.worldQuat)
-              .normalize();
-
-            const fullBasis = fullRestRelative.clone()
-              .invert()
-              .multiply(fullPoseRelative)
-              .normalize();
-
-            // ARP's hidden root-bend carry sits between the two FBX-visible
-            // extremes. 0.5 is not a generic retarget fudge: it represents
-            // the missing original-rig carry that the imported FBX cannot
-            // express. Slerp keeps the correction rotationally stable.
-            sourceBasis.slerp(fullBasis, 0.5).normalize();
-          }
-        }
-
         controlBasis.copy(entry.sourceToReference)
           .multiply(sourceBasis)
           .multiply(entry.sourceToReferenceInv)
@@ -9186,11 +9290,11 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
   }
 
   log(
-    'UE -> Auto-Rig Pro local-basis solver v7: ' +
+    'UE -> Auto-Rig Pro local-basis solver v8: ' +
     replacements.size +
     '/' +
     entries.length +
-    ' controles. UE local basis + ARP root-bend midpoint -> *_ref axes -> c_* matrix_basis.'
+    ' controles. UE local basis + spine landmarks por REST -> *_ref axes -> c_* matrix_basis.'
   );
 
   return new THREE.AnimationClip(
