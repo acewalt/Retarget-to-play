@@ -7919,7 +7919,15 @@ function applyRetarget() {
         : usesUeToAutoRigProPipeline()
           ? buildUeAutoRigProHelperBridgeAction(state.fkRawClip)
           : usesAutoRigProPipeline()
-            ? buildAutoRigProOriginalRigTransferClip(state.fkRawClip)
+            ? (
+                state.activePresetId === 'mixamo_to_arp'
+                  ? buildMixamoAutoRigProReferenceCopyBackClip(
+                      state.fkRawClip
+                    )
+                  : buildAutoRigProOriginalRigTransferClip(
+                      state.fkRawClip
+                    )
+              )
             : state.fkRawClip.clone();
 
     state.fkClip.name = 'Retargeted_FK';
@@ -7928,6 +7936,14 @@ function applyRetarget() {
       log(
         'UE → Auto-Rig Pro FK: Helper Bridge activo · Source WORLD → helpers independientes → ' +
         '*_ref local → matrix_basis c_*.'
+      );
+    } else if (
+      usesAutoRigProPipeline() &&
+      state.activePresetId === 'mixamo_to_arp'
+    ) {
+      log(
+        'Mixamo → Auto-Rig Pro FK export: *_ref preview correcto → ' +
+        'matrix_basis de controles c_* para el rig Blender original.'
       );
     }
     state.ikOnlyClip = null;
@@ -11524,6 +11540,236 @@ function buildUeAutoRigProLocalBasisAction(rawClip) {
   return new THREE.AnimationClip(
     'Retargeted_FK',
     rawClip.duration,
+    tracks
+  );
+}
+
+function buildMixamoAutoRigProReferenceCopyBackClip(rawControlClip) {
+  const tgt = state.target;
+  const refClip = state.deformPreviewClip;
+
+  if (
+    state.activePresetId !== 'mixamo_to_arp' ||
+    !rawControlClip ||
+    !refClip ||
+    !tgt.root
+  ) {
+    return rawControlClip?.clone?.() || rawControlClip;
+  }
+
+  // Source of truth for Mixamo -> ARP copy-back is the SAME clean *_ref
+  // animation used by the now-correct viewport preview.
+  //
+  // For every animator control:
+  //   1) read desired motion from its anatomical *_ref bone
+  //   2) compute matrix_basis against the logical *_ref parent
+  //   3) convert that basis from ref-local axes to c_*-local axes
+  //   4) store FBX local = controlRestLocal * matrix_basis
+  //
+  // This avoids deriving the original-rig Action from ARP's exported c_*
+  // carrier hierarchy, whose Blender constraints/helpers do not survive FBX.
+  const sourceTracks = rawControlClip.tracks.map(track => track.clone());
+  const entries = [];
+
+  const controlTrackByRuntime = new Map();
+  for (const track of sourceTracks) {
+    const parsed = parseTrackTarget(track.name);
+    if (parsed?.property === 'quaternion') {
+      controlTrackByRuntime.set(parsed.nodeName, track);
+    }
+  }
+
+  for (const [controlOriginal, refOriginal] of Object.entries(
+    AUTO_RIG_PRO_CONTROL_TO_REFERENCE
+  )) {
+    const controlName = findBoneByOriginalExact(tgt, [controlOriginal]);
+    const refName = findBoneByOriginalExact(tgt, [refOriginal]);
+
+    if (!controlName || !refName) continue;
+
+    const controlTrack = controlTrackByRuntime.get(controlName);
+    const controlRest = tgt.rest.get(controlName);
+    const refRest = tgt.rest.get(refName);
+
+    if (!controlTrack || !controlRest || !refRest) continue;
+
+    const logicalParentControlOriginal =
+      AUTO_RIG_PRO_LOGICAL_PARENT[controlOriginal] || '';
+
+    const logicalParentRefOriginal = logicalParentControlOriginal
+      ? AUTO_RIG_PRO_CONTROL_TO_REFERENCE[logicalParentControlOriginal] || ''
+      : '';
+
+    const parentRefName = logicalParentRefOriginal
+      ? findBoneByOriginalExact(tgt, [logicalParentRefOriginal])
+      : '';
+
+    const parentRefRest = parentRefName
+      ? tgt.rest.get(parentRefName)
+      : null;
+
+    const refRestRelative = parentRefRest
+      ? parentRefRest.worldQuat.clone()
+          .invert()
+          .multiply(refRest.worldQuat)
+          .normalize()
+      : refRest.worldQuat.clone().normalize();
+
+    // Coordinate conversion: ref local axes -> animator-control local axes.
+    const refToControl = controlRest.worldQuat.clone()
+      .invert()
+      .multiply(refRest.worldQuat)
+      .normalize();
+
+    entries.push({
+      controlOriginal,
+      controlName,
+      controlTrack,
+      controlRest,
+      refOriginal,
+      refName,
+      refRest,
+      parentRefName,
+      refRestRelativeInv: refRestRelative.clone().invert(),
+      refToControl,
+      refToControlInv: refToControl.clone().invert(),
+      values: [],
+      previous: null
+    });
+  }
+
+  if (!entries.length) {
+    log(
+      'Mixamo → ARP ref copy-back: no encontré controles/ref válidos; ' +
+      'uso fallback de carrier c_*.'
+    );
+    return buildAutoRigProOriginalRigTransferClip(rawControlClip);
+  }
+
+  const timeSet = new Set();
+  for (const entry of entries) {
+    for (const time of entry.controlTrack.times) {
+      timeSet.add(Number(time));
+    }
+  }
+  const times = [...timeSet].sort((a, b) => a - b);
+
+  restoreRest(tgt);
+  tgt.mixer?.stopAllAction();
+
+  // Animate ONLY the clean reference clip while solving the Action for the
+  // original ARP controls.
+  const mixer = new THREE.AnimationMixer(tgt.root);
+  const action = mixer.clipAction(refClip).play();
+
+  const refWorld = new THREE.Quaternion();
+  const parentRefWorld = new THREE.Quaternion();
+  const poseRelative = new THREE.Quaternion();
+  const refBasis = new THREE.Quaternion();
+  const controlBasis = new THREE.Quaternion();
+  const exportLocal = new THREE.Quaternion();
+
+  try {
+    for (const time of times) {
+      // Match the working CloudRig copy-back strategy: every sample begins
+      // from pristine REST before the mixer evaluates the desired pose.
+      restoreRest(tgt);
+      mixer.setTime(time);
+      updateSlotWorld(tgt);
+
+      for (const entry of entries) {
+        const refBone = tgt.bones.get(entry.refName);
+        if (!refBone) continue;
+
+        refBone.getWorldQuaternion(refWorld).normalize();
+
+        if (entry.parentRefName) {
+          const parentRefBone = tgt.bones.get(entry.parentRefName);
+          if (!parentRefBone) continue;
+
+          parentRefBone.getWorldQuaternion(parentRefWorld).normalize();
+
+          poseRelative.copy(parentRefWorld)
+            .invert()
+            .multiply(refWorld)
+            .normalize();
+        } else {
+          poseRelative.copy(refWorld);
+        }
+
+        // logicalPose = logicalRest * matrixBasis
+        refBasis.copy(entry.refRestRelativeInv)
+          .multiply(poseRelative)
+          .normalize();
+
+        // Same physical basis expressed in the c_* control's local axes.
+        controlBasis.copy(entry.refToControl)
+          .multiply(refBasis)
+          .multiply(entry.refToControlInv)
+          .normalize();
+
+        exportLocal.copy(entry.controlRest.quaternion)
+          .multiply(controlBasis)
+          .normalize();
+
+        if (
+          entry.previous &&
+          entry.previous.dot(exportLocal) < 0
+        ) {
+          exportLocal.x *= -1;
+          exportLocal.y *= -1;
+          exportLocal.z *= -1;
+          exportLocal.w *= -1;
+        }
+
+        entry.values.push(
+          exportLocal.x,
+          exportLocal.y,
+          exportLocal.z,
+          exportLocal.w
+        );
+
+        entry.previous = exportLocal.clone();
+      }
+    }
+  } finally {
+    action.stop();
+    mixer.stopAllAction();
+    restoreRest(tgt);
+  }
+
+  const replacements = new Map();
+
+  for (const entry of entries) {
+    if (entry.values.length !== times.length * 4) continue;
+
+    replacements.set(
+      entry.controlTrack.name,
+      new THREE.QuaternionKeyframeTrack(
+        entry.controlTrack.name,
+        times,
+        entry.values
+      )
+    );
+  }
+
+  const tracks = sourceTracks.map(
+    track => replacements.get(track.name) || track
+  );
+
+  log(
+    'Mixamo → ARP ref copy-back: ' +
+    replacements.size +
+    '/' +
+    entries.length +
+    ' controles reconstruidos directamente desde *_ref · ' +
+    times.length +
+    ' frames.'
+  );
+
+  return new THREE.AnimationClip(
+    'Retargeted_FK',
+    rawControlClip.duration,
     tracks
   );
 }
