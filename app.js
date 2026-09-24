@@ -124,6 +124,12 @@ const BLENDCAP_PRESET_REGISTRY = {
     sourceFamily: 'mixamo',
     targetFamily: 'ue'
   },
+  ue_to_mixamo: {
+    label: 'UE → Mixamo',
+    path: './presets/ue_to_mixamo.json',
+    sourceFamily: 'ue',
+    targetFamily: 'mixamo'
+  },
   ue_to_cloudrig: {
     label: 'UE → CloudRig / Sintel',
     path: './presets/ue_to_cloudrig.json',
