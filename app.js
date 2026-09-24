@@ -4698,6 +4698,7 @@ for (const side of ['l', 'r']) {
 function buildEmbeddedDeformPreviewMap(controlToDeform, profile) {
   const tgt = state.target;
   const pairs = [];
+  const ueSpineRemap = buildUeToArpSpineSourceRemap();
 
   for (const pair of validMap()) {
     const targetBone = tgt.bones.get(pair.target);
@@ -4892,7 +4893,6 @@ function buildAutoRigProDeformPreviewMap() {
     const previewOriginal = ARP_CONTROL_TO_DEFORM[targetOriginal];
     if (!previewOriginal) continue;
 
-    const ueSpineRemap = buildUeToArpSpineSourceRemap();
     const remappedSource = ueSpineRemap.get(targetOriginal) || pair.source;
 
     const previewTarget =
