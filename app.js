@@ -582,12 +582,12 @@ function installUeArpHelperBridge(helperClip, descriptors) {
     ? 1
     : Math.max(box.getSize(new THREE.Vector3()).length(), 0.25);
 
-  const radius = THREE.MathUtils.clamp(size * 0.006, 0.008, 0.035);
+  const radius = THREE.MathUtils.clamp(size * 0.012, 0.014, 0.055);
   const sphereGeometry = new THREE.SphereGeometry(radius, 10, 8);
   const sphereMaterial = new THREE.MeshBasicMaterial({
-    color: 0x4ea1ff,
+    color: 0x00e5ff,
     transparent: true,
-    opacity: 0.92,
+    opacity: 1,
     depthTest: false,
     depthWrite: false,
     toneMapped: false
@@ -623,9 +623,9 @@ function installUeArpHelperBridge(helperClip, descriptors) {
     );
 
     const material = new THREE.LineBasicMaterial({
-      color: 0x4ea1ff,
+      color: 0x00e5ff,
       transparent: true,
-      opacity: 0.72,
+      opacity: 0.95,
       depthTest: false,
       depthWrite: false
     });
@@ -9198,20 +9198,24 @@ function buildUeAutoRigProHelperBridgeAction(rawClip) {
   };
 
   let helperIndex = 0;
+  const ueSpineRemap = buildUeToArpSpineSourceRemap();
 
   for (const pair of validMap()) {
     if (!String(pair.channels || 'ROT').toUpperCase().includes('ROT')) {
       continue;
     }
 
-    const sourceBone = src.bones.get(pair.source);
-    const sourceRest = src.rest.get(pair.source);
     const control = tgt.bones.get(pair.target);
     const controlRest = tgt.rest.get(pair.target);
 
-    if (!sourceBone || !sourceRest || !control || !controlRest) continue;
+    if (!control || !controlRest) continue;
 
     const controlOriginal = originalObjectName(control) || pair.target;
+    const sourceName = ueSpineRemap.get(controlOriginal) || pair.source;
+    const sourceBone = src.bones.get(sourceName);
+    const sourceRest = src.rest.get(sourceName);
+
+    if (!sourceBone || !sourceRest) continue;
     const refOriginal =
       AUTO_RIG_PRO_CONTROL_TO_REFERENCE[controlOriginal] || '';
 
@@ -9230,7 +9234,7 @@ function buildUeAutoRigProHelperBridgeAction(rawClip) {
       .normalize();
 
     entries.push({
-      sourceName: pair.source,
+      sourceName,
       sourceRest,
       controlName: pair.target,
       controlOriginal,
@@ -9262,6 +9266,39 @@ function buildUeAutoRigProHelperBridgeAction(rawClip) {
   const entryByRef = new Map(
     entries.map(entry => [entry.refName, entry])
   );
+  const entryByControl = new Map(
+    entries.map(entry => [entry.controlOriginal, entry])
+  );
+
+  const childPreference = {
+    'c_root.x': ['c_spine_01.x'],
+    'c_spine_01.x': ['c_spine_02.x'],
+    'c_spine_02.x': ['c_neck.x', 'c_shoulder.l', 'c_shoulder.r'],
+    'c_neck.x': ['c_head.x'],
+    'c_shoulder.l': ['c_arm_fk.l'],
+    'c_arm_fk.l': ['c_forearm_fk.l'],
+    'c_forearm_fk.l': ['c_hand_fk.l'],
+    'c_shoulder.r': ['c_arm_fk.r'],
+    'c_arm_fk.r': ['c_forearm_fk.r'],
+    'c_forearm_fk.r': ['c_hand_fk.r'],
+    'c_thigh_fk.l': ['c_leg_fk.l'],
+    'c_leg_fk.l': ['c_foot_fk.l'],
+    'c_foot_fk.l': ['c_toes_fk.l'],
+    'c_thigh_fk.r': ['c_leg_fk.r'],
+    'c_leg_fk.r': ['c_foot_fk.r'],
+    'c_foot_fk.r': ['c_toes_fk.r'],
+    'c_hand_fk.l': ['c_middle1.l', 'c_index1.l'],
+    'c_hand_fk.r': ['c_middle1.r', 'c_index1.r']
+  };
+
+  for (const side of ['l', 'r']) {
+    for (const finger of ['thumb', 'index', 'middle', 'ring', 'pinky']) {
+      childPreference['c_' + finger + '1.' + side] =
+        ['c_' + finger + '2.' + side];
+      childPreference['c_' + finger + '2.' + side] =
+        ['c_' + finger + '3.' + side];
+    }
+  }
 
   for (const entry of entries) {
     let cursor = entry.parentRefName;
@@ -9270,9 +9307,106 @@ function buildUeAutoRigProHelperBridgeAction(rawClip) {
       const parentEntry = entryByRef.get(cursor);
       if (parentEntry) {
         entry.parentHelperName = parentEntry.helperName;
+        entry.parentBridgeRefName = parentEntry.refName;
         break;
       }
       cursor = nearestRefParent(cursor);
+    }
+
+    const preferredChildren =
+      childPreference[entry.controlOriginal] || [];
+
+    let childEntry = preferredChildren
+      .map(name => entryByControl.get(name))
+      .find(Boolean) || null;
+
+    if (!childEntry) {
+      childEntry = entries.find(candidate =>
+        AUTO_RIG_PRO_LOGICAL_PARENT[candidate.controlOriginal] ===
+        entry.controlOriginal
+      ) || null;
+    }
+
+    entry.childSourceName = childEntry?.sourceName || '';
+  }
+
+  const sourcePelvisName =
+    findBoneByOriginalExact(src, ['pelvis']) ||
+    findSemanticBone(src, 'pelvis');
+
+  const sourceNeckName =
+    findBoneByOriginalExact(src, ['neck_02', 'neck_01']) ||
+    findSemanticBone(src, 'neck');
+
+  const sourceShoulderLName =
+    findBoneByOriginalExact(src, ['clavicle_l']) ||
+    findSemanticBone(src, 'clavicle_l');
+
+  const sourceShoulderRName =
+    findBoneByOriginalExact(src, ['clavicle_r']) ||
+    findSemanticBone(src, 'clavicle_r');
+
+  const restPos = name => name ? src.rest.get(name)?.worldPos || null : null;
+
+  const restPelvis = restPos(sourcePelvisName);
+  const restNeck = restPos(sourceNeckName);
+  const restShoulderL = restPos(sourceShoulderLName);
+  const restShoulderR = restPos(sourceShoulderRName);
+
+  const restBodyForward = new THREE.Vector3(0, 0, 1);
+
+  if (restPelvis && restNeck && restShoulderL && restShoulderR) {
+    const up = restNeck.clone().sub(restPelvis).normalize();
+    const right = restShoulderR.clone().sub(restShoulderL).normalize();
+    const forward = right.clone().cross(up);
+
+    if (forward.lengthSq() > 1e-8) {
+      restBodyForward.copy(forward.normalize());
+    }
+  }
+
+  const makeAimFrame = (origin, child, forwardHint, out) => {
+    const y = child.clone().sub(origin);
+    if (y.lengthSq() < 1e-10) return null;
+    y.normalize();
+
+    const z = forwardHint.clone()
+      .addScaledVector(y, -forwardHint.dot(y));
+
+    if (z.lengthSq() < 1e-8) {
+      z.set(0, 0, 1).addScaledVector(y, -y.z);
+    }
+    if (z.lengthSq() < 1e-8) {
+      z.set(1, 0, 0).addScaledVector(y, -y.x);
+    }
+    if (z.lengthSq() < 1e-8) return null;
+
+    z.normalize();
+
+    const x = y.clone().cross(z).normalize();
+    z.copy(x).cross(y).normalize();
+
+    const matrix = new THREE.Matrix4().makeBasis(x, y, z);
+    return out.setFromRotationMatrix(matrix).normalize();
+  };
+
+  for (const entry of entries) {
+    const childRest = entry.childSourceName
+      ? src.rest.get(entry.childSourceName)
+      : null;
+
+    if (childRest) {
+      entry.helperRestFrame = makeAimFrame(
+        entry.sourceRest.worldPos,
+        childRest.worldPos,
+        restBodyForward,
+        new THREE.Quaternion()
+      );
+      entry.helperRestFrameInv =
+        entry.helperRestFrame?.clone().invert() || null;
+    } else {
+      entry.helperRestFrame = null;
+      entry.helperRestFrameInv = null;
     }
   }
 
@@ -9300,6 +9434,13 @@ function buildUeAutoRigProHelperBridgeAction(rawClip) {
   const sourcePoseQ = new THREE.Quaternion();
   const worldDeltaQ = new THREE.Quaternion();
   const helperWorldQ = new THREE.Quaternion();
+  const poseFrameQ = new THREE.Quaternion();
+  const poseBodyForward = new THREE.Vector3();
+  const posePelvis = new THREE.Vector3();
+  const poseNeck = new THREE.Vector3();
+  const poseShoulderL = new THREE.Vector3();
+  const poseShoulderR = new THREE.Vector3();
+  const childPoseP = new THREE.Vector3();
   const parentHelperQ = new THREE.Quaternion();
   const restRelativeQ = new THREE.Quaternion();
   const poseRelativeQ = new THREE.Quaternion();
@@ -9317,22 +9458,86 @@ function buildUeAutoRigProHelperBridgeAction(rawClip) {
 
       helperWorldByRef.clear();
 
-      // Stage A: every helper independently follows its Source bone in WORLD.
+      // Stage A v2: helpers are reconstructed from JOINT POSITIONS,
+      // not from Source bone-local axes. This makes the proxy independent of
+      // Unreal/ARP bone roll and local-axis conventions.
+      poseBodyForward.copy(restBodyForward);
+
+      const pelvisBone = sourcePelvisName
+        ? src.bones.get(sourcePelvisName)
+        : null;
+      const neckBone = sourceNeckName
+        ? src.bones.get(sourceNeckName)
+        : null;
+      const shoulderLBone = sourceShoulderLName
+        ? src.bones.get(sourceShoulderLName)
+        : null;
+      const shoulderRBone = sourceShoulderRName
+        ? src.bones.get(sourceShoulderRName)
+        : null;
+
+      if (pelvisBone && neckBone && shoulderLBone && shoulderRBone) {
+        pelvisBone.getWorldPosition(posePelvis);
+        neckBone.getWorldPosition(poseNeck);
+        shoulderLBone.getWorldPosition(poseShoulderL);
+        shoulderRBone.getWorldPosition(poseShoulderR);
+
+        const up = poseNeck.clone().sub(posePelvis).normalize();
+        const right = poseShoulderR.clone().sub(poseShoulderL).normalize();
+        const forward = right.clone().cross(up);
+
+        if (forward.lengthSq() > 1e-8) {
+          poseBodyForward.copy(forward.normalize());
+        }
+      }
+
       for (const entry of entries) {
         const sourceBone = src.bones.get(entry.sourceName);
         if (!sourceBone) continue;
 
-        sourceBone.getWorldQuaternion(sourcePoseQ).normalize();
-
-        worldDeltaQ.copy(sourcePoseQ)
-          .multiply(entry.sourceRest.worldQuat.clone().invert())
-          .normalize();
-
-        helperWorldQ.copy(worldDeltaQ)
-          .multiply(entry.refRest.worldQuat)
-          .normalize();
-
         sourceBone.getWorldPosition(sourcePoseP);
+
+        let usedPositionFrame = false;
+
+        if (entry.childSourceName && entry.helperRestFrameInv) {
+          const childBone = src.bones.get(entry.childSourceName);
+
+          if (childBone) {
+            childBone.getWorldPosition(childPoseP);
+
+            const frame = makeAimFrame(
+              sourcePoseP,
+              childPoseP,
+              poseBodyForward,
+              poseFrameQ
+            );
+
+            if (frame) {
+              worldDeltaQ.copy(frame)
+                .multiply(entry.helperRestFrameInv)
+                .normalize();
+
+              helperWorldQ.copy(worldDeltaQ)
+                .multiply(entry.refRest.worldQuat)
+                .normalize();
+
+              usedPositionFrame = true;
+            }
+          }
+        }
+
+        // End bones / degenerate chains fall back to Source WORLD delta.
+        if (!usedPositionFrame) {
+          sourceBone.getWorldQuaternion(sourcePoseQ).normalize();
+
+          worldDeltaQ.copy(sourcePoseQ)
+            .multiply(entry.sourceRest.worldQuat.clone().invert())
+            .normalize();
+
+          helperWorldQ.copy(worldDeltaQ)
+            .multiply(entry.refRest.worldQuat)
+            .normalize();
+        }
 
         helperWorldP.copy(entry.refRest.worldPos)
           .add(
@@ -9363,12 +9568,12 @@ function buildUeAutoRigProHelperBridgeAction(rawClip) {
         const helperPose = helperWorldByRef.get(entry.refName);
         if (!helperPose) continue;
 
-        const parentRest = entry.parentRefName
-          ? tgt.rest.get(entry.parentRefName)
+        const parentRest = entry.parentBridgeRefName
+          ? tgt.rest.get(entry.parentBridgeRefName)
           : null;
 
-        const parentHelperPose = entry.parentRefName
-          ? helperWorldByRef.get(entry.parentRefName)
+        const parentHelperPose = entry.parentBridgeRefName
+          ? helperWorldByRef.get(entry.parentBridgeRefName)
           : null;
 
         if (parentRest && parentHelperPose) {
@@ -9500,11 +9705,11 @@ function buildUeAutoRigProHelperBridgeAction(rawClip) {
   );
 
   log(
-    'UE -> ARP Helper Bridge v1: ' +
+    'UE -> ARP Helper Bridge v2 (joint-position tracking): ' +
     controlReplacement.size +
     '/' +
     entries.length +
-    ' controles. SOURCE WORLD -> helper proxy -> *_ref local -> c_* basis.'
+    ' controles. JOINT POSITIONS -> aim helpers -> *_ref local -> c_* basis.'
   );
 
   return new THREE.AnimationClip(
