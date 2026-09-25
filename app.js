@@ -11974,60 +11974,134 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
     return rawControlClip?.clone?.() || rawControlClip;
   }
 
-  // v18: preserve the working rotation copy-back, but solve ROOT POSITIONS
-  // as matrix_basis against the ORIGINAL ARP functional hierarchy.
+  // v19 — helper-aware ORIGINAL ARP copy-back.
   //
-  // Previous attempts baked c_root/c_spine position directly in the FBX
-  // carrier hierarchy. That is wrong for copy-back: Blender's original ARP
-  // evaluates a different constraint/parent graph. Rotations were already
-  // compensated for this; translations were not.
+  // The previous solvers collapsed ARP controls into a simplified logical
+  // hierarchy. The real ARP hierarchy has important carrier/helper bones:
   //
-  // Desired world pose comes from the same clean *_ref skeleton used by the
-  // correct viewport preview:
-  //   root_ref.x      -> c_root.x      (lower body)
-  //   spine_01_ref.x  -> c_spine_01.x  (upper body)
+  // c_root.x
+  //   -> root.x -> c_thigh_b.* -> c_thigh_fk.*
   //
-  // c_pos keeps only horizontal trajectory. c_root.x and c_spine_01.x get
-  // their FULL position basis solved relative to c_root_master.x.
+  // c_leg_fk.*
+  //   -> foot_fk_scale_fix.* -> c_foot_fk.*
+  //
+  // c_forearm_fk.*
+  //   -> forearm_fk.* -> hand_fk_scale_fix.* -> c_hand_fk.*
+  //
+  // Therefore a control's matrix_basis must be solved against the pose its
+  // REAL carrier chain would have at basis=identity, not against a collapsed
+  // direct parent. This is exactly the class of problem already solved for
+  // Rigify's MCH/helper chains.
+  //
+  // Desired pose still comes from the clean *_ref preview skeleton.
 
-  const rotationBase = buildMixamoAutoRigProCleanCopyBackClip(rawControlClip);
+  const controlToRef = new Map();
 
-  const cPosName = findBoneByOriginalExact(tgt, ['c_pos']);
+  for (const [controlOriginal, refOriginal] of Object.entries(
+    AUTO_RIG_PRO_CONTROL_TO_REFERENCE
+  )) {
+    const controlName = findBoneByOriginalExact(tgt, [controlOriginal]);
+    const refName = findBoneByOriginalExact(tgt, [refOriginal]);
+    if (controlName && refName) controlToRef.set(controlName, refName);
+  }
+
+  if (!controlToRef.size) {
+    return rawControlClip.clone();
+  }
+
   const rootMasterName = findBoneByOriginalExact(tgt, ['c_root_master.x']);
-  const cRootName = findBoneByOriginalExact(tgt, ['c_root.x']);
-  const cSpineName = findBoneByOriginalExact(tgt, ['c_spine_01.x']);
-  const rootRefName = findBoneByOriginalExact(tgt, ['root_ref.x']);
-  const spineRefName = findBoneByOriginalExact(tgt, ['spine_01_ref.x']);
+  const cPosName = findBoneByOriginalExact(tgt, ['c_pos']);
 
-  if (
-    !cPosName || !rootMasterName || !cRootName || !cSpineName ||
-    !rootRefName || !spineRefName
-  ) {
-    log('Mixamo → ARP EXPORT v18: faltan controles/ref raíz; uso copy-back base.');
-    return rotationBase;
+  const controlNames = new Set(controlToRef.keys());
+  const entries = [];
+
+  restoreRest(tgt);
+  updateSlotWorld(tgt);
+
+  function restWorldMatrixFor(name) {
+    const rest = tgt.rest.get(name);
+    if (!rest) return null;
+    return new THREE.Matrix4().compose(
+      rest.worldPos.clone(),
+      rest.worldQuat.clone(),
+      rest.worldScale?.clone?.() || new THREE.Vector3(1,1,1)
+    );
   }
 
-  const cPos = tgt.bones.get(cPosName);
-  const rootMaster = tgt.bones.get(rootMasterName);
-  const cRoot = tgt.bones.get(cRootName);
-  const cSpine = tgt.bones.get(cSpineName);
-  const rootRef = tgt.bones.get(rootRefName);
-  const spineRef = tgt.bones.get(spineRefName);
-
-  const cPosRest = tgt.rest.get(cPosName);
-  const rootMasterRest = tgt.rest.get(rootMasterName);
-  const cRootRest = tgt.rest.get(cRootName);
-  const cSpineRest = tgt.rest.get(cSpineName);
-  const rootRefRest = tgt.rest.get(rootRefName);
-  const spineRefRest = tgt.rest.get(spineRefName);
-
-  if (
-    !cPos || !rootMaster || !cRoot || !cSpine || !rootRef || !spineRef ||
-    !cPosRest || !rootMasterRest || !cRootRest || !cSpineRest ||
-    !rootRefRest || !spineRefRest
-  ) {
-    return rotationBase;
+  function restLocalMatrixFor(name) {
+    const rest = tgt.rest.get(name);
+    if (!rest) return null;
+    return new THREE.Matrix4().compose(
+      rest.position.clone(),
+      rest.quaternion.clone(),
+      rest.scale.clone()
+    );
   }
+
+  // Find the closest animated control ancestor through the REAL FBX hierarchy.
+  // This preserves root.x/c_thigh_b, foot_fk_scale_fix, hand_fk_scale_fix, etc.
+  function nearestControlAncestor(controlName) {
+    let bone = tgt.bones.get(controlName)?.parent || null;
+
+    while (bone) {
+      if (bone.isBone && controlNames.has(bone.name)) return bone.name;
+
+      const original = originalObjectName(bone);
+      if (
+        bone.isBone &&
+        rootMasterName &&
+        (bone.name === rootMasterName || original === 'c_root_master.x')
+      ) {
+        return rootMasterName;
+      }
+
+      bone = bone.parent;
+    }
+
+    return null;
+  }
+
+  for (const [controlName, refName] of controlToRef) {
+    const control = tgt.bones.get(controlName);
+    const ref = tgt.bones.get(refName);
+    const controlRest = tgt.rest.get(controlName);
+    const refRest = tgt.rest.get(refName);
+
+    if (!control || !ref || !controlRest || !refRest) continue;
+
+    const ancestorName = nearestControlAncestor(controlName);
+    const controlRestWorld = restWorldMatrixFor(controlName);
+    const rawRestLocal = restLocalMatrixFor(controlName);
+    const refRestWorld = restWorldMatrixFor(refName);
+
+    if (!controlRestWorld || !rawRestLocal || !refRestWorld) continue;
+
+    const ancestorRestWorld = ancestorName
+      ? restWorldMatrixFor(ancestorName)
+      : null;
+
+    entries.push({
+      controlName,
+      controlOriginal: originalObjectName(control) || controlName,
+      control,
+      refName,
+      ref,
+      refRestWorldInv: refRestWorld.clone().invert(),
+      controlRest,
+      controlRestWorld,
+      rawRestLocal,
+      ancestorName,
+      ancestorRestWorld,
+      desiredWorld: new THREE.Matrix4(),
+      exportP: [],
+      exportQ: [],
+      previousQ: null
+    });
+  }
+
+  if (!entries.length) return rawControlClip.clone();
+
+  const entryByName = new Map(entries.map(e => [e.controlName, e]));
 
   const fps = Math.max(1, Math.min(120, Number($('fps').value) || 30));
   const frameCount = Math.max(2, Math.ceil(refClip.duration * fps) + 1);
@@ -12036,77 +12110,19 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
     (_, i) => Math.min(refClip.duration, i / fps)
   );
 
-  const restWorld = rest => new THREE.Matrix4().compose(
-    rest.worldPos.clone(),
-    rest.worldQuat.clone(),
-    rest.worldScale?.clone?.() || new THREE.Vector3(1, 1, 1)
-  );
-
-  const restLocal = rest => new THREE.Matrix4().compose(
-    rest.position.clone(),
-    rest.quaternion.clone(),
-    rest.scale.clone()
-  );
-
-  const rootMasterRestWorld = restWorld(rootMasterRest);
-  const cRootRestWorld = restWorld(cRootRest);
-  const cSpineRestWorld = restWorld(cSpineRest);
-  const rootRefRestWorldInv = restWorld(rootRefRest).invert();
-  const spineRefRestWorldInv = restWorld(spineRefRest).invert();
-
-  const cRootLogicalRest = rootMasterRestWorld.clone()
-    .invert()
-    .multiply(cRootRestWorld);
-  const cSpineLogicalRest = rootMasterRestWorld.clone()
-    .invert()
-    .multiply(cSpineRestWorld);
-
-  const cRootRawRestLocal = restLocal(cRootRest);
-  const cSpineRawRestLocal = restLocal(cSpineRest);
-
-  const rootPosValues = [];
-  const spinePosValues = [];
-
-  // Horizontal global trajectory is solved separately in world space.
-  const hipsName =
-    findSemanticBone(state.source, 'Hips') ||
-    findBoneByOriginalExact(state.source, [
-      'mixamorig1:Hips',
-      'mixamorig:Hips',
-      'Hips'
-    ]);
-
-  let cPosHorizontal = null;
-  if (hipsName) {
-    cPosHorizontal = bakeRetarget(
-      [{
-        source: hipsName,
-        sourceSpec: 'Hips',
-        target: cPosName,
-        targetSpec: 'c_pos',
-        channels: 'LOC',
-        axes: 'HORIZONTAL',
-        influence: 1,
-        profile: 'mixamo-arp-export-global'
-      }],
-      'Retargeted_ARP_Global',
-      { rootMotion: true }
-    );
-  }
-
   const refMixer = new THREE.AnimationMixer(tgt.root);
   const refAction = refMixer.clipAction(refClip).play();
 
   const refDelta = new THREE.Matrix4();
-  const desiredRootWorld = new THREE.Matrix4();
-  const desiredSpineWorld = new THREE.Matrix4();
-  const parentPoseInv = new THREE.Matrix4();
-  const logicalPose = new THREE.Matrix4();
+  const ancestorPose = new THREE.Matrix4();
+  const carrierIdentityWorld = new THREE.Matrix4();
+  const carrierDelta = new THREE.Matrix4();
   const basis = new THREE.Matrix4();
   const exportLocal = new THREE.Matrix4();
+
   const p = new THREE.Vector3();
   const q = new THREE.Quaternion();
-  const sc = new THREE.Vector3();
+  const s = new THREE.Vector3();
 
   try {
     for (const time of times) {
@@ -12114,32 +12130,78 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
       refMixer.setTime(Number(time));
       updateSlotWorld(tgt);
 
-      // The original ARP parent frame for both branches is root_master.
-      // root_master itself stays neutral; c_pos supplies global horizontal
-      // trajectory when the Action is evaluated in Blender.
-      const parentPoseWorld = rootMasterRestWorld;
+      // Desired WORLD pose directly from the clean anatomical refs.
+      for (const entry of entries) {
+        refDelta.copy(entry.ref.matrixWorld)
+          .multiply(entry.refRestWorldInv);
 
-      refDelta.copy(rootRef.matrixWorld).multiply(rootRefRestWorldInv);
-      desiredRootWorld.copy(refDelta).multiply(cRootRestWorld);
+        entry.desiredWorld.copy(refDelta)
+          .multiply(entry.controlRestWorld);
+      }
 
-      refDelta.copy(spineRef.matrixWorld).multiply(spineRefRestWorldInv);
-      desiredSpineWorld.copy(refDelta).multiply(cSpineRestWorld);
+      // Encode matrix_basis against the REAL carrier chain.
+      // Parent-first entries are not guaranteed, so resolve recursively.
+      const poseCache = new Map();
 
-      // LOWER branch: matrix_basis = inv(logicalRest) * logicalPose.
-      parentPoseInv.copy(parentPoseWorld).invert();
-      logicalPose.copy(parentPoseInv).multiply(desiredRootWorld);
-      basis.copy(cRootLogicalRest).invert().multiply(logicalPose);
-      exportLocal.copy(cRootRawRestLocal).multiply(basis);
-      exportLocal.decompose(p, q, sc);
-      rootPosValues.push(p.x, p.y, p.z);
+      function desiredAncestorPose(name) {
+        if (!name) return null;
+        if (poseCache.has(name)) return poseCache.get(name);
 
-      // UPPER branch: same operation, independent sibling below root_master.
-      parentPoseInv.copy(parentPoseWorld).invert();
-      logicalPose.copy(parentPoseInv).multiply(desiredSpineWorld);
-      basis.copy(cSpineLogicalRest).invert().multiply(logicalPose);
-      exportLocal.copy(cSpineRawRestLocal).multiply(basis);
-      exportLocal.decompose(p, q, sc);
-      spinePosValues.push(p.x, p.y, p.z);
+        const e = entryByName.get(name);
+        if (e) {
+          poseCache.set(name, e.desiredWorld.clone());
+          return poseCache.get(name);
+        }
+
+        const rest = restWorldMatrixFor(name);
+        if (rest) {
+          poseCache.set(name, rest);
+          return rest;
+        }
+
+        return null;
+      }
+
+      for (const entry of entries) {
+        let identityWorld = entry.controlRestWorld;
+
+        if (entry.ancestorName && entry.ancestorRestWorld) {
+          const parentPose = desiredAncestorPose(entry.ancestorName);
+
+          if (parentPose) {
+            // Carry every static/helper bone between ancestor and control by
+            // the ancestor's animated world delta.
+            carrierDelta.copy(parentPose)
+              .multiply(entry.ancestorRestWorld.clone().invert());
+
+            carrierIdentityWorld.copy(carrierDelta)
+              .multiply(entry.controlRestWorld);
+
+            identityWorld = carrierIdentityWorld;
+          }
+        }
+
+        basis.copy(identityWorld)
+          .invert()
+          .multiply(entry.desiredWorld);
+
+        exportLocal.copy(entry.rawRestLocal)
+          .multiply(basis);
+
+        exportLocal.decompose(p, q, s);
+        q.normalize();
+
+        if (entry.previousQ && entry.previousQ.dot(q) < 0) {
+          q.x *= -1;
+          q.y *= -1;
+          q.z *= -1;
+          q.w *= -1;
+        }
+
+        entry.exportP.push(p.x, p.y, p.z);
+        entry.exportQ.push(q.x, q.y, q.z, q.w);
+        entry.previousQ = q.clone();
+      }
     }
   } finally {
     refAction.stop();
@@ -12147,55 +12209,56 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
     restoreRest(tgt);
   }
 
-  const replacePos = new Set([cPosName, cRootName, cSpineName]);
-
-  const tracks = rotationBase.tracks
+  // Preserve only the global c_pos trajectory from the raw retarget.
+  // All c_* control rotations are rebuilt helper-aware below.
+  const tracks = rawControlClip.tracks
     .filter(track => {
       const parsed = parseTrackTarget(track.name);
-      return !(
-        parsed?.property === 'position' &&
-        replacePos.has(parsed.nodeName)
-      );
+      if (!parsed) return true;
+
+      if (controlNames.has(parsed.nodeName)) {
+        if (parsed.property === 'quaternion') return false;
+        if (parsed.property === 'position') return false;
+      }
+
+      return true;
     })
     .map(track => track.clone());
 
-  if (cPosHorizontal) {
-    for (const track of cPosHorizontal.tracks) {
-      const parsed = parseTrackTarget(track.name);
-      if (parsed?.nodeName === cPosName && parsed.property === 'position') {
-        tracks.push(track.clone());
-      }
+  for (const entry of entries) {
+    if (entry.exportQ.length === times.length * 4) {
+      tracks.push(
+        new THREE.QuaternionKeyframeTrack(
+          entry.controlName + '.quaternion',
+          times,
+          entry.exportQ
+        )
+      );
+    }
+
+    // Only export control location when the solved matrix_basis actually moves
+    // that control. This is required for ARP root/body branch controls but is
+    // harmless for FK limbs whose locations remain at rest.
+    if (entry.exportP.length === times.length * 3) {
+      tracks.push(
+        new THREE.VectorKeyframeTrack(
+          entry.controlName + '.position',
+          times,
+          entry.exportP
+        )
+      );
     }
   }
 
-  if (rootPosValues.length === times.length * 3) {
-    tracks.push(
-      new THREE.VectorKeyframeTrack(
-        cRootName + '.position',
-        times,
-        rootPosValues
-      )
-    );
-  }
-
-  if (spinePosValues.length === times.length * 3) {
-    tracks.push(
-      new THREE.VectorKeyframeTrack(
-        cSpineName + '.position',
-        times,
-        spinePosValues
-      )
-    );
-  }
-
   log(
-    'Mixamo → ARP EXPORT v18: posiciones c_root/c_spine recodificadas como ' +
-    'matrix_basis del rig ARP original; c_pos sólo trayectoria horizontal.'
+    'Mixamo → ARP EXPORT v19 helper-aware: matrix_basis resuelto contra la ' +
+    'jerarquía FBX real (c_thigh_b / foot_fk_scale_fix / hand_fk_scale_fix), ' +
+    entries.length + ' controles.'
   );
 
   return new THREE.AnimationClip(
     'Retargeted_FK',
-    rotationBase.duration,
+    refClip.duration,
     tracks
   );
 }
