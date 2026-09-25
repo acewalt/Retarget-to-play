@@ -11981,13 +11981,22 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
   const rotationBase = buildMixamoAutoRigProCleanCopyBackClip(rawControlClip);
 
   const rootMotionMap = [
+    // Same split that already works in Mixamo → Rigify:
+    //   Hips LOC XY -> root
+    //   Hips LOC Z  -> torso
+    //
+    // ARP equivalent:
+    //   c_pos        = global/root trajectory
+    //   c_spine_01.x = upper/body-height carrier
+    //
+    // c_root.x receives Hips ROT only. Its location stays at REST so the
+    // lower-body branch (and therefore the feet) is not lifted globally.
     { source: hipsName, sourceSpec: 'Hips', target: cPosName, targetSpec: 'c_pos', channels: 'LOC', axes: 'HORIZONTAL', influence: 1, profile: 'mixamo-arp-export-root' },
-    { source: hipsName, sourceSpec: 'Hips', target: cRootName, targetSpec: 'c_root.x', channels: 'LOC', axes: 'VERTICAL', influence: 1, profile: 'mixamo-arp-export-lower' },
     { source: hipsName, sourceSpec: 'Hips', target: cSpine01Name, targetSpec: 'c_spine_01.x', channels: 'LOC', axes: 'VERTICAL', influence: 1, profile: 'mixamo-arp-export-upper' }
   ];
 
   const locationClip = bakeRetarget(rootMotionMap, 'Retargeted_ARP_ExportRootMotion', { rootMotion: true });
-  const replacePositionNames = new Set([cPosName, cRootName, cSpine01Name]);
+  const replacePositionNames = new Set([cPosName, cSpine01Name]);
 
   const tracks = rotationBase.tracks.filter(track => {
     const parsed = parseTrackTarget(track.name);
@@ -11999,7 +12008,7 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
     if (parsed?.property === 'position' && replacePositionNames.has(parsed.nodeName)) tracks.push(track.clone());
   }
 
-  log('Mixamo → ARP EXPORT v15: root motion horneado en WORLD; Hips horizontal→c_pos, vertical→c_root+c_spine_01.');
+  log('Mixamo → ARP EXPORT v16 Rigify-parity: Hips horizontal→c_pos · vertical→c_spine_01 · c_root LOC permanece REST para no levantar los pies.');
   return new THREE.AnimationClip('Retargeted_FK', rotationBase.duration, tracks);
 }
 function buildMixamoAutoRigProReferenceCopyBackClip(
