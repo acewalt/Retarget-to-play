@@ -11991,8 +11991,8 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
     //
     // c_root.x receives Hips ROT only. Its location stays at REST so the
     // lower-body branch (and therefore the feet) is not lifted globally.
-    { source: hipsName, sourceSpec: 'Hips', target: cPosName, targetSpec: 'c_pos', channels: 'LOC', axes: 'HORIZONTAL', influence: 1, profile: 'mixamo-arp-export-root' },
-    { source: hipsName, sourceSpec: 'Hips', target: cSpine01Name, targetSpec: 'c_spine_01.x', channels: 'LOC', axes: 'VERTICAL', influence: 1, profile: 'mixamo-arp-export-upper' }
+    { source: hipsName, sourceSpec: 'Hips', target: cPosName, targetSpec: 'c_pos', channels: 'LOC', axes: 'XY', influence: 1, profile: 'mixamo-arp-export-root' },
+    { source: hipsName, sourceSpec: 'Hips', target: cSpine01Name, targetSpec: 'c_spine_01.x', channels: 'LOC', axes: 'Z', influence: 1, profile: 'mixamo-arp-export-upper' }
   ];
 
   const locationClip = bakeRetarget(rootMotionMap, 'Retargeted_ARP_ExportRootMotion', { rootMotion: true });
@@ -12008,7 +12008,7 @@ function buildMixamoAutoRigProOriginalRigExportClip(rawControlClip) {
     if (parsed?.property === 'position' && replacePositionNames.has(parsed.nodeName)) tracks.push(track.clone());
   }
 
-  log('Mixamo → ARP EXPORT v16 Rigify-parity: Hips horizontal→c_pos · vertical→c_spine_01 · c_root LOC permanece REST para no levantar los pies.');
+  log('Mixamo → ARP EXPORT v17 Rigify-exact axes: Hips LOC XY→c_pos · Hips LOC Z→c_spine_01 · c_root LOC neutral.');
   return new THREE.AnimationClip('Retargeted_FK', rotationBase.duration, tracks);
 }
 function buildMixamoAutoRigProReferenceCopyBackClip(
